@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package zb.rpc;
+
+import "google/protobuf/empty.proto";
+
+option cc_generic_services = true;
+
+enum StatusCode {
+  STATUS_OK = 0;
+  STATUS_INVALID_ARGUMENT = 1;
+  STATUS_NOT_FOUND = 2;
+  STATUS_IO_ERROR = 3;
+  STATUS_INTERNAL_ERROR = 4;
+}
+
+message Status {
+  StatusCode code = 1;
+  string message = 2;
+}
+
+message WriteChunkRequest {
+  string disk_id = 1;
+  string chunk_id = 2;
+  uint64 offset = 3;
+  bytes data = 4;
+}
+
+message WriteChunkReply {
+  Status status = 1;
+  uint64 bytes = 2;
+}
+
+message ReadChunkRequest {
+  string disk_id = 1;
+  string chunk_id = 2;
+  uint64 offset = 3;
+  uint64 size = 4;
+}
+
+message ReadChunkReply {
+  Status status = 1;
+  uint64 bytes = 2;
+  bytes data = 3;
+}
+
+message DiskReport {
+  string id = 1;
+  string mount_point = 2;
+  uint64 capacity_bytes = 3;
+  uint64 free_bytes = 4;
+  bool is_healthy = 5;
+}
+
+message DiskReportReply {
+  Status status = 1;
+  repeated DiskReport reports = 2;
+}
+
+service RealNodeService {
+  rpc WriteChunk(WriteChunkRequest) returns (WriteChunkReply);
+  rpc ReadChunk(ReadChunkRequest) returns (ReadChunkReply);
+  rpc GetDiskReport(google.protobuf.Empty) returns (DiskReportReply);
+}

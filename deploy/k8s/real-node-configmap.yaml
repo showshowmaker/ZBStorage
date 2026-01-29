@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: real-node-config
+data:
+  real_node.conf: |
+    # Real node config
+    # Use either ZB_DISKS or DATA_ROOT
+    ZB_DISKS=disk-01:/storage/ssd1;disk-02:/storage/hdd1
+    # DATA_ROOT=/storage

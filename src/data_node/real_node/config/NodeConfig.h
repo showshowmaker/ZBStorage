@@ -11,11 +11,11 @@ struct DiskSpec {
 };
 
 struct NodeConfig {
-    // Raw environment values for traceability.
+    // Raw values loaded from config file.
     std::string disks_env;
     std::string data_root;
 
-    static NodeConfig LoadFromEnv();
+    static NodeConfig LoadFromFile(const std::string& path, std::string* error);
     std::vector<DiskSpec> ParseDisksEnv(std::string* error) const;
 };
 

@@ -1,0 +1,8 @@
+# Real node config example
+# Use either ZB_DISKS or DATA_ROOT
+
+# Explicit disk mapping
+ZB_DISKS=disk-01:/data/ssd1;disk-02:/data/hdd1
+
+# Or auto scan by root directory (comment out ZB_DISKS above)
+# DATA_ROOT=/mnt/disks

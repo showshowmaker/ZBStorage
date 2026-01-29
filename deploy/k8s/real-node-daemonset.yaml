@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: real-node
+spec:
+  selector:
+    matchLabels:
+      app: real-node
+  template:
+    metadata:
+      labels:
+        app: real-node
+    spec:
+      hostNetwork: true
+      containers:
+      - name: real-node
+        image: your-registry/real-node:latest
+        args: ["--config=/etc/real_node/real_node.conf", "--port=8000"]
+        volumeMounts:
+        - name: real-node-config
+          mountPath: /etc/real_node
+        - name: host-disks
+          mountPath: /storage
+          mountPropagation: HostToContainer
+        ports:
+        - containerPort: 8000
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+      volumes:
+      - name: real-node-config
+        configMap:
+          name: real-node-config
+      - name: host-disks
+        hostPath:
+          path: /mnt/disks
+          type: Directory

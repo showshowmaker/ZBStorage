@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
+#include <fstream>
 
 namespace zb::real_node {
 
@@ -20,14 +20,40 @@ std::string Trim(std::string value) {
 
 } // namespace
 
-NodeConfig NodeConfig::LoadFromEnv() {
+NodeConfig NodeConfig::LoadFromFile(const std::string& path, std::string* error) {
     NodeConfig cfg;
-    if (const char* disks = std::getenv("ZB_DISKS")) {
-        cfg.disks_env = disks;
+    std::ifstream input(path);
+    if (!input) {
+        if (error) {
+            *error = "Failed to open config file: " + path;
+        }
+        return cfg;
     }
-    if (const char* data_root = std::getenv("DATA_ROOT")) {
-        cfg.data_root = data_root;
+
+    std::string line;
+    size_t line_no = 0;
+    while (std::getline(input, line)) {
+        ++line_no;
+        std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+        size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            if (error) {
+                *error = "Invalid config line " + std::to_string(line_no) + ": " + line;
+            }
+            return {};
+        }
+        std::string key = Trim(trimmed.substr(0, eq));
+        std::string value = Trim(trimmed.substr(eq + 1));
+        if (key == "ZB_DISKS") {
+            cfg.disks_env = value;
+        } else if (key == "DATA_ROOT") {
+            cfg.data_root = value;
+        }
     }
+
     return cfg;
 }
 
