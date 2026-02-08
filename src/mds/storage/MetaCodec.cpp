@@ -18,17 +18,17 @@ bool MetaCodec::DecodeUInt64(const std::string& data, uint64_t* value) {
     return true;
 }
 
-std::string MetaCodec::EncodeFileMeta(const zb::rpc::FileMeta& meta) {
+std::string MetaCodec::EncodeInodeAttr(const zb::rpc::InodeAttr& attr) {
     std::string out;
-    meta.SerializeToString(&out);
+    attr.SerializeToString(&out);
     return out;
 }
 
-bool MetaCodec::DecodeFileMeta(const std::string& data, zb::rpc::FileMeta* meta) {
-    if (!meta) {
+bool MetaCodec::DecodeInodeAttr(const std::string& data, zb::rpc::InodeAttr* attr) {
+    if (!attr) {
         return false;
     }
-    return meta->ParseFromString(data);
+    return attr->ParseFromString(data);
 }
 
 std::string MetaCodec::EncodeChunkMeta(const zb::rpc::ChunkMeta& meta) {

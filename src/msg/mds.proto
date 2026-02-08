@@ -9,12 +9,40 @@ enum MdsStatusCode {
   MDS_INVALID_ARGUMENT = 1;
   MDS_NOT_FOUND = 2;
   MDS_ALREADY_EXISTS = 3;
-  MDS_INTERNAL_ERROR = 4;
+  MDS_NOT_EMPTY = 4;
+  MDS_INTERNAL_ERROR = 5;
 }
 
 message MdsStatus {
   MdsStatusCode code = 1;
   string message = 2;
+}
+
+enum InodeType {
+  INODE_FILE = 0;
+  INODE_DIR = 1;
+}
+
+message InodeAttr {
+  uint64 inode_id = 1;
+  InodeType type = 2;
+  uint32 mode = 3;
+  uint32 uid = 4;
+  uint32 gid = 5;
+  uint64 size = 6;
+  uint64 atime = 7;
+  uint64 mtime = 8;
+  uint64 ctime = 9;
+  uint32 nlink = 10;
+  uint64 chunk_size = 11;
+  uint32 replica = 12;
+  uint64 version = 13;
+}
+
+message Dentry {
+  string name = 1;
+  uint64 inode_id = 2;
+  InodeType type = 3;
 }
 
 message ReplicaLocation {
@@ -31,33 +59,127 @@ message ChunkMeta {
   repeated ReplicaLocation replicas = 2;
 }
 
-message FileMeta {
+message FileLayout {
+  uint64 inode_id = 1;
+  uint64 chunk_size = 2;
+  repeated ChunkMeta chunks = 3;
+}
+
+message LookupRequest {
   string path = 1;
-  uint64 inode_id = 2;
+}
+
+message LookupReply {
+  MdsStatus status = 1;
+  InodeAttr attr = 2;
+}
+
+message GetattrRequest {
+  uint64 inode_id = 1;
+}
+
+message GetattrReply {
+  MdsStatus status = 1;
+  InodeAttr attr = 2;
+}
+
+message OpenRequest {
+  string path = 1;
+  uint32 flags = 2;
+}
+
+message OpenReply {
+  MdsStatus status = 1;
+  uint64 handle_id = 2;
+  InodeAttr attr = 3;
+}
+
+message CloseRequest {
+  uint64 handle_id = 1;
+}
+
+message CloseReply {
+  MdsStatus status = 1;
+}
+
+message CreateRequest {
+  string path = 1;
+  uint32 mode = 2;
+  uint32 uid = 3;
+  uint32 gid = 4;
+  uint32 replica = 5;
+  uint64 chunk_size = 6;
+}
+
+message CreateReply {
+  MdsStatus status = 1;
+  InodeAttr attr = 2;
+}
+
+message MkdirRequest {
+  string path = 1;
+  uint32 mode = 2;
+  uint32 uid = 3;
+  uint32 gid = 4;
+}
+
+message MkdirReply {
+  MdsStatus status = 1;
+  InodeAttr attr = 2;
+}
+
+message ReaddirRequest {
+  string path = 1;
+}
+
+message ReaddirReply {
+  MdsStatus status = 1;
+  repeated Dentry entries = 2;
+}
+
+message RenameRequest {
+  string old_path = 1;
+  string new_path = 2;
+}
+
+message RenameReply {
+  MdsStatus status = 1;
+}
+
+message UnlinkRequest {
+  string path = 1;
+}
+
+message UnlinkReply {
+  MdsStatus status = 1;
+}
+
+message RmdirRequest {
+  string path = 1;
+}
+
+message RmdirReply {
+  MdsStatus status = 1;
+}
+
+message AllocateWriteRequest {
+  uint64 inode_id = 1;
+  uint64 offset = 2;
   uint64 size = 3;
-  uint64 chunk_size = 4;
-  repeated ChunkMeta chunks = 5;
 }
 
-message CreateFileRequest {
-  string path = 1;
-  uint64 size = 2;
-  uint32 replica = 3;
-  uint64 chunk_size = 4;
-}
-
-message CreateFileReply {
+message AllocateWriteReply {
   MdsStatus status = 1;
-  FileMeta meta = 2;
+  FileLayout layout = 2;
 }
 
-message GetFileMetaRequest {
-  string path = 1;
+message CommitWriteRequest {
+  uint64 inode_id = 1;
+  uint64 new_size = 2;
 }
 
-message GetFileMetaReply {
+message CommitWriteReply {
   MdsStatus status = 1;
-  FileMeta meta = 2;
 }
 
 message DiskStat {
@@ -78,7 +200,17 @@ message ReportNodeStatusReply {
 }
 
 service MdsService {
-  rpc CreateFile(CreateFileRequest) returns (CreateFileReply);
-  rpc GetFileMeta(GetFileMetaRequest) returns (GetFileMetaReply);
+  rpc Lookup(LookupRequest) returns (LookupReply);
+  rpc Getattr(GetattrRequest) returns (GetattrReply);
+  rpc Open(OpenRequest) returns (OpenReply);
+  rpc Close(CloseRequest) returns (CloseReply);
+  rpc Create(CreateRequest) returns (CreateReply);
+  rpc Mkdir(MkdirRequest) returns (MkdirReply);
+  rpc Readdir(ReaddirRequest) returns (ReaddirReply);
+  rpc Rename(RenameRequest) returns (RenameReply);
+  rpc Unlink(UnlinkRequest) returns (UnlinkReply);
+  rpc Rmdir(RmdirRequest) returns (RmdirReply);
+  rpc AllocateWrite(AllocateWriteRequest) returns (AllocateWriteReply);
+  rpc CommitWrite(CommitWriteRequest) returns (CommitWriteReply);
   rpc ReportNodeStatus(ReportNodeStatusRequest) returns (ReportNodeStatusReply);
 }
