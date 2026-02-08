@@ -25,7 +25,9 @@ for cfg in "${CONFIG_MP1}" "${CONFIG_MP2}" "${CONFIG_MP3}"; do
     exit 1
   fi
   # Basic path existence check (best-effort)
-  paths=$(cut -d= -f2- "${cfg}" | tr ';' '\n' | cut -d: -f2-)
+  zb_line=$(grep -E '^ZB_DISKS=' "${cfg}" | head -n1 || true)
+  zb_value=${zb_line#ZB_DISKS=}
+  paths=$(echo "${zb_value}" | tr ';' '\n' | cut -d: -f2-)
   for p in ${paths}; do
     if [[ ! -d "${p}" ]]; then
       echo "Warning: path does not exist: ${p}" >&2
