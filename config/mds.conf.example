@@ -1,0 +1,11 @@
+# MDS config example
+
+MDS_DB_PATH=/tmp/zb_mds_rocks
+CHUNK_SIZE=4194304
+REPLICA=2
+
+# Node list: node_id@address
+NODES=node-01@127.0.0.1:19080;node-02@127.0.0.1:19081;node-03@127.0.0.1:19082
+
+# Disk list per node: node_id:disk1,disk2,disk3
+DISKS=node-01:disk-01,disk-02,disk-03;node-02:disk-01,disk-02,disk-03;node-03:disk-01,disk-02,disk-03

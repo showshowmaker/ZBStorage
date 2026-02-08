@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package zb.rpc;
+
+option cc_generic_services = true;
+
+enum MdsStatusCode {
+  MDS_OK = 0;
+  MDS_INVALID_ARGUMENT = 1;
+  MDS_NOT_FOUND = 2;
+  MDS_ALREADY_EXISTS = 3;
+  MDS_INTERNAL_ERROR = 4;
+}
+
+message MdsStatus {
+  MdsStatusCode code = 1;
+  string message = 2;
+}
+
+message ReplicaLocation {
+  string node_id = 1;
+  string node_address = 2;
+  string disk_id = 3;
+  string chunk_id = 4;
+  uint64 size = 5;
+  uint32 checksum = 6;
+}
+
+message ChunkMeta {
+  uint32 index = 1;
+  repeated ReplicaLocation replicas = 2;
+}
+
+message FileMeta {
+  string path = 1;
+  uint64 inode_id = 2;
+  uint64 size = 3;
+  uint64 chunk_size = 4;
+  repeated ChunkMeta chunks = 5;
+}
+
+message CreateFileRequest {
+  string path = 1;
+  uint64 size = 2;
+  uint32 replica = 3;
+  uint64 chunk_size = 4;
+}
+
+message CreateFileReply {
+  MdsStatus status = 1;
+  FileMeta meta = 2;
+}
+
+message GetFileMetaRequest {
+  string path = 1;
+}
+
+message GetFileMetaReply {
+  MdsStatus status = 1;
+  FileMeta meta = 2;
+}
+
+message DiskStat {
+  string disk_id = 1;
+  uint64 capacity_bytes = 2;
+  uint64 free_bytes = 3;
+  bool is_healthy = 4;
+}
+
+message ReportNodeStatusRequest {
+  string node_id = 1;
+  string address = 2;
+  repeated DiskStat disks = 3;
+}
+
+message ReportNodeStatusReply {
+  MdsStatus status = 1;
+}
+
+service MdsService {
+  rpc CreateFile(CreateFileRequest) returns (CreateFileReply);
+  rpc GetFileMeta(GetFileMetaRequest) returns (GetFileMetaReply);
+  rpc ReportNodeStatus(ReportNodeStatusRequest) returns (ReportNodeStatusReply);
+}

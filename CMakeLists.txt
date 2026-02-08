@@ -16,14 +16,42 @@ find_package(Protobuf REQUIRED)
 find_package(GFLAGS REQUIRED)
 find_package(Threads REQUIRED)
 
-set(PROTO_FILE ${CMAKE_CURRENT_SOURCE_DIR}/src/msg/real_node.proto)
+set(ROCKSDB_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rocksdb")
+if(NOT EXISTS "${ROCKSDB_ROOT}/CMakeLists.txt")
+    message(FATAL_ERROR "Bundled RocksDB not found. Please clone into third_party/rocksdb.")
+endif()
+
+set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ROCKSDB_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ROCKSDB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ROCKSDB_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(ROCKSDB_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+
+add_subdirectory(${ROCKSDB_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/third_party/rocksdb EXCLUDE_FROM_ALL)
+
+set(ROCKSDB_TARGET "")
+if(TARGET rocksdb)
+    set(ROCKSDB_TARGET rocksdb)
+elseif(TARGET rocksdb-static)
+    set(ROCKSDB_TARGET rocksdb-static)
+elseif(TARGET rocksdb-shared)
+    set(ROCKSDB_TARGET rocksdb-shared)
+endif()
+if(ROCKSDB_TARGET STREQUAL "")
+    message(FATAL_ERROR "Failed to resolve RocksDB target from bundled build")
+endif()
+
+set(PROTO_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/msg/real_node.proto
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/msg/mds.proto
+)
 set(PROTOBUF_IMPORT_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src/msg ${Protobuf_INCLUDE_DIRS})
 
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILE})
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILES})
 
-add_library(real_node_proto ${PROTO_SRCS} ${PROTO_HDRS})
-target_include_directories(real_node_proto PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(real_node_proto PUBLIC ${Protobuf_LIBRARIES})
+add_library(zb_proto ${PROTO_SRCS} ${PROTO_HDRS})
+target_include_directories(zb_proto PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(zb_proto PUBLIC ${Protobuf_LIBRARIES})
 
 set(REAL_NODE_SOURCES
     src/data_node/real_node/config/NodeConfig.cpp
@@ -46,7 +74,7 @@ target_include_directories(real_node_server
 
 target_link_libraries(real_node_server
     PRIVATE
-        real_node_proto
+        zb_proto
         brpc-static
         ${GFLAGS_LIBRARY}
         ${CMAKE_THREAD_LIBS_INIT}
@@ -69,7 +97,7 @@ target_include_directories(real_node_client
 )
 target_link_libraries(real_node_client
     PRIVATE
-        real_node_proto
+        zb_proto
         brpc-static
         ${GFLAGS_LIBRARY}
         ${CMAKE_THREAD_LIBS_INIT}
@@ -90,11 +118,40 @@ target_include_directories(real_node_multi_test
 )
 target_link_libraries(real_node_multi_test
     PRIVATE
-        real_node_proto
+        zb_proto
         brpc-static
         ${GFLAGS_LIBRARY}
         ${CMAKE_THREAD_LIBS_INIT}
 )
 if(BRPC_DYNAMIC_LIB)
     target_link_libraries(real_node_multi_test PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
+
+add_executable(mds_server
+    src/mds/config/MdsConfig.cpp
+    src/mds/storage/MetaCodec.cpp
+    src/mds/storage/RocksMetaStore.cpp
+    src/mds/allocator/NodeStateCache.cpp
+    src/mds/allocator/ChunkAllocator.cpp
+    src/mds/service/MdsServiceImpl.cpp
+    src/mds/server/mds_server.cpp
+)
+target_include_directories(mds_server
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${ROCKSDB_ROOT}/include
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(mds_server
+    PRIVATE
+        zb_proto
+        brpc-static
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+        ${ROCKSDB_TARGET}
+)
+if(BRPC_DYNAMIC_LIB)
+    target_link_libraries(mds_server PRIVATE ${BRPC_DYNAMIC_LIB})
 endif()
