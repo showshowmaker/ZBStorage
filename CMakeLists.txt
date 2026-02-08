@@ -77,3 +77,24 @@ target_link_libraries(real_node_client
 if(BRPC_DYNAMIC_LIB)
     target_link_libraries(real_node_client PRIVATE ${BRPC_DYNAMIC_LIB})
 endif()
+
+add_executable(real_node_multi_test
+    src/client/test/real_node_multi_test.cpp
+)
+target_include_directories(real_node_multi_test
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(real_node_multi_test
+    PRIVATE
+        real_node_proto
+        brpc-static
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+)
+if(BRPC_DYNAMIC_LIB)
+    target_link_libraries(real_node_multi_test PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
