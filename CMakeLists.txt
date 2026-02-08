@@ -40,6 +40,11 @@ endif()
 if(ROCKSDB_TARGET STREQUAL "")
     message(FATAL_ERROR "Failed to resolve RocksDB target from bundled build")
 endif()
+set_target_properties(${ROCKSDB_TARGET} PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
 
 set(PROTO_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/msg/real_node.proto
@@ -135,6 +140,11 @@ add_executable(mds_server
     src/mds/allocator/ChunkAllocator.cpp
     src/mds/service/MdsServiceImpl.cpp
     src/mds/server/mds_server.cpp
+)
+set_target_properties(mds_server PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
 )
 target_include_directories(mds_server
     PRIVATE
