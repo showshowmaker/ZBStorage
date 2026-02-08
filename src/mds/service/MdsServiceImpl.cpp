@@ -671,6 +671,59 @@ void MdsServiceImpl::AllocateWrite(google::protobuf::RpcController* cntl_base,
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
+void MdsServiceImpl::GetLayout(google::protobuf::RpcController* cntl_base,
+                               const zb::rpc::GetLayoutRequest* request,
+                               zb::rpc::GetLayoutReply* response,
+                               google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+
+    if (!store_ || !request || !response) {
+        FillStatus(response ? response->mutable_status() : nullptr,
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "Service not initialized");
+        return;
+    }
+
+    if (request->inode_id() == 0 || request->size() == 0) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, "invalid inode or size");
+        return;
+    }
+
+    std::string error;
+    zb::rpc::InodeAttr attr;
+    if (!GetInode(request->inode_id(), &attr, &error)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_NOT_FOUND, "inode not found");
+        return;
+    }
+
+    uint64_t chunk_size = attr.chunk_size() ? attr.chunk_size() : default_chunk_size_;
+    uint64_t start = request->offset() / chunk_size;
+    uint64_t end = (request->offset() + request->size() - 1) / chunk_size;
+
+    zb::rpc::FileLayout* layout = response->mutable_layout();
+    layout->set_inode_id(attr.inode_id());
+    layout->set_chunk_size(chunk_size);
+
+    for (uint64_t index = start; index <= end; ++index) {
+        error.clear();
+        std::string chunk_data;
+        zb::rpc::ChunkMeta chunk_meta;
+        if (store_->Get(ChunkKey(attr.inode_id(), static_cast<uint32_t>(index)), &chunk_data, &error)) {
+            if (!MetaCodec::DecodeChunkMeta(chunk_data, &chunk_meta)) {
+                FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "invalid chunk meta");
+                return;
+            }
+            *layout->add_chunks() = chunk_meta;
+        } else if (!error.empty()) {
+            FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+            return;
+        }
+    }
+
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
 void MdsServiceImpl::CommitWrite(google::protobuf::RpcController* cntl_base,
                                  const zb::rpc::CommitWriteRequest* request,
                                  zb::rpc::CommitWriteReply* response,
@@ -697,9 +750,7 @@ void MdsServiceImpl::CommitWrite(google::protobuf::RpcController* cntl_base,
         return;
     }
 
-    if (request->new_size() > attr.size()) {
-        attr.set_size(request->new_size());
-    }
+    attr.set_size(request->new_size());
     attr.set_mtime(NowSeconds());
     if (!PutInode(attr.inode_id(), attr, &error)) {
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);

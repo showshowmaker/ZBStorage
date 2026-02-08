@@ -69,6 +69,11 @@ public:
                        zb::rpc::AllocateWriteReply* response,
                        google::protobuf::Closure* done) override;
 
+    void GetLayout(google::protobuf::RpcController* cntl_base,
+                   const zb::rpc::GetLayoutRequest* request,
+                   zb::rpc::GetLayoutReply* response,
+                   google::protobuf::Closure* done) override;
+
     void CommitWrite(google::protobuf::RpcController* cntl_base,
                      const zb::rpc::CommitWriteRequest* request,
                      zb::rpc::CommitWriteReply* response,

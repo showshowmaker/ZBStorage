@@ -173,6 +173,17 @@ message AllocateWriteReply {
   FileLayout layout = 2;
 }
 
+message GetLayoutRequest {
+  uint64 inode_id = 1;
+  uint64 offset = 2;
+  uint64 size = 3;
+}
+
+message GetLayoutReply {
+  MdsStatus status = 1;
+  FileLayout layout = 2;
+}
+
 message CommitWriteRequest {
   uint64 inode_id = 1;
   uint64 new_size = 2;
@@ -211,6 +222,7 @@ service MdsService {
   rpc Unlink(UnlinkRequest) returns (UnlinkReply);
   rpc Rmdir(RmdirRequest) returns (RmdirReply);
   rpc AllocateWrite(AllocateWriteRequest) returns (AllocateWriteReply);
+  rpc GetLayout(GetLayoutRequest) returns (GetLayoutReply);
   rpc CommitWrite(CommitWriteRequest) returns (CommitWriteReply);
   rpc ReportNodeStatus(ReportNodeStatusRequest) returns (ReportNodeStatusReply);
 }

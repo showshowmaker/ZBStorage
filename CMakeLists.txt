@@ -15,6 +15,10 @@ add_subdirectory(third_party/brpc)
 find_package(Protobuf REQUIRED)
 find_package(GFLAGS REQUIRED)
 find_package(Threads REQUIRED)
+if(UNIX)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FUSE3 REQUIRED fuse3)
+endif()
 
 set(ROCKSDB_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rocksdb")
 if(NOT EXISTS "${ROCKSDB_ROOT}/CMakeLists.txt")
@@ -164,4 +168,32 @@ target_link_libraries(mds_server
 )
 if(BRPC_DYNAMIC_LIB)
     target_link_libraries(mds_server PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
+
+if(UNIX)
+    add_executable(zb_fuse_client
+        src/client/fuse/zb_fuse_client.cpp
+    )
+    target_include_directories(zb_fuse_client
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+            ${GFLAGS_INCLUDE_PATH}
+            ${FUSE3_INCLUDE_DIRS}
+            ${CMAKE_CURRENT_BINARY_DIR}
+    )
+    target_compile_options(zb_fuse_client PRIVATE ${FUSE3_CFLAGS_OTHER})
+    target_link_directories(zb_fuse_client PRIVATE ${FUSE3_LIBRARY_DIRS})
+    target_compile_definitions(zb_fuse_client PRIVATE FUSE_USE_VERSION=35)
+    target_link_libraries(zb_fuse_client
+        PRIVATE
+            zb_proto
+            brpc-static
+            ${GFLAGS_LIBRARY}
+            ${CMAKE_THREAD_LIBS_INIT}
+            ${FUSE3_LIBRARIES}
+    )
+    if(BRPC_DYNAMIC_LIB)
+        target_link_libraries(zb_fuse_client PRIVATE ${BRPC_DYNAMIC_LIB})
+    endif()
 endif()
