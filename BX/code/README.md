@@ -79,3 +79,30 @@ Validation example:
 ## Bench Script
 
 See `scripts/run_bench.sh` for batch runs that produce report-ready CSV.
+
+## Reliable Large-Load Perf Suite
+
+Use `scripts/run_perf_suite.sh` to run `v0/v1/v2/v3` repeatedly under large load and auto-generate reports.
+
+```bash
+cd BX/code
+chmod +x scripts/run_perf_suite.sh
+./scripts/run_perf_suite.sh
+```
+
+Default profile:
+
+- multiple warmup runs + measured runs (`RUNS=7`)
+- large generated dataset (`TOTAL_BYTES=4GB`, `FILE_COUNT=2048`)
+- datasets `A,B,C`
+- auto outputs:
+  - `out/perf_<timestamp>/raw_runs.csv`
+  - `out/perf_<timestamp>/summary_stats.csv`
+  - `out/perf_<timestamp>/report_overview.md`
+  - `out/perf_<timestamp>/report_v0.md` / `report_v1.md` / `report_v2.md` / `report_v3.md`
+
+You can override parameters via env vars:
+
+```bash
+RUNS=10 TOTAL_BYTES=8GB FILE_COUNT=4096 DATASETS=A,B,C NUM_SHARDS=64 ./scripts/run_perf_suite.sh
+```
