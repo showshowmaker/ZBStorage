@@ -17,8 +17,6 @@ public:
                        std::vector<zb::rpc::ReplicaLocation>* out);
 
 private:
-    static std::string PickDisk(NodeInfo* node);
-
     NodeStateCache* cache_{};
 };
 

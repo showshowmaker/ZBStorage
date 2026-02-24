@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package zb.rpc;
+
+option cc_generic_services = true;
+
+enum SchedulerStatusCode {
+  SCHED_OK = 0;
+  SCHED_INVALID_ARGUMENT = 1;
+  SCHED_NOT_FOUND = 2;
+  SCHED_ALREADY_EXISTS = 3;
+  SCHED_INTERNAL_ERROR = 4;
+}
+
+message SchedulerStatus {
+  SchedulerStatusCode code = 1;
+  string message = 2;
+}
+
+enum NodeType {
+  NODE_REAL = 0;
+  NODE_VIRTUAL_POOL = 1;
+  NODE_OPTICAL = 2;
+}
+
+enum NodeHealthState {
+  NODE_HEALTH_HEALTHY = 0;
+  NODE_HEALTH_SUSPECT = 1;
+  NODE_HEALTH_DEAD = 2;
+}
+
+enum NodeAdminState {
+  NODE_ADMIN_ENABLED = 0;
+  NODE_ADMIN_DRAINING = 1;
+  NODE_ADMIN_DISABLED = 2;
+}
+
+enum NodePowerState {
+  NODE_POWER_UNKNOWN = 0;
+  NODE_POWER_ON = 1;
+  NODE_POWER_OFF = 2;
+  NODE_POWER_STARTING = 3;
+  NODE_POWER_STOPPING = 4;
+}
+
+enum NodeRole {
+  NODE_ROLE_UNKNOWN = 0;
+  NODE_ROLE_PRIMARY = 1;
+  NODE_ROLE_SECONDARY = 2;
+}
+
+enum NodeOperationType {
+  NODE_OP_START = 0;
+  NODE_OP_STOP = 1;
+  NODE_OP_REBOOT = 2;
+}
+
+enum NodeOperationStatus {
+  NODE_OP_PENDING = 0;
+  NODE_OP_RUNNING = 1;
+  NODE_OP_SUCCEEDED = 2;
+  NODE_OP_FAILED = 3;
+}
+
+message DiskHeartbeat {
+  string disk_id = 1;
+  uint64 capacity_bytes = 2;
+  uint64 free_bytes = 3;
+  bool is_healthy = 4;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  NodeType node_type = 2;
+  string address = 3;
+  uint32 weight = 4;
+  uint32 virtual_node_count = 5;
+  uint64 report_ts_ms = 6;
+  repeated DiskHeartbeat disks = 7;
+  string group_id = 8;
+  NodeRole role = 9;
+  string peer_node_id = 10;
+  string peer_address = 11;
+  uint64 applied_lsn = 12;
+}
+
+message HeartbeatReply {
+  SchedulerStatus status = 1;
+  uint64 generation = 2;
+  NodeRole assigned_role = 3;
+  uint64 epoch = 4;
+  string group_id = 5;
+  string primary_node_id = 6;
+  string primary_address = 7;
+  string secondary_node_id = 8;
+  string secondary_address = 9;
+}
+
+message NodeDiskView {
+  string disk_id = 1;
+  uint64 capacity_bytes = 2;
+  uint64 free_bytes = 3;
+  bool is_healthy = 4;
+  uint64 last_update_ms = 5;
+}
+
+message NodeView {
+  string node_id = 1;
+  NodeType node_type = 2;
+  string address = 3;
+  uint32 weight = 4;
+  uint32 virtual_node_count = 5;
+  NodeHealthState health_state = 6;
+  NodeAdminState admin_state = 7;
+  NodePowerState power_state = 8;
+  NodeAdminState desired_admin_state = 9;
+  NodePowerState desired_power_state = 10;
+  uint64 last_heartbeat_ms = 11;
+  repeated NodeDiskView disks = 12;
+  string group_id = 13;
+  NodeRole role = 14;
+  uint64 epoch = 15;
+  uint64 applied_lsn = 16;
+  string peer_node_id = 17;
+  string peer_address = 18;
+  bool sync_ready = 19;
+}
+
+message GetClusterViewRequest {
+  uint64 min_generation = 1;
+}
+
+message GetClusterViewReply {
+  SchedulerStatus status = 1;
+  uint64 generation = 2;
+  repeated NodeView nodes = 3;
+}
+
+message SetNodeAdminStateRequest {
+  string node_id = 1;
+  NodeAdminState admin_state = 2;
+}
+
+message SetNodeAdminStateReply {
+  SchedulerStatus status = 1;
+  uint64 generation = 2;
+}
+
+message StartNodeRequest {
+  string node_id = 1;
+  string reason = 2;
+}
+
+message StopNodeRequest {
+  string node_id = 1;
+  bool force = 2;
+  string reason = 3;
+}
+
+message RebootNodeRequest {
+  string node_id = 1;
+  string reason = 2;
+}
+
+message NodeOperation {
+  string operation_id = 1;
+  string node_id = 2;
+  NodeOperationType operation_type = 3;
+  NodeOperationStatus status = 4;
+  string message = 5;
+  uint64 start_ts_ms = 6;
+  uint64 finish_ts_ms = 7;
+}
+
+message NodeOperationReply {
+  SchedulerStatus status = 1;
+  NodeOperation operation = 2;
+}
+
+message GetOperationStatusRequest {
+  string operation_id = 1;
+}
+
+service SchedulerService {
+  rpc ReportHeartbeat(HeartbeatRequest) returns (HeartbeatReply);
+  rpc GetClusterView(GetClusterViewRequest) returns (GetClusterViewReply);
+  rpc SetNodeAdminState(SetNodeAdminStateRequest) returns (SetNodeAdminStateReply);
+  rpc StartNode(StartNodeRequest) returns (NodeOperationReply);
+  rpc StopNode(StopNodeRequest) returns (NodeOperationReply);
+  rpc RebootNode(RebootNodeRequest) returns (NodeOperationReply);
+  rpc GetOperationStatus(GetOperationStatusRequest) returns (NodeOperationReply);
+}

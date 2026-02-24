@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <stdexcept>
 
 namespace zb::real_node {
 
@@ -16,6 +17,25 @@ std::string Trim(std::string value) {
         return !std::isspace(ch);
     }).base(), value.end());
     return value;
+}
+
+bool ParseBool(const std::string& value, bool* out) {
+    if (!out) {
+        return false;
+    }
+    std::string lowered = value;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on") {
+        *out = true;
+        return true;
+    }
+    if (lowered == "0" || lowered == "false" || lowered == "no" || lowered == "off") {
+        *out = false;
+        return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -51,7 +71,59 @@ NodeConfig NodeConfig::LoadFromFile(const std::string& path, std::string* error)
             cfg.disks_env = value;
         } else if (key == "DATA_ROOT") {
             cfg.data_root = value;
+        } else if (key == "NODE_ID") {
+            cfg.node_id = value;
+        } else if (key == "NODE_ADDRESS") {
+            cfg.node_address = value;
+        } else if (key == "SCHEDULER_ADDR") {
+            cfg.scheduler_addr = value;
+        } else if (key == "GROUP_ID") {
+            cfg.group_id = value;
+        } else if (key == "NODE_ROLE") {
+            cfg.node_role = value;
+        } else if (key == "PEER_NODE_ID") {
+            cfg.peer_node_id = value;
+        } else if (key == "PEER_ADDRESS") {
+            cfg.peer_address = value;
+        } else if (key == "REPLICATION_ENABLED") {
+            if (!ParseBool(value, &cfg.replication_enabled)) {
+                if (error) {
+                    *error = "Invalid REPLICATION_ENABLED at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "REPLICATION_TIMEOUT_MS") {
+            try {
+                cfg.replication_timeout_ms = static_cast<uint32_t>(std::stoul(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid REPLICATION_TIMEOUT_MS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "NODE_WEIGHT") {
+            try {
+                cfg.node_weight = static_cast<uint32_t>(std::stoul(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid NODE_WEIGHT at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "HEARTBEAT_INTERVAL_MS") {
+            try {
+                cfg.heartbeat_interval_ms = static_cast<uint32_t>(std::stoul(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid HEARTBEAT_INTERVAL_MS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
         }
+    }
+
+    if (cfg.node_role.empty()) {
+        cfg.node_role = "PRIMARY";
     }
 
     return cfg;

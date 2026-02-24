@@ -19,6 +19,11 @@ public:
                    zb::rpc::ReadChunkReply* response,
                    google::protobuf::Closure* done) override;
 
+    void DeleteChunk(google::protobuf::RpcController* cntl_base,
+                     const zb::rpc::DeleteChunkRequest* request,
+                     zb::rpc::DeleteChunkReply* response,
+                     google::protobuf::Closure* done) override;
+
     void GetDiskReport(google::protobuf::RpcController* cntl_base,
                        const google::protobuf::Empty* request,
                        zb::rpc::DiskReportReply* response,

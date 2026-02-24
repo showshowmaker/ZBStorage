@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: virtual-node-config
+data:
+  virtual_node.conf: |
+    NODE_ID=vpool
+    NODE_ADDRESS=virtual-node-pool:29080
+    GROUP_ID=vpool-rg
+    NODE_ROLE=PRIMARY
+    REPLICATION_ENABLED=false
+    REPLICATION_TIMEOUT_MS=2000
+    NODE_WEIGHT=8
+    VIRTUAL_NODE_COUNT=100000
+    SCHEDULER_ADDR=scheduler:9100
+    HEARTBEAT_INTERVAL_MS=2000
+    DISKS=disk-01,disk-02,disk-03
+    READ_MBPS=800
+    WRITE_MBPS=600
+    READ_BASE_LATENCY_MS=2
+    WRITE_BASE_LATENCY_MS=3
+    JITTER_MS=1
+    DISK_CAPACITY_BYTES=1099511627776
+    MOUNT_POINT_PREFIX=/virtual

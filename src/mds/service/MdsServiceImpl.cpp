@@ -620,8 +620,9 @@ void MdsServiceImpl::AllocateWrite(google::protobuf::RpcController* cntl_base,
     uint64_t chunk_size = attr.chunk_size() ? attr.chunk_size() : default_chunk_size_;
     if (attr.chunk_size() == 0) {
         attr.set_chunk_size(chunk_size);
-        PutInode(attr.inode_id(), attr, &error);
     }
+    attr.set_atime(NowSeconds());
+    PutInode(attr.inode_id(), attr, &error);
 
     uint64_t start = request->offset() / chunk_size;
     uint64_t end = (request->offset() + request->size() - 1) / chunk_size;
@@ -698,6 +699,9 @@ void MdsServiceImpl::GetLayout(google::protobuf::RpcController* cntl_base,
     }
 
     uint64_t chunk_size = attr.chunk_size() ? attr.chunk_size() : default_chunk_size_;
+    attr.set_atime(NowSeconds());
+    error.clear();
+    PutInode(attr.inode_id(), attr, &error);
     uint64_t start = request->offset() / chunk_size;
     uint64_t end = (request->offset() + request->size() - 1) / chunk_size;
 

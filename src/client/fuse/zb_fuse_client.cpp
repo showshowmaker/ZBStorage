@@ -399,71 +399,110 @@ private:
 class DataNodeClient {
 public:
     bool Write(const zb::rpc::ReplicaLocation& replica, uint64_t offset, const std::string& data, std::string* error) {
-        brpc::Channel* channel = GetChannel(replica.node_address());
-        if (!channel) {
+        std::vector<std::string> addresses;
+        if (!replica.primary_address().empty()) {
+            addresses.push_back(replica.primary_address());
+        }
+        if (!replica.node_address().empty() &&
+            std::find(addresses.begin(), addresses.end(), replica.node_address()) == addresses.end()) {
+            addresses.push_back(replica.node_address());
+        }
+        if (!replica.secondary_address().empty() &&
+            std::find(addresses.begin(), addresses.end(), replica.secondary_address()) == addresses.end()) {
+            addresses.push_back(replica.secondary_address());
+        }
+        if (addresses.empty()) {
             if (error) {
-                *error = "Failed to init channel";
+                *error = "No data node address in replica";
             }
             return false;
         }
-        zb::rpc::RealNodeService_Stub stub(channel);
-        zb::rpc::WriteChunkRequest request;
-        request.set_disk_id(replica.disk_id());
-        request.set_chunk_id(replica.chunk_id());
-        request.set_offset(offset);
-        request.set_data(data);
-        zb::rpc::WriteChunkReply reply;
-        brpc::Controller cntl;
-        stub.WriteChunk(&cntl, &request, &reply, nullptr);
-        if (cntl.Failed()) {
-            if (error) {
-                *error = cntl.ErrorText();
+
+        std::string last_error = "Unknown write error";
+        for (const auto& address : addresses) {
+            brpc::Channel* channel = GetChannel(address);
+            if (!channel) {
+                last_error = "Failed to init channel: " + address;
+                continue;
             }
-            return false;
-        }
-        if (reply.status().code() != zb::rpc::STATUS_OK) {
-            if (error) {
-                *error = reply.status().message();
+            zb::rpc::RealNodeService_Stub stub(channel);
+            zb::rpc::WriteChunkRequest request;
+            request.set_disk_id(replica.disk_id());
+            request.set_chunk_id(replica.chunk_id());
+            request.set_offset(offset);
+            request.set_data(data);
+            request.set_epoch(replica.epoch());
+            zb::rpc::WriteChunkReply reply;
+            brpc::Controller cntl;
+            stub.WriteChunk(&cntl, &request, &reply, nullptr);
+            if (cntl.Failed()) {
+                last_error = cntl.ErrorText();
+                continue;
             }
-            return false;
+            if (reply.status().code() == zb::rpc::STATUS_OK) {
+                return true;
+            }
+            last_error = reply.status().message();
         }
-        return true;
+        if (error) {
+            *error = last_error;
+        }
+        return false;
     }
 
     bool Read(const zb::rpc::ReplicaLocation& replica, uint64_t offset, uint64_t size, std::string* out,
               std::string* error) {
-        brpc::Channel* channel = GetChannel(replica.node_address());
-        if (!channel) {
+        std::vector<std::string> addresses;
+        if (!replica.primary_address().empty()) {
+            addresses.push_back(replica.primary_address());
+        }
+        if (!replica.node_address().empty() &&
+            std::find(addresses.begin(), addresses.end(), replica.node_address()) == addresses.end()) {
+            addresses.push_back(replica.node_address());
+        }
+        if (!replica.secondary_address().empty() &&
+            std::find(addresses.begin(), addresses.end(), replica.secondary_address()) == addresses.end()) {
+            addresses.push_back(replica.secondary_address());
+        }
+        if (addresses.empty()) {
             if (error) {
-                *error = "Failed to init channel";
+                *error = "No data node address in replica";
             }
             return false;
         }
-        zb::rpc::RealNodeService_Stub stub(channel);
-        zb::rpc::ReadChunkRequest request;
-        request.set_disk_id(replica.disk_id());
-        request.set_chunk_id(replica.chunk_id());
-        request.set_offset(offset);
-        request.set_size(size);
-        zb::rpc::ReadChunkReply reply;
-        brpc::Controller cntl;
-        stub.ReadChunk(&cntl, &request, &reply, nullptr);
-        if (cntl.Failed()) {
-            if (error) {
-                *error = cntl.ErrorText();
+
+        std::string last_error = "Unknown read error";
+        for (const auto& address : addresses) {
+            brpc::Channel* channel = GetChannel(address);
+            if (!channel) {
+                last_error = "Failed to init channel: " + address;
+                continue;
             }
-            return false;
-        }
-        if (reply.status().code() != zb::rpc::STATUS_OK) {
-            if (error) {
-                *error = reply.status().message();
+            zb::rpc::RealNodeService_Stub stub(channel);
+            zb::rpc::ReadChunkRequest request;
+            request.set_disk_id(replica.disk_id());
+            request.set_chunk_id(replica.chunk_id());
+            request.set_offset(offset);
+            request.set_size(size);
+            zb::rpc::ReadChunkReply reply;
+            brpc::Controller cntl;
+            stub.ReadChunk(&cntl, &request, &reply, nullptr);
+            if (cntl.Failed()) {
+                last_error = cntl.ErrorText();
+                continue;
             }
-            return false;
+            if (reply.status().code() == zb::rpc::STATUS_OK) {
+                if (out) {
+                    *out = reply.data();
+                }
+                return true;
+            }
+            last_error = reply.status().message();
         }
-        if (out) {
-            *out = reply.data();
+        if (error) {
+            *error = last_error;
         }
-        return true;
+        return false;
     }
 
 private:

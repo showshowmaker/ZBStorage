@@ -1,5 +1,6 @@
 #include "IOExecutor.h"
 
+#include <filesystem>
 #include <fstream>
 
 namespace zb::real_node {
@@ -81,6 +82,21 @@ zb::msg::Status IOExecutor::Read(const std::string& path,
         *bytes_read = static_cast<uint64_t>(read_bytes);
     }
 
+    return zb::msg::Status::Ok();
+}
+
+zb::msg::Status IOExecutor::Delete(const std::string& path) {
+    if (path.empty()) {
+        return zb::msg::Status::InvalidArgument("Empty path");
+    }
+    std::error_code ec;
+    bool removed = std::filesystem::remove(path, ec);
+    if (ec) {
+        return zb::msg::Status::IoError("Failed to delete file: " + path + ", error=" + ec.message());
+    }
+    if (!removed) {
+        return zb::msg::Status::NotFound("File not found: " + path);
+    }
     return zb::msg::Status::Ok();
 }
 

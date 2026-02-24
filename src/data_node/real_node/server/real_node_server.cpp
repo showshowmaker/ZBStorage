@@ -1,7 +1,14 @@
 #include <brpc/server.h>
 #include <gflags/gflags.h>
 
+#include <atomic>
+#include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <iostream>
+#include <memory>
+#include <thread>
+#include <utility>
 
 #include "../config/NodeConfig.h"
 #include "../io/DiskManager.h"
@@ -9,10 +16,151 @@
 #include "../io/LocalPathResolver.h"
 #include "../service/BrpcStorageService.h"
 #include "../service/StorageServiceImpl.h"
+#include "scheduler.pb.h"
 
 DEFINE_string(config, "", "Path to real node config file");
 DEFINE_int32(port, 8000, "Port for real node brpc server");
 DEFINE_int32(idle_timeout_sec, -1, "Idle timeout for connections");
+
+namespace {
+
+uint64_t NowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+class SchedulerHeartbeatReporter {
+public:
+    SchedulerHeartbeatReporter(std::string scheduler_addr,
+                               std::string node_id,
+                               std::string node_address,
+                               std::string group_id,
+                               zb::rpc::NodeRole configured_role,
+                               std::string peer_node_id,
+                               std::string peer_address,
+                               uint32_t node_weight,
+                               uint32_t interval_ms,
+                               zb::real_node::DiskManager* disk_manager,
+                               zb::real_node::StorageServiceImpl* storage_service)
+        : scheduler_addr_(std::move(scheduler_addr)),
+          node_id_(std::move(node_id)),
+          node_address_(std::move(node_address)),
+          group_id_(std::move(group_id)),
+          configured_role_(configured_role),
+          peer_node_id_(std::move(peer_node_id)),
+          peer_address_(std::move(peer_address)),
+          node_weight_(node_weight == 0 ? 1 : node_weight),
+          interval_ms_(interval_ms == 0 ? 2000 : interval_ms),
+          disk_manager_(disk_manager),
+          storage_service_(storage_service) {}
+
+    bool Start() {
+        if (scheduler_addr_.empty() || !disk_manager_ || !storage_service_) {
+            return false;
+        }
+        stop_.store(false);
+        thread_ = std::thread([this]() { Run(); });
+        return true;
+    }
+
+    void Stop() {
+        stop_.store(true);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    ~SchedulerHeartbeatReporter() { Stop(); }
+
+private:
+    void Run() {
+        std::unique_ptr<brpc::Channel> channel;
+        while (!stop_.load()) {
+            if (!channel) {
+                auto new_channel = std::make_unique<brpc::Channel>();
+                brpc::ChannelOptions options;
+                options.protocol = "baidu_std";
+                options.timeout_ms = 2000;
+                options.max_retry = 0;
+                if (new_channel->Init(scheduler_addr_.c_str(), &options) != 0) {
+                    std::cerr << "Failed to init Scheduler channel: " << scheduler_addr_ << std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+                    continue;
+                }
+                channel = std::move(new_channel);
+            }
+            zb::rpc::SchedulerService_Stub stub(channel.get());
+            zb::rpc::HeartbeatRequest request;
+            request.set_node_id(node_id_);
+            request.set_node_type(zb::rpc::NODE_REAL);
+            request.set_address(node_address_);
+            request.set_weight(node_weight_);
+            request.set_virtual_node_count(1);
+            request.set_report_ts_ms(NowMs());
+            request.set_group_id(group_id_);
+            request.set_role(configured_role_);
+            request.set_peer_node_id(peer_node_id_);
+            request.set_peer_address(peer_address_);
+            request.set_applied_lsn(storage_service_->GetReplicationStatus().applied_lsn);
+
+            auto reports = disk_manager_->GetReport();
+            for (const auto& disk : reports) {
+                zb::rpc::DiskHeartbeat* out = request.add_disks();
+                out->set_disk_id(disk.id);
+                out->set_capacity_bytes(disk.capacity_bytes);
+                out->set_free_bytes(disk.free_bytes);
+                out->set_is_healthy(disk.is_healthy);
+            }
+
+            zb::rpc::HeartbeatReply response;
+            brpc::Controller cntl;
+            stub.ReportHeartbeat(&cntl, &request, &response, nullptr);
+            if (cntl.Failed()) {
+                std::cerr << "Scheduler heartbeat failed: " << cntl.ErrorText() << std::endl;
+                channel.reset();
+            } else if (response.status().code() == zb::rpc::SCHED_OK) {
+                bool is_primary = response.assigned_role() == zb::rpc::NODE_ROLE_PRIMARY;
+                configured_role_ = response.assigned_role();
+                storage_service_->ApplySchedulerAssignment(is_primary,
+                                                           response.epoch(),
+                                                           response.group_id(),
+                                                           response.primary_node_id(),
+                                                           response.primary_address(),
+                                                           response.secondary_node_id(),
+                                                           response.secondary_address());
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+        }
+    }
+
+    std::string scheduler_addr_;
+    std::string node_id_;
+    std::string node_address_;
+    std::string group_id_;
+    zb::rpc::NodeRole configured_role_{zb::rpc::NODE_ROLE_PRIMARY};
+    std::string peer_node_id_;
+    std::string peer_address_;
+    uint32_t node_weight_{1};
+    uint32_t interval_ms_{2000};
+    zb::real_node::DiskManager* disk_manager_{};
+    zb::real_node::StorageServiceImpl* storage_service_{};
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+};
+
+zb::rpc::NodeRole ParseRole(const std::string& role) {
+    std::string lowered = role;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (lowered == "secondary" || lowered == "slave") {
+        return zb::rpc::NODE_ROLE_SECONDARY;
+    }
+    return zb::rpc::NODE_ROLE_PRIMARY;
+}
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     google::ParseCommandLineFlags(&argc, &argv, true);
@@ -59,11 +207,41 @@ int main(int argc, char* argv[]) {
     brpc::ServerOptions options;
     options.idle_timeout_sec = FLAGS_idle_timeout_sec;
 
+    std::string node_id = cfg.node_id.empty() ? ("real-node-" + std::to_string(FLAGS_port)) : cfg.node_id;
+    std::string node_address = cfg.node_address.empty()
+                                   ? ("127.0.0.1:" + std::to_string(FLAGS_port))
+                                   : cfg.node_address;
+    std::string group_id = cfg.group_id.empty() ? node_id : cfg.group_id;
+    zb::rpc::NodeRole configured_role = ParseRole(cfg.node_role);
+    storage_service.ConfigureReplication(node_id,
+                                         group_id,
+                                         cfg.replication_enabled,
+                                         configured_role == zb::rpc::NODE_ROLE_PRIMARY,
+                                         cfg.peer_node_id,
+                                         cfg.peer_address,
+                                         cfg.replication_timeout_ms);
+
+    SchedulerHeartbeatReporter reporter(cfg.scheduler_addr,
+                                        node_id,
+                                        node_address,
+                                        group_id,
+                                        configured_role,
+                                        cfg.peer_node_id,
+                                        cfg.peer_address,
+                                        cfg.node_weight,
+                                        cfg.heartbeat_interval_ms,
+                                        &disk_manager,
+                                        &storage_service);
+    if (!cfg.scheduler_addr.empty()) {
+        reporter.Start();
+    }
+
     if (server.Start(FLAGS_port, &options) != 0) {
         std::cerr << "Failed to start brpc server on port " << FLAGS_port << std::endl;
         return 1;
     }
 
     server.RunUntilAskedToQuit();
+    reporter.Stop();
     return 0;
 }

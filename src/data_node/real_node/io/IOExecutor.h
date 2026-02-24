@@ -19,6 +19,8 @@ public:
                          uint64_t size,
                          std::string* out,
                          uint64_t* bytes_read);
+
+    zb::msg::Status Delete(const std::string& path);
 };
 
 } // namespace zb::real_node

@@ -53,6 +53,7 @@ set_target_properties(${ROCKSDB_TARGET} PROPERTIES
 set(PROTO_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/msg/real_node.proto
     ${CMAKE_CURRENT_SOURCE_DIR}/src/msg/mds.proto
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/msg/scheduler.proto
 )
 set(PROTOBUF_IMPORT_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src/msg ${Protobuf_INCLUDE_DIRS})
 
@@ -92,6 +93,55 @@ target_link_libraries(real_node_server
 get_directory_property(BRPC_DYNAMIC_LIB DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc DEFINITION DYNAMIC_LIB)
 if(BRPC_DYNAMIC_LIB)
     target_link_libraries(real_node_server PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
+
+add_executable(virtual_node_server
+    src/data_node/virtual_node/config/VirtualNodeConfig.cpp
+    src/data_node/virtual_node/service/VirtualStorageServiceImpl.cpp
+    src/data_node/virtual_node/service/BrpcVirtualStorageService.cpp
+    src/data_node/virtual_node/server/virtual_node_server.cpp
+)
+target_include_directories(virtual_node_server
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(virtual_node_server
+    PRIVATE
+        zb_proto
+        brpc-static
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+)
+if(BRPC_DYNAMIC_LIB)
+    target_link_libraries(virtual_node_server PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
+
+add_executable(optical_node_server
+    src/data_node/optical_node/config/OpticalNodeConfig.cpp
+    src/data_node/optical_node/storage/ImageStore.cpp
+    src/data_node/optical_node/service/OpticalStorageServiceImpl.cpp
+    src/data_node/optical_node/service/BrpcOpticalStorageService.cpp
+    src/data_node/optical_node/server/optical_node_server.cpp
+)
+target_include_directories(optical_node_server
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(optical_node_server
+    PRIVATE
+        zb_proto
+        brpc-static
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+)
+if(BRPC_DYNAMIC_LIB)
+    target_link_libraries(optical_node_server PRIVATE ${BRPC_DYNAMIC_LIB})
 endif()
 
 add_executable(real_node_client
@@ -136,12 +186,76 @@ if(BRPC_DYNAMIC_LIB)
     target_link_libraries(real_node_multi_test PRIVATE ${BRPC_DYNAMIC_LIB})
 endif()
 
+add_executable(virtual_node_test
+    src/client/test/virtual_node_test.cpp
+)
+target_include_directories(virtual_node_test
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(virtual_node_test
+    PRIVATE
+        zb_proto
+        brpc-static
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+)
+if(BRPC_DYNAMIC_LIB)
+    target_link_libraries(virtual_node_test PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
+
+add_executable(optical_archive_stress_test
+    src/client/test/optical_archive_stress_test.cpp
+)
+target_include_directories(optical_archive_stress_test
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(optical_archive_stress_test
+    PRIVATE
+        zb_proto
+        brpc-static
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+)
+if(BRPC_DYNAMIC_LIB)
+    target_link_libraries(optical_archive_stress_test PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
+
+add_executable(scheduler_control_test
+    src/client/test/scheduler_control_test.cpp
+)
+target_include_directories(scheduler_control_test
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(scheduler_control_test
+    PRIVATE
+        zb_proto
+        brpc-static
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+)
+if(BRPC_DYNAMIC_LIB)
+    target_link_libraries(scheduler_control_test PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
+
 add_executable(mds_server
     src/mds/config/MdsConfig.cpp
     src/mds/storage/MetaCodec.cpp
     src/mds/storage/RocksMetaStore.cpp
     src/mds/allocator/NodeStateCache.cpp
     src/mds/allocator/ChunkAllocator.cpp
+    src/mds/archive/OpticalArchiveManager.cpp
     src/mds/service/MdsServiceImpl.cpp
     src/mds/server/mds_server.cpp
 )
@@ -168,6 +282,33 @@ target_link_libraries(mds_server
 )
 if(BRPC_DYNAMIC_LIB)
     target_link_libraries(mds_server PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
+
+add_executable(scheduler_server
+    src/scheduler/config/SchedulerConfig.cpp
+    src/scheduler/health/FailureDetector.cpp
+    src/scheduler/model/ClusterState.cpp
+    src/scheduler/lifecycle/NodeActuator.cpp
+    src/scheduler/lifecycle/LifecycleManager.cpp
+    src/scheduler/service/SchedulerServiceImpl.cpp
+    src/scheduler/server/scheduler_server.cpp
+)
+target_include_directories(scheduler_server
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(scheduler_server
+    PRIVATE
+        zb_proto
+        brpc-static
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+)
+if(BRPC_DYNAMIC_LIB)
+    target_link_libraries(scheduler_server PRIVATE ${BRPC_DYNAMIC_LIB})
 endif()
 
 if(UNIX)

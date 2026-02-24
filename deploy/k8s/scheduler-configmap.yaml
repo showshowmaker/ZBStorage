@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scheduler-config
+data:
+  scheduler.conf: |
+    SUSPECT_TIMEOUT_MS=6000
+    DEAD_TIMEOUT_MS=15000
+    TICK_INTERVAL_MS=1000
+    # START_CMD_TEMPLATE=kubectl scale deploy/{node_id} --replicas=1 -n zb
+    # STOP_CMD_TEMPLATE=kubectl scale deploy/{node_id} --replicas=0 -n zb
+    # REBOOT_CMD_TEMPLATE=kubectl rollout restart deploy/{node_id} -n zb

@@ -13,6 +13,8 @@ struct WriteChunkRequest {
     std::string chunk_id;
     uint64_t offset{0};
     std::string data;
+    bool is_replication{false};
+    uint64_t epoch{0};
 };
 
 struct WriteChunkReply {
@@ -31,6 +33,15 @@ struct ReadChunkReply {
     Status status;
     uint64_t bytes{0};
     std::string data;
+};
+
+struct DeleteChunkRequest {
+    std::string disk_id;
+    std::string chunk_id;
+};
+
+struct DeleteChunkReply {
+    Status status;
 };
 
 struct DiskReport {

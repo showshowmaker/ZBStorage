@@ -1,0 +1,15 @@
+# Scheduler config example
+
+# Failure detection thresholds
+SUSPECT_TIMEOUT_MS=6000
+DEAD_TIMEOUT_MS=15000
+TICK_INTERVAL_MS=1000
+
+# Optional shell command templates for node lifecycle control.
+# Supported placeholders:
+#   {node_id} {address} {force}
+#
+# Examples for Kubernetes (adjust namespace/resources):
+# START_CMD_TEMPLATE=kubectl scale deploy/{node_id} --replicas=1 -n zb
+# STOP_CMD_TEMPLATE=kubectl scale deploy/{node_id} --replicas=0 -n zb
+# REBOOT_CMD_TEMPLATE=kubectl rollout restart deploy/{node_id} -n zb

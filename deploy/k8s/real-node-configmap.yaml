@@ -6,5 +6,16 @@ data:
   real_node.conf: |
     # Real node config
     # Use either ZB_DISKS or DATA_ROOT
+    NODE_ID=node-01
+    NODE_ADDRESS=real-node-0.real-node:19080
+    GROUP_ID=rg-01
+    NODE_ROLE=PRIMARY
+    # PEER_NODE_ID=node-01-bak
+    # PEER_ADDRESS=real-node-1.real-node:19080
+    REPLICATION_ENABLED=false
+    REPLICATION_TIMEOUT_MS=2000
+    NODE_WEIGHT=1
+    SCHEDULER_ADDR=scheduler:9100
+    HEARTBEAT_INTERVAL_MS=2000
     ZB_DISKS=disk-01:/storage/ssd1;disk-02:/storage/hdd1
     # DATA_ROOT=/storage

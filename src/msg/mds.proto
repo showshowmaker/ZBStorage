@@ -45,6 +45,17 @@ message Dentry {
   InodeType type = 3;
 }
 
+enum StorageTier {
+  STORAGE_TIER_DISK = 0;
+  STORAGE_TIER_OPTICAL = 1;
+}
+
+enum ReplicaState {
+  REPLICA_READY = 0;
+  REPLICA_PENDING = 1;
+  REPLICA_DEGRADED = 2;
+}
+
 message ReplicaLocation {
   string node_id = 1;
   string node_address = 2;
@@ -52,6 +63,18 @@ message ReplicaLocation {
   string chunk_id = 4;
   uint64 size = 5;
   uint32 checksum = 6;
+  string group_id = 7;
+  uint64 epoch = 8;
+  string primary_node_id = 9;
+  string primary_address = 10;
+  string secondary_node_id = 11;
+  string secondary_address = 12;
+  bool sync_ready = 13;
+  StorageTier storage_tier = 14;
+  ReplicaState replica_state = 15;
+  string image_id = 16;
+  uint64 image_offset = 17;
+  uint64 image_length = 18;
 }
 
 message ChunkMeta {

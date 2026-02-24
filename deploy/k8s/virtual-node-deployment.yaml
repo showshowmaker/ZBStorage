@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: virtual-node-pool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: virtual-node-pool
+  template:
+    metadata:
+      labels:
+        app: virtual-node-pool
+    spec:
+      containers:
+      - name: virtual-node
+        image: your-registry/zb-storage:latest
+        args: ["./build/virtual_node_server", "--config=/etc/virtual_node/virtual_node.conf", "--port=29080"]
+        workingDir: /app
+        ports:
+        - containerPort: 29080
+          name: brpc
+        volumeMounts:
+        - name: virtual-node-config
+          mountPath: /etc/virtual_node
+      volumes:
+      - name: virtual-node-config
+        configMap:
+          name: virtual-node-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: virtual-node-pool
+spec:
+  selector:
+    app: virtual-node-pool
+  ports:
+  - name: brpc
+    port: 29080
+    targetPort: 29080

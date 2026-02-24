@@ -1,0 +1,37 @@
+# MDS mixed deployment config: real node + virtual node pool
+
+# RocksDB metadata path on MDS host
+MDS_DB_PATH=/tmp/zb_mds_rocks_mixed
+SCHEDULER_ADDR=127.0.0.1:9100
+SCHEDULER_REFRESH_MS=2000
+
+# Default chunk size and replica count
+CHUNK_SIZE=4194304
+REPLICA=1
+ENABLE_OPTICAL_ARCHIVE=false
+ARCHIVE_TRIGGER_BYTES=10737418240
+ARCHIVE_TARGET_BYTES=8589934592
+COLD_FILE_TTL_SEC=3600
+ARCHIVE_SCAN_INTERVAL_MS=5000
+ARCHIVE_MAX_CHUNKS_PER_ROUND=64
+
+# Node list:
+# node_id@address,type=REAL|VIRTUAL,weight=N,virtual_node_count=N
+#
+# Three real nodes:
+#   127.0.0.1:19080
+#   127.0.0.1:19081
+#   127.0.0.1:19082
+#
+# One virtual node pool endpoint:
+#   127.0.0.1:29080
+#   (MDS treats it as 100000 logical nodes with higher weight)
+NODES=node-01@127.0.0.1:19080,type=REAL,weight=1;node-02@127.0.0.1:19081,type=REAL,weight=1;node-03@127.0.0.1:19082,type=REAL,weight=1;vpool@127.0.0.1:29080,type=VIRTUAL,weight=8,virtual_node_count=100000
+
+# Disk IDs exposed by each node/pool
+DISKS=node-01:disk-01,disk-02,disk-03;node-02:disk-01,disk-02,disk-03;node-03:disk-01,disk-02,disk-03;vpool:disk-01,disk-02,disk-03
+
+# Optical tier example:
+# ENABLE_OPTICAL_ARCHIVE=true
+# NODES=node-01@127.0.0.1:19080,type=REAL,weight=1;node-02@127.0.0.1:19081,type=REAL,weight=1;node-03@127.0.0.1:19082,type=REAL,weight=1;vpool@127.0.0.1:29080,type=VIRTUAL,weight=8,virtual_node_count=100000;optical-01@127.0.0.1:39080,type=OPTICAL,weight=1
+# DISKS=node-01:disk-01,disk-02,disk-03;node-02:disk-01,disk-02,disk-03;node-03:disk-01,disk-02,disk-03;vpool:disk-01,disk-02,disk-03;optical-01:disk-01,disk-02,disk-03

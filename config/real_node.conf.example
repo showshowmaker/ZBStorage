@@ -6,3 +6,16 @@ ZB_DISKS=disk-01:/data/ssd1;disk-02:/data/hdd1
 
 # Or auto scan by root directory (comment out ZB_DISKS above)
 # DATA_ROOT=/mnt/disks
+
+# Optional Scheduler heartbeat settings
+# NODE_ID=node-01
+# NODE_ADDRESS=10.0.0.11:19080
+# GROUP_ID=rg-01
+# NODE_ROLE=PRIMARY
+# PEER_NODE_ID=node-02
+# PEER_ADDRESS=10.0.0.12:19080
+# REPLICATION_ENABLED=true
+# REPLICATION_TIMEOUT_MS=2000
+# NODE_WEIGHT=1
+# SCHEDULER_ADDR=127.0.0.1:9100
+# HEARTBEAT_INTERVAL_MS=2000

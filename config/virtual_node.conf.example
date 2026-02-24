@@ -1,0 +1,33 @@
+# Virtual node simulator config
+
+# Node identity and Scheduler heartbeat
+NODE_ID=vpool
+NODE_ADDRESS=127.0.0.1:29080
+GROUP_ID=vpool-rg
+NODE_ROLE=PRIMARY
+# PEER_NODE_ID=vpool-standby
+# PEER_ADDRESS=127.0.0.1:29081
+REPLICATION_ENABLED=false
+REPLICATION_TIMEOUT_MS=2000
+NODE_WEIGHT=8
+VIRTUAL_NODE_COUNT=100000
+SCHEDULER_ADDR=127.0.0.1:9100
+HEARTBEAT_INTERVAL_MS=2000
+
+# Exposed disk IDs (no real mount points needed)
+DISKS=disk-01,disk-02,disk-03
+
+# Throughput model: delay ~= base_latency + bytes / bytes_per_sec
+READ_MBPS=800
+WRITE_MBPS=600
+
+# Additional fixed latency per request
+READ_BASE_LATENCY_MS=2
+WRITE_BASE_LATENCY_MS=3
+
+# Random [0, JITTER_MS] latency added to each request
+JITTER_MS=1
+
+# Synthetic disk stat output for GetDiskReport
+DISK_CAPACITY_BYTES=1099511627776
+MOUNT_POINT_PREFIX=/virtual

@@ -24,6 +24,8 @@ message WriteChunkRequest {
   string chunk_id = 2;
   uint64 offset = 3;
   bytes data = 4;
+  bool is_replication = 5;
+  uint64 epoch = 6;
 }
 
 message WriteChunkReply {
@@ -44,6 +46,15 @@ message ReadChunkReply {
   bytes data = 3;
 }
 
+message DeleteChunkRequest {
+  string disk_id = 1;
+  string chunk_id = 2;
+}
+
+message DeleteChunkReply {
+  Status status = 1;
+}
+
 message DiskReport {
   string id = 1;
   string mount_point = 2;
@@ -60,5 +71,6 @@ message DiskReportReply {
 service RealNodeService {
   rpc WriteChunk(WriteChunkRequest) returns (WriteChunkReply);
   rpc ReadChunk(ReadChunkRequest) returns (ReadChunkReply);
+  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkReply);
   rpc GetDiskReport(google.protobuf.Empty) returns (DiskReportReply);
 }

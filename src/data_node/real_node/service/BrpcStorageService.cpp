@@ -56,6 +56,8 @@ void BrpcStorageService::WriteChunk(google::protobuf::RpcController* cntl_base,
     internal_req.chunk_id = request->chunk_id();
     internal_req.offset = request->offset();
     internal_req.data = request->data();
+    internal_req.is_replication = request->is_replication();
+    internal_req.epoch = request->epoch();
 
     zb::msg::WriteChunkReply internal_reply = service_->WriteChunk(internal_req);
     FillStatus(internal_reply.status, response->mutable_status());
@@ -87,6 +89,28 @@ void BrpcStorageService::ReadChunk(google::protobuf::RpcController* cntl_base,
     FillStatus(internal_reply.status, response->mutable_status());
     response->set_bytes(internal_reply.bytes);
     response->set_data(internal_reply.data);
+}
+
+void BrpcStorageService::DeleteChunk(google::protobuf::RpcController* cntl_base,
+                                     const zb::rpc::DeleteChunkRequest* request,
+                                     zb::rpc::DeleteChunkReply* response,
+                                     google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!service_ || !request || !response) {
+        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
+        if (status) {
+            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            status->set_message("Service not initialized");
+        }
+        return;
+    }
+
+    zb::msg::DeleteChunkRequest internal_req;
+    internal_req.disk_id = request->disk_id();
+    internal_req.chunk_id = request->chunk_id();
+    zb::msg::DeleteChunkReply internal_reply = service_->DeleteChunk(internal_req);
+    FillStatus(internal_reply.status, response->mutable_status());
 }
 
 void BrpcStorageService::GetDiskReport(google::protobuf::RpcController* cntl_base,
