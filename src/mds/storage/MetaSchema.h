@@ -24,6 +24,26 @@ inline std::string ChunkPrefix(uint64_t inode_id) {
     return "C/" + std::to_string(inode_id) + "/";
 }
 
+inline std::string ReverseChunkKey(const std::string& chunk_id) {
+    return "RC/" + chunk_id;
+}
+
+inline std::string ArchiveStateKey(const std::string& chunk_id) {
+    return "AS/" + chunk_id;
+}
+
+inline std::string ArchiveStatePrefix() {
+    return "AS/";
+}
+
+inline std::string ArchiveOpticalWriteKey(const std::string& chunk_id, const std::string& op_id) {
+    return "AOW/" + chunk_id + "/" + op_id;
+}
+
+inline std::string ArchiveOpticalWritePrefix() {
+    return "AOW/";
+}
+
 inline bool ParseChunkKey(const std::string& key, uint64_t* inode_id, uint32_t* index) {
     if (!inode_id || !index) {
         return false;

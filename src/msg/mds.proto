@@ -233,6 +233,98 @@ message ReportNodeStatusReply {
   MdsStatus status = 1;
 }
 
+message ArchiveCandidate {
+  string node_id = 1;
+  string node_address = 2;
+  string disk_id = 3;
+  string chunk_id = 4;
+  uint64 last_access_ts_ms = 5;
+  uint64 size_bytes = 6;
+  double score = 7;
+  uint64 report_ts_ms = 8;
+  uint64 checksum = 9;
+  double heat_score = 10;
+  string archive_state = 11;
+  uint64 version = 12;
+}
+
+message ReportArchiveCandidatesRequest {
+  string node_id = 1;
+  string node_address = 2;
+  uint64 report_ts_ms = 3;
+  repeated ArchiveCandidate candidates = 4;
+}
+
+message ReportArchiveCandidatesReply {
+  MdsStatus status = 1;
+  uint32 accepted = 2;
+  uint32 dropped = 3;
+}
+
+enum ArchiveLifecycleState {
+  ARCHIVE_STATE_PENDING = 0;
+  ARCHIVE_STATE_ARCHIVING = 1;
+  ARCHIVE_STATE_ARCHIVED = 2;
+}
+
+message ArchiveLeaseRecord {
+  string chunk_id = 1;
+  ArchiveLifecycleState state = 2;
+  string owner_node_id = 3;
+  string owner_node_address = 4;
+  string owner_disk_id = 5;
+  string lease_id = 6;
+  uint64 lease_expire_ts_ms = 7;
+  string last_op_id = 8;
+  uint64 version = 9;
+  uint64 update_ts_ms = 10;
+  uint64 archive_ts_ms = 11;
+}
+
+message ClaimArchiveTaskRequest {
+  string node_id = 1;
+  string node_address = 2;
+  string disk_id = 3;
+  string chunk_id = 4;
+  uint64 requested_lease_ms = 5;
+  string request_id = 6;
+}
+
+message ClaimArchiveTaskReply {
+  MdsStatus status = 1;
+  bool granted = 2;
+  ArchiveLeaseRecord record = 3;
+}
+
+message RenewArchiveLeaseRequest {
+  string node_id = 1;
+  string chunk_id = 2;
+  string lease_id = 3;
+  uint64 requested_lease_ms = 4;
+}
+
+message RenewArchiveLeaseReply {
+  MdsStatus status = 1;
+  bool renewed = 2;
+  ArchiveLeaseRecord record = 3;
+}
+
+message CommitArchiveTaskRequest {
+  string node_id = 1;
+  string chunk_id = 2;
+  string lease_id = 3;
+  string op_id = 4;
+  bool success = 5;
+  string error_message = 6;
+}
+
+message CommitArchiveTaskReply {
+  MdsStatus status = 1;
+  bool committed = 2;
+  bool idempotent = 3;
+  ArchiveLeaseRecord record = 4;
+}
+
 service MdsService {
   rpc Lookup(LookupRequest) returns (LookupReply);
   rpc Getattr(GetattrRequest) returns (GetattrReply);
@@ -248,4 +340,8 @@ service MdsService {
   rpc GetLayout(GetLayoutRequest) returns (GetLayoutReply);
   rpc CommitWrite(CommitWriteRequest) returns (CommitWriteReply);
   rpc ReportNodeStatus(ReportNodeStatusRequest) returns (ReportNodeStatusReply);
+  rpc ReportArchiveCandidates(ReportArchiveCandidatesRequest) returns (ReportArchiveCandidatesReply);
+  rpc ClaimArchiveTask(ClaimArchiveTaskRequest) returns (ClaimArchiveTaskReply);
+  rpc RenewArchiveLease(RenewArchiveLeaseRequest) returns (RenewArchiveLeaseReply);
+  rpc CommitArchiveTask(CommitArchiveTaskRequest) returns (CommitArchiveTaskReply);
 }

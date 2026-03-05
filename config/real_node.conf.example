@@ -1,10 +1,13 @@
 # Real node config example
-# Use either ZB_DISKS or DATA_ROOT
+# Preferred mode: create disk0..diskN-1 under DISK_BASE_DIR
+DISK_BASE_DIR=/tmp/zb_real_node_01
+DISK_COUNT=24
+# Optional, defaults to 2TB if not set when DISK_BASE_DIR mode is used.
+DISK_CAPACITY_BYTES=2199023255552
+REPLICATION_ENABLED=false
 
-# Explicit disk mapping
-ZB_DISKS=disk-01:/data/ssd1;disk-02:/data/hdd1
-
-# Or auto scan by root directory (comment out ZB_DISKS above)
+# Legacy modes (optional)
+# ZB_DISKS=disk-01:/data/ssd1;disk-02:/data/hdd1
 # DATA_ROOT=/mnt/disks
 
 # Optional Scheduler heartbeat settings
@@ -14,8 +17,17 @@ ZB_DISKS=disk-01:/data/ssd1;disk-02:/data/hdd1
 # NODE_ROLE=PRIMARY
 # PEER_NODE_ID=node-02
 # PEER_ADDRESS=10.0.0.12:19080
-# REPLICATION_ENABLED=true
+# Keep replication disabled by default.
+# REPLICATION_ENABLED=false
 # REPLICATION_TIMEOUT_MS=2000
 # NODE_WEIGHT=1
 # SCHEDULER_ADDR=127.0.0.1:9100
+# MDS_ADDR=127.0.0.1:9000
 # HEARTBEAT_INTERVAL_MS=2000
+# ARCHIVE_REPORT_INTERVAL_MS=3000
+# ARCHIVE_REPORT_TOPK=256
+# ARCHIVE_REPORT_MIN_AGE_MS=30000
+# ARCHIVE_TRACK_MAX_CHUNKS=500000
+# ARCHIVE_META_DIR=/tmp/zb_real_node_01/.archive_meta
+# ARCHIVE_META_SNAPSHOT_INTERVAL_OPS=20000
+# ARCHIVE_META_WAL_FSYNC=false

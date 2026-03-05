@@ -15,6 +15,7 @@ struct WriteChunkRequest {
     std::string data;
     bool is_replication{false};
     uint64_t epoch{0};
+    std::string archive_op_id;
 };
 
 struct WriteChunkReply {

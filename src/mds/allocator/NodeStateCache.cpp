@@ -5,6 +5,14 @@
 
 namespace zb::mds {
 
+namespace {
+
+bool IsVirtualizedNodeType(NodeType type) {
+    return type == NodeType::kVirtual || type == NodeType::kOptical;
+}
+
+} // namespace
+
 NodeStateCache::NodeStateCache(std::vector<NodeInfo> nodes) : nodes_(std::move(nodes)) {}
 
 std::vector<NodeInfo> NodeStateCache::Snapshot() const {
@@ -123,7 +131,7 @@ NodeSelection NodeStateCache::NextSelectionLocked(NodeType type_filter, bool str
     selection.sync_ready = node->sync_ready;
 
     uint64_t virtual_index = 0;
-    if (node->type == NodeType::kVirtual) {
+    if (IsVirtualizedNodeType(node->type)) {
         uint32_t total_virtual_nodes = std::max<uint32_t>(1, node->virtual_node_count);
         virtual_index = node->next_virtual_index % total_virtual_nodes;
         node->next_virtual_index = (node->next_virtual_index + 1) % total_virtual_nodes;
@@ -164,7 +172,7 @@ size_t NodeStateCache::EstimateLogicalNodeCountLocked(NodeType type_filter, bool
         if (!IsNodeAllocatable(node, type_filter, strict_type_filter)) {
             continue;
         }
-        if (node.type == NodeType::kVirtual) {
+        if (IsVirtualizedNodeType(node.type)) {
             total += std::max<uint32_t>(1, node.virtual_node_count);
         } else {
             ++total;

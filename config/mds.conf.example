@@ -12,6 +12,14 @@ ARCHIVE_TARGET_BYTES=8589934592
 COLD_FILE_TTL_SEC=3600
 ARCHIVE_SCAN_INTERVAL_MS=5000
 ARCHIVE_MAX_CHUNKS_PER_ROUND=64
+ARCHIVE_CANDIDATE_QUEUE_SIZE=200000
+ARCHIVE_LEASE_DEFAULT_MS=30000
+ARCHIVE_LEASE_MIN_MS=1000
+ARCHIVE_LEASE_MAX_MS=300000
+ARCHIVE_DISC_SIZE_BYTES=1099511627776
+ARCHIVE_STRICT_FULL_DISC=true
+ARCHIVE_STAGING_DIR=/tmp/zb_mds_archive_staging
+ARCHIVE_BATCH_MAX_AGE_MS=0
 
 # Node list format:
 #   node_id@address[,type=REAL|VIRTUAL][,weight=N][,virtual_node_count=N]
@@ -30,5 +38,9 @@ DISKS=node-01:disk-01,disk-02,disk-03;node-02:disk-01,disk-02,disk-03;node-03:di
 # ENABLE_OPTICAL_ARCHIVE=true
 # NODES=node-01@127.0.0.1:19080,type=REAL,weight=1;vpool@127.0.0.1:29080,type=VIRTUAL,weight=8,virtual_node_count=100000;optical-01@127.0.0.1:39080,type=OPTICAL,weight=1
 # DISKS=node-01:disk-01,disk-02,disk-03;vpool:disk-01,disk-02,disk-03;optical-01:disk-01,disk-02,disk-03
+
+# Example for this project scale target:
+# NODES=node-01@127.0.0.1:19080,type=REAL,weight=1;vpool@127.0.0.1:29080,type=VIRTUAL,weight=8,virtual_node_count=100;optical-01@127.0.0.1:39080,type=OPTICAL,weight=1,virtual_node_count=10000
+# DISKS=node-01:disk0,disk1,...,disk23;vpool:disk0,disk1,...,disk23;optical-01:odisk0,odisk1,...,odisk9999
 
 # If SCHEDULER_ADDR is set and Scheduler is healthy, Scheduler view will override these static lists.

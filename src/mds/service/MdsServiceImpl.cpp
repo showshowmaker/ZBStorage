@@ -7,6 +7,7 @@
 #include <memory>
 #include <random>
 #include <sstream>
+#include <unordered_set>
 
 namespace zb::mds {
 
@@ -24,10 +25,22 @@ std::vector<std::string> SplitPath(const std::string& path) {
     return parts;
 }
 
+bool IsDiskReplica(const zb::rpc::ReplicaLocation& replica) {
+    return replica.storage_tier() == zb::rpc::STORAGE_TIER_DISK;
+}
+
 } // namespace
 
-MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store, ChunkAllocator* allocator, uint64_t default_chunk_size)
-    : store_(store), allocator_(allocator), default_chunk_size_(default_chunk_size) {
+MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
+                               ChunkAllocator* allocator,
+                               uint64_t default_chunk_size,
+                               ArchiveCandidateQueue* candidate_queue,
+                               ArchiveLeaseManager* lease_manager)
+    : store_(store),
+      allocator_(allocator),
+      default_chunk_size_(default_chunk_size),
+      candidate_queue_(candidate_queue),
+      lease_manager_(lease_manager) {
     std::string error;
     EnsureRoot(&error);
 }
@@ -636,11 +649,63 @@ void MdsServiceImpl::AllocateWrite(google::protobuf::RpcController* cntl_base,
         error.clear();
         std::string chunk_data;
         zb::rpc::ChunkMeta chunk_meta;
+        const std::string chunk_key = ChunkKey(attr.inode_id(), static_cast<uint32_t>(index));
         if (store_->Get(ChunkKey(attr.inode_id(), static_cast<uint32_t>(index)), &chunk_data, &error)) {
             if (!MetaCodec::DecodeChunkMeta(chunk_data, &chunk_meta)) {
                 FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "invalid chunk meta");
                 return;
             }
+
+            std::vector<zb::rpc::ReplicaLocation> disk_replicas;
+            disk_replicas.reserve(static_cast<size_t>(chunk_meta.replicas_size()));
+            std::string existing_chunk_id;
+            for (const auto& replica : chunk_meta.replicas()) {
+                if (!replica.chunk_id().empty()) {
+                    batch.Delete(ArchiveStateKey(replica.chunk_id()));
+                    if (existing_chunk_id.empty()) {
+                        existing_chunk_id = replica.chunk_id();
+                    }
+                }
+                if (IsDiskReplica(replica)) {
+                    disk_replicas.push_back(replica);
+                }
+            }
+
+            uint32_t desired_replica = attr.replica() ? attr.replica() : 1;
+            if (desired_replica == 0) {
+                desired_replica = 1;
+            }
+            if (disk_replicas.empty() || disk_replicas.size() < desired_replica) {
+                const uint32_t need = desired_replica > disk_replicas.size()
+                                          ? static_cast<uint32_t>(desired_replica - disk_replicas.size())
+                                          : 0;
+                if (need > 0) {
+                    const std::string allocate_chunk_id =
+                        !existing_chunk_id.empty() ? existing_chunk_id : GenerateChunkId();
+                    std::vector<zb::rpc::ReplicaLocation> replicas;
+                    if (!allocator_->AllocateChunk(need, allocate_chunk_id, &replicas)) {
+                        FillStatus(response->mutable_status(),
+                                   zb::rpc::MDS_INTERNAL_ERROR,
+                                   "failed to allocate disk replicas");
+                        return;
+                    }
+                    for (const auto& replica_info : replicas) {
+                        *chunk_meta.add_replicas() = replica_info;
+                        disk_replicas.push_back(replica_info);
+                        if (!replica_info.chunk_id().empty()) {
+                            batch.Put(ReverseChunkKey(replica_info.chunk_id()), chunk_key);
+                        }
+                    }
+                    batch.Put(chunk_key, MetaCodec::EncodeChunkMeta(chunk_meta));
+                }
+            }
+
+            zb::rpc::ChunkMeta write_meta = chunk_meta;
+            write_meta.clear_replicas();
+            for (const auto& replica : disk_replicas) {
+                *write_meta.add_replicas() = replica;
+            }
+            *layout->add_chunks() = write_meta;
         } else {
             if (!error.empty()) {
                 FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
@@ -656,10 +721,12 @@ void MdsServiceImpl::AllocateWrite(google::protobuf::RpcController* cntl_base,
             for (const auto& replica_info : replicas) {
                 *chunk_meta.add_replicas() = replica_info;
             }
-            batch.Put(ChunkKey(attr.inode_id(), static_cast<uint32_t>(index)),
-                      MetaCodec::EncodeChunkMeta(chunk_meta));
+            batch.Put(chunk_key, MetaCodec::EncodeChunkMeta(chunk_meta));
+            if (chunk_meta.replicas_size() > 0 && !chunk_meta.replicas(0).chunk_id().empty()) {
+                batch.Put(ReverseChunkKey(chunk_meta.replicas(0).chunk_id()), chunk_key);
+            }
+            *layout->add_chunks() = chunk_meta;
         }
-        *layout->add_chunks() = chunk_meta;
     }
 
     if (batch.Count() > 0) {
@@ -773,6 +840,147 @@ void MdsServiceImpl::ReportNodeStatus(google::protobuf::RpcController* cntl_base
     (void)request;
 
     if (!response) {
+        return;
+    }
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::ReportArchiveCandidates(google::protobuf::RpcController* cntl_base,
+                                             const zb::rpc::ReportArchiveCandidatesRequest* request,
+                                             zb::rpc::ReportArchiveCandidatesReply* response,
+                                             google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+
+    if (!response) {
+        return;
+    }
+    if (!request) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, "request is null");
+        return;
+    }
+    if (!candidate_queue_) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "archive candidate queue disabled");
+        response->set_accepted(0);
+        response->set_dropped(static_cast<uint32_t>(request->candidates_size()));
+        return;
+    }
+
+    std::vector<ArchiveCandidateEntry> batch;
+    batch.reserve(static_cast<size_t>(request->candidates_size()));
+    uint32_t dropped = 0;
+    const uint64_t fallback_report_ts = request->report_ts_ms() > 0 ? request->report_ts_ms() : NowMilliseconds();
+
+    for (const auto& item : request->candidates()) {
+        ArchiveCandidateEntry candidate;
+        candidate.node_id = !item.node_id().empty() ? item.node_id() : request->node_id();
+        candidate.node_address = !item.node_address().empty() ? item.node_address() : request->node_address();
+        candidate.disk_id = item.disk_id();
+        candidate.chunk_id = item.chunk_id();
+        candidate.last_access_ts_ms = item.last_access_ts_ms();
+        candidate.size_bytes = item.size_bytes();
+        candidate.checksum = item.checksum();
+        candidate.heat_score = item.heat_score();
+        candidate.archive_state = item.archive_state().empty() ? "pending" : item.archive_state();
+        candidate.version = item.version();
+        candidate.score = item.score();
+        candidate.report_ts_ms = item.report_ts_ms() > 0 ? item.report_ts_ms() : fallback_report_ts;
+
+        if (candidate.disk_id.empty() || candidate.chunk_id.empty()) {
+            ++dropped;
+            continue;
+        }
+        batch.push_back(std::move(candidate));
+    }
+
+    const ArchiveCandidateQueue::PushResult push = candidate_queue_->PushBatch(batch);
+    response->set_accepted(static_cast<uint32_t>(push.accepted));
+    response->set_dropped(static_cast<uint32_t>(dropped + push.dropped));
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::ClaimArchiveTask(google::protobuf::RpcController* cntl_base,
+                                      const zb::rpc::ClaimArchiveTaskRequest* request,
+                                      zb::rpc::ClaimArchiveTaskReply* response,
+                                      google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+
+    if (!response) {
+        return;
+    }
+    if (!request) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, "request is null");
+        return;
+    }
+    if (!lease_manager_) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "archive lease manager disabled");
+        response->set_granted(false);
+        return;
+    }
+
+    std::string error;
+    if (!lease_manager_->Claim(*request, response, &error)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error.empty() ? "claim failed" : error);
+        response->set_granted(false);
+        return;
+    }
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::RenewArchiveLease(google::protobuf::RpcController* cntl_base,
+                                       const zb::rpc::RenewArchiveLeaseRequest* request,
+                                       zb::rpc::RenewArchiveLeaseReply* response,
+                                       google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+
+    if (!response) {
+        return;
+    }
+    if (!request) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, "request is null");
+        return;
+    }
+    if (!lease_manager_) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "archive lease manager disabled");
+        response->set_renewed(false);
+        return;
+    }
+
+    std::string error;
+    if (!lease_manager_->Renew(*request, response, &error)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error.empty() ? "renew failed" : error);
+        response->set_renewed(false);
+        return;
+    }
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::CommitArchiveTask(google::protobuf::RpcController* cntl_base,
+                                       const zb::rpc::CommitArchiveTaskRequest* request,
+                                       zb::rpc::CommitArchiveTaskReply* response,
+                                       google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+
+    if (!response) {
+        return;
+    }
+    if (!request) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, "request is null");
+        return;
+    }
+    if (!lease_manager_) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "archive lease manager disabled");
+        response->set_committed(false);
+        return;
+    }
+
+    std::string error;
+    if (!lease_manager_->Commit(*request, response, &error)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error.empty() ? "commit failed" : error);
+        response->set_committed(false);
         return;
     }
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
@@ -913,11 +1121,24 @@ bool MdsServiceImpl::DeleteInodeData(uint64_t inode_id, std::string* error) {
     std::string prefix = ChunkPrefix(inode_id);
     std::unique_ptr<rocksdb::Iterator> it(store_->db()->NewIterator(rocksdb::ReadOptions()));
     rocksdb::WriteBatch batch;
+    std::unordered_set<std::string> chunk_ids;
     for (it->Seek(prefix); it->Valid(); it->Next()) {
         if (!it->key().starts_with(prefix)) {
             break;
         }
+        zb::rpc::ChunkMeta meta;
+        if (MetaCodec::DecodeChunkMeta(it->value().ToString(), &meta)) {
+            for (const auto& replica : meta.replicas()) {
+                if (!replica.chunk_id().empty()) {
+                    chunk_ids.insert(replica.chunk_id());
+                }
+            }
+        }
         batch.Delete(it->key());
+    }
+    for (const auto& chunk_id : chunk_ids) {
+        batch.Delete(ReverseChunkKey(chunk_id));
+        batch.Delete(ArchiveStateKey(chunk_id));
     }
     if (batch.Count() == 0) {
         return true;
@@ -985,6 +1206,11 @@ std::string MdsServiceImpl::GenerateChunkId() {
 uint64_t MdsServiceImpl::NowSeconds() {
     using namespace std::chrono;
     return duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+}
+
+uint64_t MdsServiceImpl::NowMilliseconds() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
 void MdsServiceImpl::FillStatus(zb::rpc::MdsStatus* status,

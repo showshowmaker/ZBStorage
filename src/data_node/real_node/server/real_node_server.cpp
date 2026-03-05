@@ -5,10 +5,12 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "../config/NodeConfig.h"
 #include "../io/DiskManager.h"
@@ -16,6 +18,7 @@
 #include "../io/LocalPathResolver.h"
 #include "../service/BrpcStorageService.h"
 #include "../service/StorageServiceImpl.h"
+#include "mds.pb.h"
 #include "scheduler.pb.h"
 
 DEFINE_string(config, "", "Path to real node config file");
@@ -23,6 +26,8 @@ DEFINE_int32(port, 8000, "Port for real node brpc server");
 DEFINE_int32(idle_timeout_sec, -1, "Idle timeout for connections");
 
 namespace {
+
+constexpr uint64_t kDefaultSyntheticDiskCapacityBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
 
 uint64_t NowMs() {
     using namespace std::chrono;
@@ -149,6 +154,107 @@ private:
     std::thread thread_;
 };
 
+class ArchiveCandidateReporter {
+public:
+    ArchiveCandidateReporter(std::string mds_addr,
+                             std::string node_id,
+                             std::string node_address,
+                             uint32_t interval_ms,
+                             uint32_t topk,
+                             uint64_t min_age_ms,
+                             zb::real_node::StorageServiceImpl* storage_service)
+        : mds_addr_(std::move(mds_addr)),
+          node_id_(std::move(node_id)),
+          node_address_(std::move(node_address)),
+          interval_ms_(interval_ms == 0 ? 3000 : interval_ms),
+          topk_(topk == 0 ? 1 : topk),
+          min_age_ms_(min_age_ms),
+          storage_service_(storage_service) {}
+
+    bool Start() {
+        if (mds_addr_.empty() || !storage_service_) {
+            return false;
+        }
+        stop_.store(false);
+        thread_ = std::thread([this]() { Run(); });
+        return true;
+    }
+
+    void Stop() {
+        stop_.store(true);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    ~ArchiveCandidateReporter() { Stop(); }
+
+private:
+    void Run() {
+        std::unique_ptr<brpc::Channel> channel;
+        while (!stop_.load()) {
+            if (!channel) {
+                auto new_channel = std::make_unique<brpc::Channel>();
+                brpc::ChannelOptions options;
+                options.protocol = "baidu_std";
+                options.timeout_ms = 2000;
+                options.max_retry = 0;
+                if (new_channel->Init(mds_addr_.c_str(), &options) != 0) {
+                    std::cerr << "Failed to init MDS channel: " << mds_addr_ << std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+                    continue;
+                }
+                channel = std::move(new_channel);
+            }
+
+            std::vector<zb::real_node::ArchiveCandidateStat> samples =
+                storage_service_->CollectArchiveCandidates(topk_, min_age_ms_);
+            if (!samples.empty()) {
+                zb::rpc::MdsService_Stub stub(channel.get());
+                zb::rpc::ReportArchiveCandidatesRequest request;
+                request.set_node_id(node_id_);
+                request.set_node_address(node_address_);
+                request.set_report_ts_ms(NowMs());
+                for (const auto& sample : samples) {
+                    zb::rpc::ArchiveCandidate* candidate = request.add_candidates();
+                    candidate->set_node_id(node_id_);
+                    candidate->set_node_address(node_address_);
+                    candidate->set_disk_id(sample.disk_id);
+                    candidate->set_chunk_id(sample.chunk_id);
+                    candidate->set_last_access_ts_ms(sample.last_access_ts_ms);
+                    candidate->set_size_bytes(sample.size_bytes);
+                    candidate->set_checksum(sample.checksum);
+                    candidate->set_heat_score(sample.heat_score);
+                    candidate->set_archive_state(sample.archive_state);
+                    candidate->set_version(sample.version);
+                    candidate->set_score(sample.score);
+                    candidate->set_report_ts_ms(request.report_ts_ms());
+                }
+
+                zb::rpc::ReportArchiveCandidatesReply response;
+                brpc::Controller cntl;
+                stub.ReportArchiveCandidates(&cntl, &request, &response, nullptr);
+                if (cntl.Failed()) {
+                    std::cerr << "ReportArchiveCandidates failed: " << cntl.ErrorText() << std::endl;
+                    channel.reset();
+                }
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+        }
+    }
+
+    std::string mds_addr_;
+    std::string node_id_;
+    std::string node_address_;
+    uint32_t interval_ms_{3000};
+    uint32_t topk_{1};
+    uint64_t min_age_ms_{30000};
+    zb::real_node::StorageServiceImpl* storage_service_{};
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+};
+
 zb::rpc::NodeRole ParseRole(const std::string& role) {
     std::string lowered = role;
     std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
@@ -179,12 +285,17 @@ int main(int argc, char* argv[]) {
     zb::real_node::DiskManager disk_manager;
     zb::msg::Status init_status;
 
-    if (!cfg.disks_env.empty()) {
+    if (!cfg.disk_base_dir.empty() && cfg.disk_count > 0) {
+        const uint64_t disk_capacity_bytes =
+            cfg.disk_capacity_bytes > 0 ? cfg.disk_capacity_bytes : kDefaultSyntheticDiskCapacityBytes;
+        init_status = disk_manager.InitFromBaseDir(cfg.disk_base_dir, cfg.disk_count, disk_capacity_bytes);
+    } else if (!cfg.disks_env.empty()) {
         init_status = disk_manager.InitFromConfig(cfg.disks_env);
     } else if (!cfg.data_root.empty()) {
         init_status = disk_manager.InitFromDataRoot(cfg.data_root);
     } else {
-        std::cerr << "Missing disk config in file: set ZB_DISKS or DATA_ROOT" << std::endl;
+        std::cerr << "Missing disk config in file: set DISK_BASE_DIR+DISK_COUNT (preferred), or ZB_DISKS, or DATA_ROOT"
+                  << std::endl;
         return 1;
     }
 
@@ -196,6 +307,26 @@ int main(int argc, char* argv[]) {
     zb::real_node::LocalPathResolver path_resolver;
     zb::real_node::IOExecutor io_executor;
     zb::real_node::StorageServiceImpl storage_service(&disk_manager, &path_resolver, &io_executor);
+    storage_service.SetArchiveTrackingMaxChunks(cfg.archive_track_max_chunks);
+    std::string archive_meta_dir = cfg.archive_meta_dir;
+    if (archive_meta_dir.empty()) {
+        if (!cfg.disk_base_dir.empty()) {
+            archive_meta_dir = (std::filesystem::path(cfg.disk_base_dir) / ".archive_meta").string();
+        } else if (!cfg.data_root.empty()) {
+            archive_meta_dir = (std::filesystem::path(cfg.data_root) / ".archive_meta").string();
+        } else {
+            archive_meta_dir = (std::filesystem::path(".") / "archive_meta").string();
+        }
+    }
+    std::string archive_meta_error;
+    if (!storage_service.InitArchiveMetaStore(archive_meta_dir,
+                                              cfg.archive_track_max_chunks,
+                                              cfg.archive_meta_snapshot_interval_ops,
+                                              cfg.archive_meta_wal_fsync,
+                                              &archive_meta_error)) {
+        std::cerr << "Archive meta init failed: " << archive_meta_error << std::endl;
+        return 1;
+    }
     zb::real_node::BrpcStorageService brpc_service(&storage_service);
 
     brpc::Server server;
@@ -236,12 +367,28 @@ int main(int argc, char* argv[]) {
         reporter.Start();
     }
 
+    ArchiveCandidateReporter archive_reporter(cfg.mds_addr,
+                                              node_id,
+                                              node_address,
+                                              cfg.archive_report_interval_ms,
+                                              cfg.archive_report_topk,
+                                              cfg.archive_report_min_age_ms,
+                                              &storage_service);
+    if (!cfg.mds_addr.empty()) {
+        archive_reporter.Start();
+    }
+
     if (server.Start(FLAGS_port, &options) != 0) {
         std::cerr << "Failed to start brpc server on port " << FLAGS_port << std::endl;
         return 1;
     }
 
     server.RunUntilAskedToQuit();
+    std::string snapshot_error;
+    if (!storage_service.FlushArchiveMetaSnapshot(&snapshot_error) && !snapshot_error.empty()) {
+        std::cerr << "Archive meta snapshot flush failed: " << snapshot_error << std::endl;
+    }
+    archive_reporter.Stop();
     reporter.Stop();
     return 0;
 }

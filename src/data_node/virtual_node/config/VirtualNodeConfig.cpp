@@ -113,6 +113,8 @@ VirtualNodeConfig VirtualNodeConfig::LoadFromFile(const std::string& path, std::
             cfg.node_address = value;
         } else if (key == "SCHEDULER_ADDR") {
             cfg.scheduler_addr = value;
+        } else if (key == "MDS_ADDR") {
+            cfg.mds_addr = value;
         } else if (key == "GROUP_ID") {
             cfg.group_id = value;
         } else if (key == "NODE_ROLE") {
@@ -153,6 +155,50 @@ VirtualNodeConfig VirtualNodeConfig::LoadFromFile(const std::string& path, std::
             if (!ParseUint32(value, &cfg.heartbeat_interval_ms)) {
                 if (error) {
                     *error = "Invalid HEARTBEAT_INTERVAL_MS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_REPORT_INTERVAL_MS") {
+            if (!ParseUint32(value, &cfg.archive_report_interval_ms)) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_REPORT_INTERVAL_MS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_REPORT_TOPK") {
+            if (!ParseUint32(value, &cfg.archive_report_topk)) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_REPORT_TOPK at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_REPORT_MIN_AGE_MS") {
+            if (!ParseUint64(value, &cfg.archive_report_min_age_ms)) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_REPORT_MIN_AGE_MS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_TRACK_MAX_CHUNKS") {
+            if (!ParseUint32(value, &cfg.archive_track_max_chunks)) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_TRACK_MAX_CHUNKS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_META_DIR") {
+            cfg.archive_meta_dir = value;
+        } else if (key == "ARCHIVE_META_SNAPSHOT_INTERVAL_OPS") {
+            if (!ParseUint32(value, &cfg.archive_meta_snapshot_interval_ops)) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_META_SNAPSHOT_INTERVAL_OPS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_META_WAL_FSYNC") {
+            if (!ParseBool(value, &cfg.archive_meta_wal_fsync)) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_META_WAL_FSYNC at line " + std::to_string(line_no);
                 }
                 return {};
             }
@@ -237,6 +283,18 @@ VirtualNodeConfig VirtualNodeConfig::LoadFromFile(const std::string& path, std::
     }
     if (cfg.heartbeat_interval_ms == 0) {
         cfg.heartbeat_interval_ms = 2000;
+    }
+    if (cfg.archive_report_interval_ms == 0) {
+        cfg.archive_report_interval_ms = 3000;
+    }
+    if (cfg.archive_report_topk == 0) {
+        cfg.archive_report_topk = 1;
+    }
+    if (cfg.archive_track_max_chunks == 0) {
+        cfg.archive_track_max_chunks = 1;
+    }
+    if (cfg.archive_meta_snapshot_interval_ops == 0) {
+        cfg.archive_meta_snapshot_interval_ops = 1;
     }
     if (cfg.mount_point_prefix.empty()) {
         cfg.mount_point_prefix = "/virtual";

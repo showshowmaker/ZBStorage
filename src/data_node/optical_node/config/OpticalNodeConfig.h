@@ -17,6 +17,7 @@ struct OpticalNodeConfig {
     bool replication_enabled{false};
     uint32_t replication_timeout_ms{2000};
     uint32_t node_weight{1};
+    uint32_t virtual_node_count{1};
     uint32_t heartbeat_interval_ms{2000};
 
     std::vector<std::string> disk_ids;

@@ -19,6 +19,14 @@ struct VirtualNodeConfig {
     uint32_t node_weight{1};
     uint32_t virtual_node_count{100000};
     uint32_t heartbeat_interval_ms{2000};
+    std::string mds_addr;
+    uint32_t archive_report_interval_ms{3000};
+    uint32_t archive_report_topk{256};
+    uint64_t archive_report_min_age_ms{30000};
+    uint32_t archive_track_max_chunks{500000};
+    std::string archive_meta_dir;
+    uint32_t archive_meta_snapshot_interval_ops{20000};
+    bool archive_meta_wal_fsync{false};
 
     std::vector<std::string> disk_ids;
     uint64_t read_bytes_per_sec{500ULL * 1024ULL * 1024ULL};

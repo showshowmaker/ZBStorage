@@ -68,6 +68,7 @@ set(REAL_NODE_SOURCES
     src/data_node/real_node/io/DiskManager.cpp
     src/data_node/real_node/io/LocalPathResolver.cpp
     src/data_node/real_node/io/IOExecutor.cpp
+    src/data_node/real_node/service/ArchiveChunkMetaStore.cpp
     src/data_node/real_node/service/StorageServiceImpl.cpp
     src/data_node/real_node/service/BrpcStorageService.cpp
     src/data_node/real_node/server/real_node_server.cpp
@@ -97,6 +98,7 @@ endif()
 
 add_executable(virtual_node_server
     src/data_node/virtual_node/config/VirtualNodeConfig.cpp
+    src/data_node/real_node/service/ArchiveChunkMetaStore.cpp
     src/data_node/virtual_node/service/VirtualStorageServiceImpl.cpp
     src/data_node/virtual_node/service/BrpcVirtualStorageService.cpp
     src/data_node/virtual_node/server/virtual_node_server.cpp
@@ -255,6 +257,8 @@ add_executable(mds_server
     src/mds/storage/RocksMetaStore.cpp
     src/mds/allocator/NodeStateCache.cpp
     src/mds/allocator/ChunkAllocator.cpp
+    src/mds/archive/ArchiveBatchStager.cpp
+    src/mds/archive/ArchiveLeaseManager.cpp
     src/mds/archive/OpticalArchiveManager.cpp
     src/mds/service/MdsServiceImpl.cpp
     src/mds/server/mds_server.cpp

@@ -82,6 +82,15 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
         reply.status = zb::msg::Status::IoError("STALE_EPOCH");
         return reply;
     }
+    if (!request.archive_op_id.empty()) {
+        std::lock_guard<std::mutex> lock(archive_op_mu_);
+        auto it = last_archive_op_by_chunk_.find(request.chunk_id);
+        if (it != last_archive_op_by_chunk_.end() && it->second == request.archive_op_id) {
+            reply.status = zb::msg::Status::Ok();
+            reply.bytes = static_cast<uint64_t>(request.data.size());
+            return reply;
+        }
+    }
 
     ImageLocation location;
     reply.status = store_->WriteChunk(request.disk_id, request.chunk_id, request.data, &location);
@@ -101,6 +110,10 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
             reply.status = repl_status;
             return reply;
         }
+    }
+    if (!request.archive_op_id.empty()) {
+        std::lock_guard<std::mutex> lock(archive_op_mu_);
+        last_archive_op_by_chunk_[request.chunk_id] = request.archive_op_id;
     }
 
     return reply;
@@ -153,6 +166,17 @@ zb::msg::DiskReportReply OpticalStorageServiceImpl::GetDiskReport() const {
     return store_->GetDiskReport();
 }
 
+zb::msg::Status OpticalStorageServiceImpl::UpdateArchiveState(const std::string& disk_id,
+                                                              const std::string& chunk_id,
+                                                              const std::string& archive_state,
+                                                              uint64_t version) {
+    (void)disk_id;
+    (void)chunk_id;
+    (void)archive_state;
+    (void)version;
+    return zb::msg::Status::Ok();
+}
+
 zb::msg::Status OpticalStorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request,
                                                                      uint64_t epoch) {
     ReplicationStatusSnapshot repl_snapshot = GetReplicationStatus();
@@ -192,6 +216,7 @@ zb::msg::Status OpticalStorageServiceImpl::ReplicateWriteToSecondary(const zb::m
     replicate_req.set_data(request.data);
     replicate_req.set_is_replication(true);
     replicate_req.set_epoch(epoch);
+    replicate_req.set_archive_op_id(request.archive_op_id);
 
     zb::rpc::WriteChunkReply replicate_resp;
     brpc::Controller cntl;

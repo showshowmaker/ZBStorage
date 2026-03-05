@@ -71,12 +71,34 @@ NodeConfig NodeConfig::LoadFromFile(const std::string& path, std::string* error)
             cfg.disks_env = value;
         } else if (key == "DATA_ROOT") {
             cfg.data_root = value;
+        } else if (key == "DISK_BASE_DIR") {
+            cfg.disk_base_dir = value;
+        } else if (key == "DISK_COUNT") {
+            try {
+                cfg.disk_count = static_cast<uint32_t>(std::stoul(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid DISK_COUNT at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "DISK_CAPACITY_BYTES") {
+            try {
+                cfg.disk_capacity_bytes = static_cast<uint64_t>(std::stoull(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid DISK_CAPACITY_BYTES at line " + std::to_string(line_no);
+                }
+                return {};
+            }
         } else if (key == "NODE_ID") {
             cfg.node_id = value;
         } else if (key == "NODE_ADDRESS") {
             cfg.node_address = value;
         } else if (key == "SCHEDULER_ADDR") {
             cfg.scheduler_addr = value;
+        } else if (key == "MDS_ADDR") {
+            cfg.mds_addr = value;
         } else if (key == "GROUP_ID") {
             cfg.group_id = value;
         } else if (key == "NODE_ROLE") {
@@ -119,11 +141,77 @@ NodeConfig NodeConfig::LoadFromFile(const std::string& path, std::string* error)
                 }
                 return {};
             }
+        } else if (key == "ARCHIVE_REPORT_INTERVAL_MS") {
+            try {
+                cfg.archive_report_interval_ms = static_cast<uint32_t>(std::stoul(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_REPORT_INTERVAL_MS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_REPORT_TOPK") {
+            try {
+                cfg.archive_report_topk = static_cast<uint32_t>(std::stoul(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_REPORT_TOPK at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_REPORT_MIN_AGE_MS") {
+            try {
+                cfg.archive_report_min_age_ms = static_cast<uint64_t>(std::stoull(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_REPORT_MIN_AGE_MS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_TRACK_MAX_CHUNKS") {
+            try {
+                cfg.archive_track_max_chunks = static_cast<uint32_t>(std::stoul(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_TRACK_MAX_CHUNKS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_META_DIR") {
+            cfg.archive_meta_dir = value;
+        } else if (key == "ARCHIVE_META_SNAPSHOT_INTERVAL_OPS") {
+            try {
+                cfg.archive_meta_snapshot_interval_ops = static_cast<uint32_t>(std::stoul(value));
+            } catch (const std::exception&) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_META_SNAPSHOT_INTERVAL_OPS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_META_WAL_FSYNC") {
+            if (!ParseBool(value, &cfg.archive_meta_wal_fsync)) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_META_WAL_FSYNC at line " + std::to_string(line_no);
+                }
+                return {};
+            }
         }
     }
 
     if (cfg.node_role.empty()) {
         cfg.node_role = "PRIMARY";
+    }
+    if (cfg.archive_report_interval_ms == 0) {
+        cfg.archive_report_interval_ms = 3000;
+    }
+    if (cfg.archive_report_topk == 0) {
+        cfg.archive_report_topk = 1;
+    }
+    if (cfg.archive_track_max_chunks == 0) {
+        cfg.archive_track_max_chunks = 1;
+    }
+    if (cfg.archive_meta_snapshot_interval_ops == 0) {
+        cfg.archive_meta_snapshot_interval_ops = 1;
     }
 
     return cfg;

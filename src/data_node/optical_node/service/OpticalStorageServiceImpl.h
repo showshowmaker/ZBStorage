@@ -52,6 +52,10 @@ public:
     zb::msg::ReadChunkReply ReadChunk(const zb::msg::ReadChunkRequest& request);
     zb::msg::DeleteChunkReply DeleteChunk(const zb::msg::DeleteChunkRequest& request);
     zb::msg::DiskReportReply GetDiskReport() const;
+    zb::msg::Status UpdateArchiveState(const std::string& disk_id,
+                                       const std::string& chunk_id,
+                                       const std::string& archive_state,
+                                       uint64_t version);
 
 private:
     zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
@@ -64,6 +68,9 @@ private:
 
     mutable std::mutex channel_mu_;
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> peer_channels_;
+
+    mutable std::mutex archive_op_mu_;
+    std::unordered_map<std::string, std::string> last_archive_op_by_chunk_;
 };
 
 } // namespace zb::optical_node

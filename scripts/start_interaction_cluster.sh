@@ -6,14 +6,19 @@ BUILD_DIR="${ROOT_DIR}/build"
 RUNTIME_ROOT="${ROOT_DIR}/runtime"
 
 VIRTUAL_NODE_COUNT="${VIRTUAL_NODE_COUNT:-100}"
-OPTICAL_DISK_COUNT="${OPTICAL_DISK_COUNT:-100}"
+OPTICAL_NODE_COUNT="${OPTICAL_NODE_COUNT:-10000}"
+OPTICAL_DISK_COUNT="${OPTICAL_DISK_COUNT:-10000}"
+
+REAL_DISK_COUNT="${REAL_DISK_COUNT:-24}"
+REAL_DISK_CAPACITY_BYTES="${REAL_DISK_CAPACITY_BYTES:-2199023255552}"   # 2TB
+VIRTUAL_DISK_CAPACITY_BYTES="${VIRTUAL_DISK_CAPACITY_BYTES:-2199023255552}"  # 2TB
+OPTICAL_DISK_CAPACITY_BYTES="${OPTICAL_DISK_CAPACITY_BYTES:-1099511627776}"  # 1TB
+OPTICAL_MAX_IMAGE_SIZE_BYTES="${OPTICAL_MAX_IMAGE_SIZE_BYTES:-67108864}"
 HEARTBEAT_MS="${HEARTBEAT_MS:-2000}"
 
 SCHEDULER_PORT="${SCHEDULER_PORT:-9100}"
 MDS_PORT="${MDS_PORT:-9000}"
-REAL1_PORT="${REAL1_PORT:-19080}"
-REAL2_PORT="${REAL2_PORT:-19081}"
-REAL3_PORT="${REAL3_PORT:-19082}"
+REAL_PORT="${REAL_PORT:-19080}"
 VIRTUAL_PORT="${VIRTUAL_PORT:-29080}"
 OPTICAL_PORT="${OPTICAL_PORT:-39080}"
 
@@ -46,9 +51,8 @@ make_csv_ids() {
   local count="$2"
   local out=""
   local i
-  for ((i=1; i<=count; i++)); do
-    local id
-    id="$(printf "%s-%03d" "${prefix}" "${i}")"
+  for ((i=0; i<count; i++)); do
+    local id="${prefix}${i}"
     if [[ -z "${out}" ]]; then
       out="${id}"
     else
@@ -58,14 +62,13 @@ make_csv_ids() {
   echo "${out}"
 }
 
-make_real_disks_env() {
-  local base="$1"
-  echo "disk-01:${base}/disk1;disk-02:${base}/disk2;disk-03:${base}/disk3"
-}
-
 create_real_disk_dirs() {
   local base="$1"
-  mkdir -p "${base}/disk1" "${base}/disk2" "${base}/disk3"
+  local count="$2"
+  local i
+  for ((i=0; i<count; i++)); do
+    mkdir -p "${base}/disk${i}"
+  done
 }
 
 wait_port() {
@@ -85,16 +88,13 @@ wait_port() {
   done
 }
 
-REAL1_DATA="${DATA_DIR}/real_node_01"
-REAL2_DATA="${DATA_DIR}/real_node_02"
-REAL3_DATA="${DATA_DIR}/real_node_03"
+REAL_DATA="${DATA_DIR}/real_node_01"
 OPTICAL_ARCHIVE_ROOT="${DATA_DIR}/optical_archive"
 MDS_DB_PATH="${DATA_DIR}/mds_rocks"
 mkdir -p "${OPTICAL_ARCHIVE_ROOT}"
-create_real_disk_dirs "${REAL1_DATA}"
-create_real_disk_dirs "${REAL2_DATA}"
-create_real_disk_dirs "${REAL3_DATA}"
+create_real_disk_dirs "${REAL_DATA}" "${REAL_DISK_COUNT}"
 
+REAL_DISKS_CSV="$(make_csv_ids "disk" "${REAL_DISK_COUNT}")"
 OPTICAL_DISKS_CSV="$(make_csv_ids "odisk" "${OPTICAL_DISK_COUNT}")"
 
 cat > "${CONF_DIR}/scheduler.conf" <<EOF
@@ -104,39 +104,24 @@ TICK_INTERVAL_MS=1000
 EOF
 
 cat > "${CONF_DIR}/real_node_01.conf" <<EOF
-ZB_DISKS=$(make_real_disks_env "${REAL1_DATA}")
+DISK_BASE_DIR=${REAL_DATA}
+DISK_COUNT=${REAL_DISK_COUNT}
+DISK_CAPACITY_BYTES=${REAL_DISK_CAPACITY_BYTES}
 NODE_ID=node-01
-NODE_ADDRESS=127.0.0.1:${REAL1_PORT}
+NODE_ADDRESS=127.0.0.1:${REAL_PORT}
 GROUP_ID=rg-node-01
 NODE_ROLE=PRIMARY
 REPLICATION_ENABLED=false
 NODE_WEIGHT=1
 SCHEDULER_ADDR=127.0.0.1:${SCHEDULER_PORT}
+MDS_ADDR=127.0.0.1:${MDS_PORT}
 HEARTBEAT_INTERVAL_MS=${HEARTBEAT_MS}
-EOF
-
-cat > "${CONF_DIR}/real_node_02.conf" <<EOF
-ZB_DISKS=$(make_real_disks_env "${REAL2_DATA}")
-NODE_ID=node-02
-NODE_ADDRESS=127.0.0.1:${REAL2_PORT}
-GROUP_ID=rg-node-02
-NODE_ROLE=PRIMARY
-REPLICATION_ENABLED=false
-NODE_WEIGHT=1
-SCHEDULER_ADDR=127.0.0.1:${SCHEDULER_PORT}
-HEARTBEAT_INTERVAL_MS=${HEARTBEAT_MS}
-EOF
-
-cat > "${CONF_DIR}/real_node_03.conf" <<EOF
-ZB_DISKS=$(make_real_disks_env "${REAL3_DATA}")
-NODE_ID=node-03
-NODE_ADDRESS=127.0.0.1:${REAL3_PORT}
-GROUP_ID=rg-node-03
-NODE_ROLE=PRIMARY
-REPLICATION_ENABLED=false
-NODE_WEIGHT=1
-SCHEDULER_ADDR=127.0.0.1:${SCHEDULER_PORT}
-HEARTBEAT_INTERVAL_MS=${HEARTBEAT_MS}
+ARCHIVE_REPORT_INTERVAL_MS=3000
+ARCHIVE_REPORT_TOPK=256
+ARCHIVE_REPORT_MIN_AGE_MS=30000
+ARCHIVE_TRACK_MAX_CHUNKS=500000
+ARCHIVE_META_DIR=${REAL_DATA}/.archive_meta
+ARCHIVE_META_SNAPSHOT_INTERVAL_OPS=20000
 EOF
 
 cat > "${CONF_DIR}/virtual_node.conf" <<EOF
@@ -148,14 +133,21 @@ REPLICATION_ENABLED=false
 NODE_WEIGHT=8
 VIRTUAL_NODE_COUNT=${VIRTUAL_NODE_COUNT}
 SCHEDULER_ADDR=127.0.0.1:${SCHEDULER_PORT}
+MDS_ADDR=127.0.0.1:${MDS_PORT}
 HEARTBEAT_INTERVAL_MS=${HEARTBEAT_MS}
-DISKS=disk-01,disk-02,disk-03
+ARCHIVE_REPORT_INTERVAL_MS=3000
+ARCHIVE_REPORT_TOPK=256
+ARCHIVE_REPORT_MIN_AGE_MS=30000
+ARCHIVE_TRACK_MAX_CHUNKS=500000
+ARCHIVE_META_DIR=${DATA_DIR}/virtual_node_meta
+ARCHIVE_META_SNAPSHOT_INTERVAL_OPS=20000
+DISKS=${REAL_DISKS_CSV}
 READ_MBPS=800
 WRITE_MBPS=600
 READ_BASE_LATENCY_MS=2
 WRITE_BASE_LATENCY_MS=3
 JITTER_MS=1
-DISK_CAPACITY_BYTES=1099511627776
+DISK_CAPACITY_BYTES=${VIRTUAL_DISK_CAPACITY_BYTES}
 MOUNT_POINT_PREFIX=/virtual
 EOF
 
@@ -166,12 +158,13 @@ GROUP_ID=og-01
 NODE_ROLE=PRIMARY
 REPLICATION_ENABLED=false
 NODE_WEIGHT=1
+VIRTUAL_NODE_COUNT=${OPTICAL_NODE_COUNT}
 SCHEDULER_ADDR=127.0.0.1:${SCHEDULER_PORT}
 HEARTBEAT_INTERVAL_MS=${HEARTBEAT_MS}
 DISKS=${OPTICAL_DISKS_CSV}
 ARCHIVE_ROOT=${OPTICAL_ARCHIVE_ROOT}
-MAX_IMAGE_SIZE_BYTES=67108864
-DISK_CAPACITY_BYTES=1099511627776
+MAX_IMAGE_SIZE_BYTES=${OPTICAL_MAX_IMAGE_SIZE_BYTES}
+DISK_CAPACITY_BYTES=${OPTICAL_DISK_CAPACITY_BYTES}
 MOUNT_POINT_PREFIX=/optical
 EOF
 
@@ -187,8 +180,16 @@ ARCHIVE_TARGET_BYTES=524288
 COLD_FILE_TTL_SEC=30
 ARCHIVE_SCAN_INTERVAL_MS=2000
 ARCHIVE_MAX_CHUNKS_PER_ROUND=256
-NODES=node-01@127.0.0.1:${REAL1_PORT},type=REAL,weight=1;node-02@127.0.0.1:${REAL2_PORT},type=REAL,weight=1;node-03@127.0.0.1:${REAL3_PORT},type=REAL,weight=1;vpool@127.0.0.1:${VIRTUAL_PORT},type=VIRTUAL,weight=8,virtual_node_count=${VIRTUAL_NODE_COUNT};optical-01@127.0.0.1:${OPTICAL_PORT},type=OPTICAL,weight=1
-DISKS=node-01:disk-01,disk-02,disk-03;node-02:disk-01,disk-02,disk-03;node-03:disk-01,disk-02,disk-03;vpool:disk-01,disk-02,disk-03;optical-01:${OPTICAL_DISKS_CSV}
+ARCHIVE_CANDIDATE_QUEUE_SIZE=200000
+ARCHIVE_LEASE_DEFAULT_MS=30000
+ARCHIVE_LEASE_MIN_MS=1000
+ARCHIVE_LEASE_MAX_MS=300000
+ARCHIVE_DISC_SIZE_BYTES=1048576
+ARCHIVE_STRICT_FULL_DISC=true
+ARCHIVE_STAGING_DIR=${DATA_DIR}/mds_archive_staging
+ARCHIVE_BATCH_MAX_AGE_MS=0
+NODES=node-01@127.0.0.1:${REAL_PORT},type=REAL,weight=1;vpool@127.0.0.1:${VIRTUAL_PORT},type=VIRTUAL,weight=8,virtual_node_count=${VIRTUAL_NODE_COUNT};optical-01@127.0.0.1:${OPTICAL_PORT},type=OPTICAL,weight=1,virtual_node_count=${OPTICAL_NODE_COUNT}
+DISKS=node-01:${REAL_DISKS_CSV};vpool:${REAL_DISKS_CSV};optical-01:${OPTICAL_DISKS_CSV}
 EOF
 
 PID_FILE="${RUN_DIR}/pids.txt"
@@ -207,12 +208,8 @@ start_service() {
 start_service scheduler_server "${BUILD_DIR}/scheduler_server" --config="${CONF_DIR}/scheduler.conf" --port="${SCHEDULER_PORT}"
 wait_port 127.0.0.1 "${SCHEDULER_PORT}" 20 || { echo "scheduler not ready"; exit 1; }
 
-start_service real_node_01 "${BUILD_DIR}/real_node_server" --config="${CONF_DIR}/real_node_01.conf" --port="${REAL1_PORT}"
-start_service real_node_02 "${BUILD_DIR}/real_node_server" --config="${CONF_DIR}/real_node_02.conf" --port="${REAL2_PORT}"
-start_service real_node_03 "${BUILD_DIR}/real_node_server" --config="${CONF_DIR}/real_node_03.conf" --port="${REAL3_PORT}"
-wait_port 127.0.0.1 "${REAL1_PORT}" 20 || { echo "real_node_01 not ready"; exit 1; }
-wait_port 127.0.0.1 "${REAL2_PORT}" 20 || { echo "real_node_02 not ready"; exit 1; }
-wait_port 127.0.0.1 "${REAL3_PORT}" 20 || { echo "real_node_03 not ready"; exit 1; }
+start_service real_node_01 "${BUILD_DIR}/real_node_server" --config="${CONF_DIR}/real_node_01.conf" --port="${REAL_PORT}"
+wait_port 127.0.0.1 "${REAL_PORT}" 20 || { echo "real_node_01 not ready"; exit 1; }
 
 start_service virtual_node "${BUILD_DIR}/virtual_node_server" --config="${CONF_DIR}/virtual_node.conf" --port="${VIRTUAL_PORT}"
 wait_port 127.0.0.1 "${VIRTUAL_PORT}" 20 || { echo "virtual_node not ready"; exit 1; }
@@ -230,12 +227,14 @@ export ZB_CONF_DIR="${CONF_DIR}"
 export ZB_LOG_DIR="${LOG_DIR}"
 export ZB_SCHEDULER_ADDR="127.0.0.1:${SCHEDULER_PORT}"
 export ZB_MDS_ADDR="127.0.0.1:${MDS_PORT}"
-export ZB_REAL_SERVERS="127.0.0.1:${REAL1_PORT},127.0.0.1:${REAL2_PORT},127.0.0.1:${REAL3_PORT}"
-export ZB_REAL_DISKS="disk-01,disk-02,disk-03"
-export ZB_REAL_CONFIGS="${CONF_DIR}/real_node_01.conf,${CONF_DIR}/real_node_02.conf,${CONF_DIR}/real_node_03.conf"
+export ZB_REAL_SERVERS="127.0.0.1:${REAL_PORT}"
+export ZB_REAL_DISKS="${REAL_DISKS_CSV}"
+export ZB_REAL_CONFIGS="${CONF_DIR}/real_node_01.conf"
 export ZB_VIRTUAL_SERVER="127.0.0.1:${VIRTUAL_PORT}"
 export ZB_OPTICAL_SERVER="127.0.0.1:${OPTICAL_PORT}"
+export ZB_REAL_DISK_COUNT="${REAL_DISK_COUNT}"
 export ZB_VIRTUAL_NODE_COUNT="${VIRTUAL_NODE_COUNT}"
+export ZB_OPTICAL_NODE_COUNT="${OPTICAL_NODE_COUNT}"
 export ZB_OPTICAL_DISK_COUNT="${OPTICAL_DISK_COUNT}"
 EOF
 chmod +x "${RUN_DIR}/cluster_env.sh"

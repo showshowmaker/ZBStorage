@@ -253,6 +253,27 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
             cfg.archive_scan_interval_ms = static_cast<uint32_t>(std::stoul(value));
         } else if (key == "ARCHIVE_MAX_CHUNKS_PER_ROUND") {
             cfg.archive_max_chunks_per_round = static_cast<uint32_t>(std::stoul(value));
+        } else if (key == "ARCHIVE_CANDIDATE_QUEUE_SIZE") {
+            cfg.archive_candidate_queue_size = static_cast<uint32_t>(std::stoul(value));
+        } else if (key == "ARCHIVE_LEASE_DEFAULT_MS") {
+            cfg.archive_lease_default_ms = static_cast<uint64_t>(std::stoull(value));
+        } else if (key == "ARCHIVE_LEASE_MIN_MS") {
+            cfg.archive_lease_min_ms = static_cast<uint64_t>(std::stoull(value));
+        } else if (key == "ARCHIVE_LEASE_MAX_MS") {
+            cfg.archive_lease_max_ms = static_cast<uint64_t>(std::stoull(value));
+        } else if (key == "ARCHIVE_DISC_SIZE_BYTES") {
+            cfg.archive_disc_size_bytes = static_cast<uint64_t>(std::stoull(value));
+        } else if (key == "ARCHIVE_STRICT_FULL_DISC") {
+            if (!ParseBool(value, &cfg.archive_strict_full_disc)) {
+                if (error) {
+                    *error = "Invalid ARCHIVE_STRICT_FULL_DISC value: " + value;
+                }
+                return {};
+            }
+        } else if (key == "ARCHIVE_STAGING_DIR") {
+            cfg.archive_staging_dir = value;
+        } else if (key == "ARCHIVE_BATCH_MAX_AGE_MS") {
+            cfg.archive_batch_max_age_ms = static_cast<uint64_t>(std::stoull(value));
         } else if (key == "NODES") {
             auto nodes = Split(value, ';');
             cfg.nodes.clear();
@@ -307,6 +328,21 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
     }
     if (cfg.archive_max_chunks_per_round == 0) {
         cfg.archive_max_chunks_per_round = 1;
+    }
+    if (cfg.archive_candidate_queue_size == 0) {
+        cfg.archive_candidate_queue_size = 1;
+    }
+    if (cfg.archive_lease_min_ms == 0) {
+        cfg.archive_lease_min_ms = 1;
+    }
+    if (cfg.archive_lease_default_ms < cfg.archive_lease_min_ms) {
+        cfg.archive_lease_default_ms = cfg.archive_lease_min_ms;
+    }
+    if (cfg.archive_lease_max_ms < cfg.archive_lease_default_ms) {
+        cfg.archive_lease_max_ms = cfg.archive_lease_default_ms;
+    }
+    if (cfg.archive_disc_size_bytes == 0) {
+        cfg.archive_disc_size_bytes = 1;
     }
     if (cfg.nodes.empty() && cfg.scheduler_address.empty() && error) {
         *error = "NODES is required when SCHEDULER_ADDR is not set";

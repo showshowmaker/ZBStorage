@@ -7,11 +7,16 @@
 #include <brpc/controller.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -24,6 +29,9 @@ DEFINE_uint32(default_replica, 1, "Default replica for create");
 DEFINE_uint64(default_chunk_size, 4194304, "Default chunk size for create");
 DEFINE_int32(timeout_ms, 3000, "RPC timeout in ms");
 DEFINE_int32(max_retry, 0, "RPC max retry");
+DEFINE_int32(repair_max_retry, 8, "Max retry count for asynchronous replica repair");
+DEFINE_int32(repair_retry_interval_ms, 500, "Base retry interval(ms) for asynchronous replica repair");
+DEFINE_int32(repair_max_queue, 10000, "Max in-memory queue size for asynchronous replica repair");
 
 namespace zb::client::fuse_client {
 
@@ -529,15 +537,91 @@ private:
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> channels_;
 };
 
+struct ReplicaRepairTask {
+    zb::rpc::ReplicaLocation replica;
+    uint64_t offset{0};
+    std::string data;
+    uint32_t attempts{0};
+};
+
 struct FuseState {
     MdsClient mds;
     DataNodeClient data_nodes;
     std::mutex mu;
     std::unordered_map<uint64_t, uint64_t> handle_to_inode;
+    std::mutex repair_mu;
+    std::condition_variable repair_cv;
+    std::deque<ReplicaRepairTask> repair_queue;
+    std::atomic<bool> stop_repair{false};
+    std::thread repair_thread;
 };
 
 FuseState* GetState() {
     return static_cast<FuseState*>(fuse_get_context()->private_data);
+}
+
+void EnqueueReplicaRepair(FuseState* state,
+                          const zb::rpc::ReplicaLocation& replica,
+                          uint64_t offset,
+                          const std::string& data) {
+    if (!state) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state->repair_mu);
+    const size_t max_queue = static_cast<size_t>(std::max(1, FLAGS_repair_max_queue));
+    if (state->repair_queue.size() >= max_queue) {
+        state->repair_queue.pop_front();
+    }
+    ReplicaRepairTask task;
+    task.replica = replica;
+    task.offset = offset;
+    task.data = data;
+    state->repair_queue.push_back(std::move(task));
+    state->repair_cv.notify_one();
+}
+
+void RepairWorkerLoop(FuseState* state) {
+    if (!state) {
+        return;
+    }
+    const uint32_t max_retry = static_cast<uint32_t>(std::max(1, FLAGS_repair_max_retry));
+    const int retry_interval_ms = std::max(1, FLAGS_repair_retry_interval_ms);
+    while (true) {
+        ReplicaRepairTask task;
+        {
+            std::unique_lock<std::mutex> lock(state->repair_mu);
+            state->repair_cv.wait(lock, [&]() {
+                return state->stop_repair.load() || !state->repair_queue.empty();
+            });
+            if (state->stop_repair.load() && state->repair_queue.empty()) {
+                break;
+            }
+            task = std::move(state->repair_queue.front());
+            state->repair_queue.pop_front();
+        }
+
+        std::string error;
+        if (state->data_nodes.Write(task.replica, task.offset, task.data, &error)) {
+            continue;
+        }
+        if (task.attempts + 1 >= max_retry) {
+            continue;
+        }
+
+        ++task.attempts;
+        std::this_thread::sleep_for(std::chrono::milliseconds(retry_interval_ms * task.attempts));
+        {
+            std::lock_guard<std::mutex> lock(state->repair_mu);
+            if (!state->stop_repair.load()) {
+                const size_t max_queue = static_cast<size_t>(std::max(1, FLAGS_repair_max_queue));
+                if (state->repair_queue.size() >= max_queue) {
+                    state->repair_queue.pop_front();
+                }
+                state->repair_queue.push_back(std::move(task));
+                state->repair_cv.notify_one();
+            }
+        }
+    }
 }
 
 int FuseGetattr(const char* path, struct stat* st, struct fuse_file_info* fi) {
@@ -768,11 +852,27 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
         uint64_t write_len = write_end - write_start;
         std::string data(buf + (write_start - offset), buf + (write_start - offset + write_len));
 
+        bool wrote_disk_replica = false;
+        std::vector<zb::rpc::ReplicaLocation> failed_replicas;
         for (const auto& replica : chunk.replicas()) {
+            if (replica.storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
+                continue;
+            }
             std::string error;
             if (!state->data_nodes.Write(replica, chunk_off, data, &error)) {
-                return -EIO;
+                failed_replicas.push_back(replica);
+                continue;
             }
+            wrote_disk_replica = true;
+        }
+        if (!wrote_disk_replica) {
+            return -EIO;
+        }
+        if (!failed_replicas.empty()) {
+            for (const auto& failed_replica : failed_replicas) {
+                EnqueueReplicaRepair(state, failed_replica, chunk_off, data);
+            }
+            return -EIO;
         }
 
         remaining -= write_len;
@@ -811,6 +911,9 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "Failed to connect to MDS %s\n", FLAGS_mds.c_str());
         return 1;
     }
+    state.repair_thread = std::thread([&state]() {
+        zb::client::fuse_client::RepairWorkerLoop(&state);
+    });
 
     static struct fuse_operations ops = {};
     ops.getattr = zb::client::fuse_client::FuseGetattr;
@@ -826,5 +929,11 @@ int main(int argc, char* argv[]) {
     ops.write = zb::client::fuse_client::FuseWrite;
     ops.truncate = zb::client::fuse_client::FuseTruncate;
 
-    return fuse_main(argc, argv, &ops, &state);
+    int ret = fuse_main(argc, argv, &ops, &state);
+    state.stop_repair.store(true);
+    state.repair_cv.notify_all();
+    if (state.repair_thread.joinable()) {
+        state.repair_thread.join();
+    }
+    return ret;
 }

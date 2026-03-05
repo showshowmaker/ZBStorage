@@ -3,6 +3,8 @@
 #include <string>
 
 #include "../allocator/ChunkAllocator.h"
+#include "../archive/ArchiveCandidateQueue.h"
+#include "../archive/ArchiveLeaseManager.h"
 #include "../storage/RocksMetaStore.h"
 #include "../storage/MetaCodec.h"
 #include "../storage/MetaSchema.h"
@@ -12,7 +14,11 @@ namespace zb::mds {
 
 class MdsServiceImpl : public zb::rpc::MdsService {
 public:
-    MdsServiceImpl(RocksMetaStore* store, ChunkAllocator* allocator, uint64_t default_chunk_size);
+    MdsServiceImpl(RocksMetaStore* store,
+                   ChunkAllocator* allocator,
+                   uint64_t default_chunk_size,
+                   ArchiveCandidateQueue* candidate_queue = nullptr,
+                   ArchiveLeaseManager* lease_manager = nullptr);
 
     void Lookup(google::protobuf::RpcController* cntl_base,
                 const zb::rpc::LookupRequest* request,
@@ -83,6 +89,22 @@ public:
                           const zb::rpc::ReportNodeStatusRequest* request,
                           zb::rpc::ReportNodeStatusReply* response,
                           google::protobuf::Closure* done) override;
+    void ReportArchiveCandidates(google::protobuf::RpcController* cntl_base,
+                                 const zb::rpc::ReportArchiveCandidatesRequest* request,
+                                 zb::rpc::ReportArchiveCandidatesReply* response,
+                                 google::protobuf::Closure* done) override;
+    void ClaimArchiveTask(google::protobuf::RpcController* cntl_base,
+                          const zb::rpc::ClaimArchiveTaskRequest* request,
+                          zb::rpc::ClaimArchiveTaskReply* response,
+                          google::protobuf::Closure* done) override;
+    void RenewArchiveLease(google::protobuf::RpcController* cntl_base,
+                           const zb::rpc::RenewArchiveLeaseRequest* request,
+                           zb::rpc::RenewArchiveLeaseReply* response,
+                           google::protobuf::Closure* done) override;
+    void CommitArchiveTask(google::protobuf::RpcController* cntl_base,
+                           const zb::rpc::CommitArchiveTaskRequest* request,
+                           zb::rpc::CommitArchiveTaskReply* response,
+                           google::protobuf::Closure* done) override;
 
 private:
     bool EnsureRoot(std::string* error);
@@ -99,11 +121,14 @@ private:
     uint64_t AllocateHandleId(std::string* error);
     static std::string GenerateChunkId();
     static uint64_t NowSeconds();
+    static uint64_t NowMilliseconds();
     static void FillStatus(zb::rpc::MdsStatus* status, zb::rpc::MdsStatusCode code, const std::string& message);
 
     RocksMetaStore* store_{};
     ChunkAllocator* allocator_{};
     uint64_t default_chunk_size_{0};
+    ArchiveCandidateQueue* candidate_queue_{};
+    ArchiveLeaseManager* lease_manager_{};
 };
 
 } // namespace zb::mds

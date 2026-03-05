@@ -28,6 +28,8 @@ zb::msg::Status DiskManager::Init(const std::string& config_str) {
 }
 
 zb::msg::Status DiskManager::InitFromConfig(const std::string& config_str) {
+    use_synthetic_capacity_ = false;
+    synthetic_capacity_bytes_ = 0;
     disks_.clear();
     if (config_str.empty()) {
         return zb::msg::Status::InvalidArgument("Empty disk config string");
@@ -68,6 +70,8 @@ zb::msg::Status DiskManager::InitFromConfig(const std::string& config_str) {
 }
 
 zb::msg::Status DiskManager::InitFromDataRoot(const std::string& data_root) {
+    use_synthetic_capacity_ = false;
+    synthetic_capacity_bytes_ = 0;
     disks_.clear();
     if (data_root.empty()) {
         return zb::msg::Status::InvalidArgument("DATA_ROOT is empty");
@@ -102,12 +106,60 @@ zb::msg::Status DiskManager::InitFromDataRoot(const std::string& data_root) {
     return zb::msg::Status::Ok();
 }
 
+zb::msg::Status DiskManager::InitFromBaseDir(const std::string& base_dir,
+                                             uint32_t disk_count,
+                                             uint64_t disk_capacity_bytes) {
+    use_synthetic_capacity_ = true;
+    synthetic_capacity_bytes_ = disk_capacity_bytes;
+    disks_.clear();
+    if (base_dir.empty()) {
+        return zb::msg::Status::InvalidArgument("DISK_BASE_DIR is empty");
+    }
+    if (disk_count == 0) {
+        return zb::msg::Status::InvalidArgument("DISK_COUNT must be > 0");
+    }
+    if (disk_capacity_bytes == 0) {
+        return zb::msg::Status::InvalidArgument("DISK_CAPACITY_BYTES must be > 0");
+    }
+
+    std::error_code ec;
+    fs::path base(base_dir);
+    fs::create_directories(base, ec);
+    if (ec) {
+        return zb::msg::Status::IoError("Failed to create DISK_BASE_DIR: " + ec.message());
+    }
+
+    for (uint32_t i = 0; i < disk_count; ++i) {
+        const std::string disk_id = "disk" + std::to_string(i);
+        const fs::path disk_path = base / disk_id;
+        fs::create_directories(disk_path, ec);
+        if (ec) {
+            return zb::msg::Status::IoError("Failed to create disk dir " + disk_path.string() + ": " + ec.message());
+        }
+
+        DiskContext disk;
+        disk.id = disk_id;
+        disk.mount_point = disk_path.string();
+        disk.is_healthy = RefreshSyntheticStats(&disk, synthetic_capacity_bytes_);
+        disks_[disk.id] = std::move(disk);
+    }
+
+    if (disks_.empty()) {
+        return zb::msg::Status::NotFound("No disks initialized under DISK_BASE_DIR: " + base_dir);
+    }
+    return zb::msg::Status::Ok();
+}
+
 zb::msg::Status DiskManager::Refresh() {
     if (disks_.empty()) {
         return zb::msg::Status::NotFound("No disks initialized");
     }
     for (auto& [id, disk] : disks_) {
-        disk.is_healthy = RefreshStats(&disk);
+        if (use_synthetic_capacity_) {
+            disk.is_healthy = RefreshSyntheticStats(&disk, synthetic_capacity_bytes_);
+        } else {
+            disk.is_healthy = RefreshStats(&disk);
+        }
     }
     return zb::msg::Status::Ok();
 }
@@ -156,6 +208,24 @@ bool DiskManager::LoadDiskIdFromFile(const std::string& mount_point, std::string
     return true;
 }
 
+uint64_t DiskManager::CalculateDirectoryUsageBytes(const std::string& dir_path) {
+    std::error_code ec;
+    if (!fs::exists(dir_path, ec) || !fs::is_directory(dir_path, ec)) {
+        return 0;
+    }
+
+    uint64_t total = 0;
+    fs::recursive_directory_iterator it(dir_path, fs::directory_options::skip_permission_denied, ec);
+    fs::recursive_directory_iterator end;
+    while (!ec && it != end) {
+        if (it->is_regular_file(ec)) {
+            total += static_cast<uint64_t>(it->file_size(ec));
+        }
+        it.increment(ec);
+    }
+    return total;
+}
+
 bool DiskManager::RefreshStats(DiskContext* disk) {
     if (!disk) {
         return false;
@@ -170,6 +240,24 @@ bool DiskManager::RefreshStats(DiskContext* disk) {
         disk->free_bytes = 0;
         return false;
     }
+}
+
+bool DiskManager::RefreshSyntheticStats(DiskContext* disk, uint64_t synthetic_capacity_bytes) {
+    if (!disk || synthetic_capacity_bytes == 0) {
+        return false;
+    }
+
+    std::error_code ec;
+    if (!fs::exists(disk->mount_point, ec) || !fs::is_directory(disk->mount_point, ec)) {
+        disk->capacity_bytes = 0;
+        disk->free_bytes = 0;
+        return false;
+    }
+
+    const uint64_t used_bytes = CalculateDirectoryUsageBytes(disk->mount_point);
+    disk->capacity_bytes = synthetic_capacity_bytes;
+    disk->free_bytes = synthetic_capacity_bytes > used_bytes ? (synthetic_capacity_bytes - used_bytes) : 0;
+    return true;
 }
 
 } // namespace zb::real_node

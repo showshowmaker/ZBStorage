@@ -1,13 +1,19 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include <brpc/channel.h>
 
+#include "ArchiveChunkMetaStore.h"
 #include "../io/DiskManager.h"
 #include "../io/IOExecutor.h"
 #include "../io/LocalPathResolver.h"
@@ -30,11 +36,26 @@ struct ReplicationStatusSnapshot {
     std::string secondary_address;
 };
 
+struct ArchiveCandidateStat {
+    std::string disk_id;
+    std::string chunk_id;
+    uint64_t last_access_ts_ms{0};
+    uint64_t size_bytes{0};
+    uint64_t checksum{0};
+    double heat_score{0.0};
+    std::string archive_state{"pending"};
+    uint64_t version{0};
+    double score{0.0};
+    uint64_t read_ops{0};
+    uint64_t write_ops{0};
+};
+
 class StorageServiceImpl {
 public:
     StorageServiceImpl(DiskManager* disk_manager,
                        LocalPathResolver* path_resolver,
                        IOExecutor* io_executor);
+    ~StorageServiceImpl();
 
     void ConfigureReplication(const std::string& node_id,
                               const std::string& group_id,
@@ -57,8 +78,37 @@ public:
     zb::msg::DeleteChunkReply DeleteChunk(const zb::msg::DeleteChunkRequest& request);
     zb::msg::DiskReportReply GetDiskReport() const;
 
+    bool InitArchiveMetaStore(const std::string& meta_dir,
+                              size_t max_chunks,
+                              uint32_t snapshot_interval_ops,
+                              bool wal_fsync,
+                              std::string* error);
+    bool FlushArchiveMetaSnapshot(std::string* error);
+    zb::msg::Status UpdateArchiveState(const std::string& disk_id,
+                                       const std::string& chunk_id,
+                                       const std::string& archive_state,
+                                       uint64_t version);
+    void SetArchiveTrackingMaxChunks(size_t max_chunks);
+    std::vector<ArchiveCandidateStat> CollectArchiveCandidates(uint32_t max_candidates, uint64_t min_age_ms) const;
+
 private:
+    struct ReplicationRepairTask {
+        zb::msg::WriteChunkRequest request;
+        uint64_t epoch{0};
+        uint32_t attempts{0};
+    };
+
     zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
+    void EnqueueReplicationRepair(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
+    void ReplicationRepairLoop();
+    void TrackChunkAccess(const std::string& disk_id,
+                          const std::string& chunk_id,
+                          uint64_t end_offset,
+                          bool is_write,
+                          uint64_t checksum);
+    void RemoveChunkTracking(const std::string& disk_id, const std::string& chunk_id);
+    static uint64_t FastChecksum64(const std::string& data);
+    static uint64_t NowMilliseconds();
 
     DiskManager* disk_manager_{};
     LocalPathResolver* path_resolver_{};
@@ -70,6 +120,14 @@ private:
 
     mutable std::mutex channel_mu_;
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> peer_channels_;
+    std::mutex repl_repair_mu_;
+    std::condition_variable repl_repair_cv_;
+    std::deque<ReplicationRepairTask> repl_repair_queue_;
+    std::atomic<bool> stop_repl_repair_{false};
+    std::thread repl_repair_thread_;
+
+    ArchiveChunkMetaStore archive_meta_store_;
+    size_t archive_tracking_max_chunks_{500000};
 };
 
 } // namespace zb::real_node

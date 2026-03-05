@@ -10,6 +10,9 @@
 
 #include "../allocator/ChunkAllocator.h"
 #include "../allocator/NodeStateCache.h"
+#include "../archive/ArchiveBatchStager.h"
+#include "../archive/ArchiveCandidateQueue.h"
+#include "../archive/ArchiveLeaseManager.h"
 #include "../archive/OpticalArchiveManager.h"
 #include "../config/MdsConfig.h"
 #include "../service/MdsServiceImpl.h"
@@ -43,16 +46,42 @@ int main(int argc, char* argv[]) {
 
     zb::mds::NodeStateCache cache(cfg.nodes);
     zb::mds::ChunkAllocator allocator(&cache);
-    zb::mds::MdsServiceImpl service(&store, &allocator, cfg.chunk_size);
+    zb::mds::ArchiveCandidateQueue candidate_queue(cfg.archive_candidate_queue_size);
+    zb::mds::ArchiveLeaseManager::Options lease_options;
+    lease_options.default_lease_ms = cfg.archive_lease_default_ms;
+    lease_options.min_lease_ms = cfg.archive_lease_min_ms;
+    lease_options.max_lease_ms = cfg.archive_lease_max_ms;
+    zb::mds::ArchiveLeaseManager lease_manager(&store, lease_options);
+    zb::mds::ArchiveBatchStager batch_stager;
+    zb::mds::MdsServiceImpl service(&store, &allocator, cfg.chunk_size, &candidate_queue, &lease_manager);
     std::unique_ptr<zb::mds::OpticalArchiveManager> archive_manager;
     if (cfg.enable_optical_archive) {
+        zb::mds::ArchiveBatchStager::Options stager_options;
+        stager_options.disc_size_bytes = cfg.archive_disc_size_bytes;
+        stager_options.strict_full_disc = cfg.archive_strict_full_disc;
+        stager_options.max_batch_age_ms = cfg.archive_batch_max_age_ms;
+        std::string staging_dir = cfg.archive_staging_dir;
+        if (staging_dir.empty()) {
+            staging_dir = cfg.db_path + "/archive_staging";
+        }
+        if (!batch_stager.Init(staging_dir, stager_options, &error)) {
+            std::cerr << "Failed to init archive batch stager: " << error << std::endl;
+            return 1;
+        }
+
         zb::mds::OpticalArchiveManager::Options options;
         options.archive_trigger_bytes = cfg.archive_trigger_bytes;
         options.archive_target_bytes = cfg.archive_target_bytes;
         options.cold_file_ttl_sec = cfg.cold_file_ttl_sec;
         options.max_chunks_per_round = cfg.archive_max_chunks_per_round;
         options.default_chunk_size = cfg.chunk_size;
-        archive_manager = std::make_unique<zb::mds::OpticalArchiveManager>(&store, &cache, options);
+        archive_manager =
+            std::make_unique<zb::mds::OpticalArchiveManager>(&store,
+                                                              &cache,
+                                                              &candidate_queue,
+                                                              &batch_stager,
+                                                              &lease_manager,
+                                                              options);
     }
 
     std::atomic<bool> stop_sync{false};
@@ -179,6 +208,9 @@ int main(int argc, char* argv[]) {
             while (!stop_sync.load()) {
                 std::string archive_error;
                 archive_manager->RunOnce(&archive_error);
+                if (!archive_error.empty()) {
+                    std::cerr << "archive round warning: " << archive_error << std::endl;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
             }
         });

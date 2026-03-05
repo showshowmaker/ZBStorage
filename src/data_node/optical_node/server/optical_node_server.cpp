@@ -37,6 +37,7 @@ public:
                                std::string peer_node_id,
                                std::string peer_address,
                                uint32_t node_weight,
+                               uint32_t virtual_node_count,
                                uint32_t interval_ms,
                                zb::optical_node::OpticalStorageServiceImpl* service)
         : scheduler_addr_(std::move(scheduler_addr)),
@@ -47,6 +48,7 @@ public:
           peer_node_id_(std::move(peer_node_id)),
           peer_address_(std::move(peer_address)),
           node_weight_(node_weight == 0 ? 1 : node_weight),
+          virtual_node_count_(virtual_node_count == 0 ? 1 : virtual_node_count),
           interval_ms_(interval_ms == 0 ? 2000 : interval_ms),
           service_(service) {}
 
@@ -91,7 +93,7 @@ private:
             request.set_node_type(zb::rpc::NODE_OPTICAL);
             request.set_address(node_address_);
             request.set_weight(node_weight_);
-            request.set_virtual_node_count(1);
+            request.set_virtual_node_count(virtual_node_count_);
             request.set_report_ts_ms(NowMs());
             request.set_group_id(group_id_);
             request.set_role(configured_role_);
@@ -138,6 +140,7 @@ private:
     std::string peer_node_id_;
     std::string peer_address_;
     uint32_t node_weight_{1};
+    uint32_t virtual_node_count_{1};
     uint32_t interval_ms_{2000};
     zb::optical_node::OpticalStorageServiceImpl* service_{};
     std::atomic<bool> stop_{false};
@@ -217,6 +220,7 @@ int main(int argc, char* argv[]) {
                                         cfg.peer_node_id,
                                         cfg.peer_address,
                                         cfg.node_weight,
+                                        cfg.virtual_node_count,
                                         cfg.heartbeat_interval_ms,
                                         &storage_service);
     if (!cfg.scheduler_addr.empty()) {

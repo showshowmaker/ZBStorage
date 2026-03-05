@@ -51,6 +51,14 @@ struct MdsConfig {
     uint64_t cold_file_ttl_sec{3600};
     uint32_t archive_scan_interval_ms{5000};
     uint32_t archive_max_chunks_per_round{64};
+    uint32_t archive_candidate_queue_size{200000};
+    uint64_t archive_lease_default_ms{30000};
+    uint64_t archive_lease_min_ms{1000};
+    uint64_t archive_lease_max_ms{300000};
+    uint64_t archive_disc_size_bytes{1ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL};
+    bool archive_strict_full_disc{true};
+    std::string archive_staging_dir;
+    uint64_t archive_batch_max_age_ms{0};
 
     static MdsConfig LoadFromFile(const std::string& path, std::string* error);
 };

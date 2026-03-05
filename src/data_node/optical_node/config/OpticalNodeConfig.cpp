@@ -142,6 +142,13 @@ OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::
                 }
                 return {};
             }
+        } else if (key == "VIRTUAL_NODE_COUNT") {
+            if (!ParseUint32(value, &cfg.virtual_node_count)) {
+                if (error) {
+                    *error = "Invalid VIRTUAL_NODE_COUNT at line " + std::to_string(line_no);
+                }
+                return {};
+            }
         } else if (key == "HEARTBEAT_INTERVAL_MS") {
             if (!ParseUint32(value, &cfg.heartbeat_interval_ms)) {
                 if (error) {
@@ -180,6 +187,9 @@ OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::
     }
     if (cfg.node_role.empty()) {
         cfg.node_role = "PRIMARY";
+    }
+    if (cfg.virtual_node_count == 0) {
+        cfg.virtual_node_count = 1;
     }
     if (cfg.heartbeat_interval_ms == 0) {
         cfg.heartbeat_interval_ms = 2000;

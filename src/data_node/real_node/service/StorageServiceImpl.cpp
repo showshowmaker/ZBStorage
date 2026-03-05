@@ -2,18 +2,38 @@
 
 #include <brpc/controller.h>
 
+#include <algorithm>
+#include <chrono>
 #include <utility>
 
 #include "real_node.pb.h"
 
 namespace zb::real_node {
 
+namespace {
+
+constexpr uint32_t kReplicationRepairMaxRetry = 8;
+constexpr int kReplicationRepairRetryIntervalMs = 500;
+constexpr size_t kReplicationRepairMaxQueue = 10000;
+
+} // namespace
+
 StorageServiceImpl::StorageServiceImpl(DiskManager* disk_manager,
                                        LocalPathResolver* path_resolver,
                                        IOExecutor* io_executor)
     : disk_manager_(disk_manager),
       path_resolver_(path_resolver),
-      io_executor_(io_executor) {}
+      io_executor_(io_executor) {
+    repl_repair_thread_ = std::thread([this]() { ReplicationRepairLoop(); });
+}
+
+StorageServiceImpl::~StorageServiceImpl() {
+    stop_repl_repair_.store(true);
+    repl_repair_cv_.notify_all();
+    if (repl_repair_thread_.joinable()) {
+        repl_repair_thread_.join();
+    }
+}
 
 void StorageServiceImpl::ConfigureReplication(const std::string& node_id,
                                               const std::string& group_id,
@@ -108,6 +128,11 @@ zb::msg::WriteChunkReply StorageServiceImpl::WriteChunk(const zb::msg::WriteChun
     if (!reply.status.ok()) {
         return reply;
     }
+    TrackChunkAccess(request.disk_id,
+                     request.chunk_id,
+                     request.offset + bytes_written,
+                     true,
+                     FastChecksum64(request.data));
 
     {
         std::lock_guard<std::mutex> lock(repl_mu_);
@@ -118,6 +143,7 @@ zb::msg::WriteChunkReply StorageServiceImpl::WriteChunk(const zb::msg::WriteChun
         !repl_snapshot.peer_address.empty()) {
         zb::msg::Status repl_status = ReplicateWriteToSecondary(request, repl_snapshot.epoch);
         if (!repl_status.ok()) {
+            EnqueueReplicationRepair(request, repl_snapshot.epoch);
             reply.status = repl_status;
             return reply;
         }
@@ -151,6 +177,9 @@ zb::msg::ReadChunkReply StorageServiceImpl::ReadChunk(const zb::msg::ReadChunkRe
     uint64_t bytes_read = 0;
     reply.status = io_executor_->Read(path, request.offset, request.size, &reply.data, &bytes_read);
     reply.bytes = bytes_read;
+    if (reply.status.ok()) {
+        TrackChunkAccess(request.disk_id, request.chunk_id, request.offset + bytes_read, false, 0);
+    }
     return reply;
 }
 
@@ -179,6 +208,9 @@ zb::msg::DeleteChunkReply StorageServiceImpl::DeleteChunk(const zb::msg::DeleteC
     reply.status = io_executor_->Delete(path);
     if (reply.status.code == zb::msg::StatusCode::kNotFound) {
         reply.status = zb::msg::Status::Ok();
+    }
+    if (reply.status.ok()) {
+        RemoveChunkTracking(request.disk_id, request.chunk_id);
     }
     return reply;
 }
@@ -233,6 +265,7 @@ zb::msg::Status StorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::Wri
     replicate_req.set_data(request.data);
     replicate_req.set_is_replication(true);
     replicate_req.set_epoch(epoch);
+    replicate_req.set_archive_op_id(request.archive_op_id);
 
     zb::rpc::WriteChunkReply replicate_resp;
     brpc::Controller cntl;
@@ -244,6 +277,142 @@ zb::msg::Status StorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::Wri
         return zb::msg::Status::IoError("replication rejected: " + replicate_resp.status().message());
     }
     return zb::msg::Status::Ok();
+}
+
+void StorageServiceImpl::EnqueueReplicationRepair(const zb::msg::WriteChunkRequest& request, uint64_t epoch) {
+    std::lock_guard<std::mutex> lock(repl_repair_mu_);
+    if (repl_repair_queue_.size() >= kReplicationRepairMaxQueue) {
+        repl_repair_queue_.pop_front();
+    }
+    ReplicationRepairTask task;
+    task.request = request;
+    task.epoch = epoch;
+    task.attempts = 0;
+    repl_repair_queue_.push_back(std::move(task));
+    repl_repair_cv_.notify_one();
+}
+
+void StorageServiceImpl::ReplicationRepairLoop() {
+    while (true) {
+        ReplicationRepairTask task;
+        {
+            std::unique_lock<std::mutex> lock(repl_repair_mu_);
+            repl_repair_cv_.wait(lock, [this]() {
+                return stop_repl_repair_.load() || !repl_repair_queue_.empty();
+            });
+            if (stop_repl_repair_.load() && repl_repair_queue_.empty()) {
+                break;
+            }
+            task = std::move(repl_repair_queue_.front());
+            repl_repair_queue_.pop_front();
+        }
+
+        zb::msg::Status status = ReplicateWriteToSecondary(task.request, task.epoch);
+        if (status.ok()) {
+            continue;
+        }
+        if (task.attempts + 1 >= kReplicationRepairMaxRetry) {
+            continue;
+        }
+
+        ++task.attempts;
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(kReplicationRepairRetryIntervalMs * static_cast<int>(task.attempts)));
+        std::lock_guard<std::mutex> lock(repl_repair_mu_);
+        if (stop_repl_repair_.load()) {
+            continue;
+        }
+        if (repl_repair_queue_.size() >= kReplicationRepairMaxQueue) {
+            repl_repair_queue_.pop_front();
+        }
+        repl_repair_queue_.push_back(std::move(task));
+        repl_repair_cv_.notify_one();
+    }
+}
+
+void StorageServiceImpl::SetArchiveTrackingMaxChunks(size_t max_chunks) {
+    archive_tracking_max_chunks_ = max_chunks > 0 ? max_chunks : 1;
+    archive_meta_store_.SetMaxChunks(archive_tracking_max_chunks_);
+}
+
+std::vector<ArchiveCandidateStat> StorageServiceImpl::CollectArchiveCandidates(uint32_t max_candidates,
+                                                                               uint64_t min_age_ms) const {
+    const std::vector<ArchiveCandidateView> views =
+        archive_meta_store_.CollectCandidates(max_candidates, min_age_ms, NowMilliseconds());
+    std::vector<ArchiveCandidateStat> out;
+    out.reserve(views.size());
+    for (const auto& view : views) {
+        ArchiveCandidateStat candidate;
+        candidate.disk_id = view.disk_id;
+        candidate.chunk_id = view.chunk_id;
+        candidate.last_access_ts_ms = view.last_access_ts_ms;
+        candidate.size_bytes = view.size_bytes;
+        candidate.checksum = view.checksum;
+        candidate.heat_score = view.heat_score;
+        candidate.archive_state = view.archive_state;
+        candidate.version = view.version;
+        candidate.score = view.score;
+        candidate.read_ops = view.read_ops;
+        candidate.write_ops = view.write_ops;
+        out.push_back(std::move(candidate));
+    }
+    return out;
+}
+
+void StorageServiceImpl::TrackChunkAccess(const std::string& disk_id,
+                                          const std::string& chunk_id,
+                                          uint64_t end_offset,
+                                          bool is_write,
+                                          uint64_t checksum) {
+    archive_meta_store_.TrackAccess(disk_id, chunk_id, end_offset, is_write, checksum, NowMilliseconds());
+}
+
+void StorageServiceImpl::RemoveChunkTracking(const std::string& disk_id, const std::string& chunk_id) {
+    archive_meta_store_.RemoveChunk(disk_id, chunk_id);
+}
+
+bool StorageServiceImpl::InitArchiveMetaStore(const std::string& meta_dir,
+                                              size_t max_chunks,
+                                              uint32_t snapshot_interval_ops,
+                                              bool wal_fsync,
+                                              std::string* error) {
+    archive_tracking_max_chunks_ = max_chunks > 0 ? max_chunks : 1;
+    return archive_meta_store_.Init(meta_dir,
+                                    archive_tracking_max_chunks_,
+                                    snapshot_interval_ops,
+                                    error,
+                                    wal_fsync);
+}
+
+bool StorageServiceImpl::FlushArchiveMetaSnapshot(std::string* error) {
+    return archive_meta_store_.FlushSnapshot(error);
+}
+
+zb::msg::Status StorageServiceImpl::UpdateArchiveState(const std::string& disk_id,
+                                                       const std::string& chunk_id,
+                                                       const std::string& archive_state,
+                                                       uint64_t version) {
+    if (disk_id.empty() || chunk_id.empty() || archive_state.empty()) {
+        return zb::msg::Status::InvalidArgument("disk_id/chunk_id/archive_state is empty");
+    }
+    if (!archive_meta_store_.UpdateArchiveState(disk_id, chunk_id, archive_state, version)) {
+        return zb::msg::Status::IoError("failed to update archive state");
+    }
+    return zb::msg::Status::Ok();
+}
+
+uint64_t StorageServiceImpl::FastChecksum64(const std::string& data) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (unsigned char ch : data) {
+        hash ^= static_cast<uint64_t>(ch);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+uint64_t StorageServiceImpl::NowMilliseconds() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
 } // namespace zb::real_node
