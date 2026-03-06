@@ -3,10 +3,14 @@
 #include <brpc/channel.h>
 
 #include <cstdint>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -48,6 +52,7 @@ struct ArchiveCandidateStat {
 class VirtualStorageServiceImpl {
 public:
     explicit VirtualStorageServiceImpl(VirtualNodeConfig config);
+    ~VirtualStorageServiceImpl();
 
     void ConfigureReplication(const std::string& node_id,
                               const std::string& group_id,
@@ -83,6 +88,14 @@ public:
     std::vector<ArchiveCandidateStat> CollectArchiveCandidates(uint32_t max_candidates, uint64_t min_age_ms) const;
 
 private:
+    struct ReplicationRepairTask {
+        std::string key;
+        zb::msg::WriteChunkRequest request;
+        uint64_t epoch{0};
+        uint32_t attempts{0};
+        uint64_t generation{0};
+    };
+
     bool ValidateDisk(const std::string& disk_id) const;
     void SimulateIo(uint64_t bytes, bool is_read);
     void TrackChunkAccess(const std::string& disk_id,
@@ -93,6 +106,10 @@ private:
     void RemoveChunkTracking(const std::string& disk_id, const std::string& chunk_id);
     uint32_t RandomJitterMs();
     zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
+    void EnqueueReplicationRepair(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
+    uint64_t BumpReplicationRepairGeneration(const zb::msg::WriteChunkRequest& request);
+    static std::string BuildReplicationRepairKey(const zb::msg::WriteChunkRequest& request);
+    void ReplicationRepairLoop();
     static uint64_t FastChecksum64(const std::string& data);
     static uint64_t NowMilliseconds();
     static std::string BuildChunkKey(const std::string& disk_id, const std::string& chunk_id);
@@ -112,6 +129,12 @@ private:
 
     mutable std::mutex channel_mu_;
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> peer_channels_;
+    std::mutex repl_repair_mu_;
+    std::condition_variable repl_repair_cv_;
+    std::deque<ReplicationRepairTask> repl_repair_queue_;
+    std::unordered_map<std::string, uint64_t> repl_repair_generation_;
+    std::atomic<bool> stop_repl_repair_{false};
+    std::thread repl_repair_thread_;
     real_node::ArchiveChunkMetaStore archive_meta_store_;
     size_t archive_tracking_max_chunks_{500000};
 };

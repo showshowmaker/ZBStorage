@@ -79,6 +79,8 @@ private:
                                                 std::unordered_set<std::string>* touched_chunk_keys,
                                                 std::string* error);
     bool ReconcileArchiveStates(uint32_t max_records, std::string* error);
+    bool ProcessReverseChunkRepairTasks(uint32_t max_records, std::string* error);
+    bool EnqueueReverseChunkRepair(const std::string& chunk_id, std::string* error);
     bool FindChunkKeyByChunkId(const std::string& chunk_id, std::string* chunk_key, std::string* error);
     bool HasReadyOpticalReplica(const std::string& chunk_key,
                                 const std::string& chunk_id,

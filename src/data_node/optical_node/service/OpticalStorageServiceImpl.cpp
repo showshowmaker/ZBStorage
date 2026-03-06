@@ -2,9 +2,22 @@
 
 #include <brpc/controller.h>
 
+#include <algorithm>
+#include <chrono>
+#include <utility>
+#include <vector>
+
 #include "real_node.pb.h"
 
 namespace zb::optical_node {
+
+namespace {
+
+constexpr size_t kArchiveOpCacheMaxEntries = 100000;
+constexpr uint64_t kArchiveOpCacheTtlMs = 24ULL * 60ULL * 60ULL * 1000ULL;
+constexpr uint64_t kArchiveOpCachePruneInterval = 1024;
+
+} // namespace
 
 OpticalStorageServiceImpl::OpticalStorageServiceImpl(ImageStore* store) : store_(store) {}
 
@@ -82,10 +95,15 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
         reply.status = zb::msg::Status::IoError("STALE_EPOCH");
         return reply;
     }
+    const uint64_t now_ms = NowMilliseconds();
     if (!request.archive_op_id.empty()) {
         std::lock_guard<std::mutex> lock(archive_op_mu_);
+        PruneArchiveOpCacheLocked(now_ms);
         auto it = last_archive_op_by_chunk_.find(request.chunk_id);
-        if (it != last_archive_op_by_chunk_.end() && it->second == request.archive_op_id) {
+        if (it != last_archive_op_by_chunk_.end() &&
+            it->second.op_id == request.archive_op_id &&
+            now_ms >= it->second.last_seen_ts_ms &&
+            now_ms - it->second.last_seen_ts_ms <= kArchiveOpCacheTtlMs) {
             reply.status = zb::msg::Status::Ok();
             reply.bytes = static_cast<uint64_t>(request.data.size());
             return reply;
@@ -113,7 +131,10 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
     }
     if (!request.archive_op_id.empty()) {
         std::lock_guard<std::mutex> lock(archive_op_mu_);
-        last_archive_op_by_chunk_[request.chunk_id] = request.archive_op_id;
+        PruneArchiveOpCacheLocked(now_ms);
+        ArchiveOpCacheEntry& entry = last_archive_op_by_chunk_[request.chunk_id];
+        entry.op_id = request.archive_op_id;
+        entry.last_seen_ts_ms = now_ms;
     }
 
     return reply;
@@ -228,6 +249,49 @@ zb::msg::Status OpticalStorageServiceImpl::ReplicateWriteToSecondary(const zb::m
         return zb::msg::Status::IoError("replication rejected: " + replicate_resp.status().message());
     }
     return zb::msg::Status::Ok();
+}
+
+uint64_t OpticalStorageServiceImpl::NowMilliseconds() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+void OpticalStorageServiceImpl::PruneArchiveOpCacheLocked(uint64_t now_ms) {
+    ++archive_op_cache_touch_;
+    const bool need_periodic_prune = (archive_op_cache_touch_ % kArchiveOpCachePruneInterval) == 0;
+    if (!need_periodic_prune && last_archive_op_by_chunk_.size() <= kArchiveOpCacheMaxEntries) {
+        return;
+    }
+
+    for (auto it = last_archive_op_by_chunk_.begin(); it != last_archive_op_by_chunk_.end();) {
+        const ArchiveOpCacheEntry& entry = it->second;
+        const bool expired = now_ms >= entry.last_seen_ts_ms &&
+                             now_ms - entry.last_seen_ts_ms > kArchiveOpCacheTtlMs;
+        if (expired) {
+            it = last_archive_op_by_chunk_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (last_archive_op_by_chunk_.size() <= kArchiveOpCacheMaxEntries) {
+        return;
+    }
+
+    std::vector<std::pair<std::string, uint64_t>> candidates;
+    candidates.reserve(last_archive_op_by_chunk_.size());
+    for (const auto& item : last_archive_op_by_chunk_) {
+        candidates.emplace_back(item.first, item.second.last_seen_ts_ms);
+    }
+    std::sort(candidates.begin(),
+              candidates.end(),
+              [](const std::pair<std::string, uint64_t>& a,
+                 const std::pair<std::string, uint64_t>& b) {
+                  return a.second < b.second;
+              });
+    const size_t remove_count = candidates.size() - kArchiveOpCacheMaxEntries;
+    for (size_t i = 0; i < remove_count; ++i) {
+        last_archive_op_by_chunk_.erase(candidates[i].first);
+    }
 }
 
 } // namespace zb::optical_node

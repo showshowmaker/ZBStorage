@@ -27,6 +27,8 @@ namespace {
 constexpr double kReadHeatDelta = 1.0;
 constexpr double kWriteHeatDelta = 2.0;
 constexpr double kHeatDecay = 0.95;
+constexpr char kArchiveWalMagic[] = {'A', 'M', 'W', '1'};
+constexpr uint32_t kMaxWalPayloadBytes = 64U * 1024U * 1024U;
 
 } // namespace
 
@@ -75,6 +77,9 @@ bool ArchiveChunkMetaStore::Init(const std::string& dir_path,
         if (error) {
             *error = "failed to open archive meta wal: " + wal_path_;
         }
+        return false;
+    }
+    if (!EnsureWalMagicLocked(error)) {
         return false;
     }
     inited_ = true;
@@ -427,14 +432,21 @@ bool ArchiveChunkMetaStore::LoadSnapshotLocked(std::string* error) {
 bool ArchiveChunkMetaStore::ReplayWalLocked(std::string* error) {
     std::ifstream in(wal_path_, std::ios::in | std::ios::binary);
     if (!in.is_open()) {
+        wal_has_magic_ = true;
         return true;
     }
 
-    const int first = in.peek();
-    if (first == std::char_traits<char>::eof()) {
+    char prefix[4] = {0, 0, 0, 0};
+    in.read(prefix, 4);
+    const std::streamsize prefix_read = in.gcount();
+    if (prefix_read == 0 && in.eof()) {
+        wal_has_magic_ = true;
         return true;
     }
-    if (first == 'U' || first == 'D') {
+    if (prefix_read >= 2 &&
+        (prefix[0] == 'U' || prefix[0] == 'D') &&
+        prefix[1] == '\t') {
+        in.close();
         if (!ReplayLegacyWalLocked(error)) {
             return false;
         }
@@ -446,10 +458,26 @@ bool ArchiveChunkMetaStore::ReplayWalLocked(std::string* error) {
             }
             return false;
         }
+        wal_has_magic_ = true;
         return true;
     }
 
-    uint64_t last_good_offset = 0;
+    uint64_t start_offset = 0;
+    if (prefix_read == 4 &&
+        prefix[0] == kArchiveWalMagic[0] &&
+        prefix[1] == kArchiveWalMagic[1] &&
+        prefix[2] == kArchiveWalMagic[2] &&
+        prefix[3] == kArchiveWalMagic[3]) {
+        wal_has_magic_ = true;
+        start_offset = 4;
+    } else {
+        wal_has_magic_ = false;
+    }
+
+    in.clear();
+    in.seekg(static_cast<std::streamoff>(start_offset), std::ios::beg);
+
+    uint64_t last_good_offset = start_offset;
     bool need_truncate = false;
     while (true) {
         const std::streampos record_begin = in.tellg();
@@ -472,7 +500,7 @@ bool ArchiveChunkMetaStore::ReplayWalLocked(std::string* error) {
             (static_cast<uint32_t>(static_cast<unsigned char>(len_buf[1])) << 8) |
             (static_cast<uint32_t>(static_cast<unsigned char>(len_buf[2])) << 16) |
             (static_cast<uint32_t>(static_cast<unsigned char>(len_buf[3])) << 24);
-        if (payload_len > (64U * 1024U * 1024U)) {
+        if (payload_len > kMaxWalPayloadBytes) {
             need_truncate = true;
             break;
         }
@@ -596,8 +624,56 @@ bool ArchiveChunkMetaStore::ReplayLegacyWalLocked(std::string* error) {
     return true;
 }
 
+bool ArchiveChunkMetaStore::EnsureWalMagicLocked(std::string* error) {
+    if (!wal_has_magic_) {
+        return true;
+    }
+    if (!wal_out_.is_open()) {
+        if (error) {
+            *error = "archive wal stream is not open";
+        }
+        return false;
+    }
+
+    std::error_code ec;
+    const uint64_t file_size = fs::exists(wal_path_, ec) ? fs::file_size(wal_path_, ec) : 0;
+    if (ec) {
+        if (error) {
+            *error = "failed to stat archive wal: " + wal_path_;
+        }
+        return false;
+    }
+    if (file_size == 0) {
+        wal_out_.write(kArchiveWalMagic, static_cast<std::streamsize>(sizeof(kArchiveWalMagic)));
+        wal_out_.flush();
+        if (!wal_out_.good()) {
+            if (error) {
+                *error = "failed to write archive wal magic: " + wal_path_;
+            }
+            return false;
+        }
+        if (wal_fsync_enabled_ && !FsyncPath(wal_path_)) {
+            if (error) {
+                *error = "failed to fsync archive wal magic: " + wal_path_;
+            }
+            return false;
+        }
+        return true;
+    }
+    if (file_size < sizeof(kArchiveWalMagic)) {
+        if (error) {
+            *error = "archive wal is too small for magic header: " + wal_path_;
+        }
+        return false;
+    }
+    return true;
+}
+
 bool ArchiveChunkMetaStore::AppendWalRecordLocked(const std::string& payload) {
     if (!wal_out_.is_open()) {
+        return false;
+    }
+    if (!EnsureWalMagicLocked(nullptr)) {
         return false;
     }
     const uint32_t len = static_cast<uint32_t>(payload.size());
@@ -688,6 +764,10 @@ bool ArchiveChunkMetaStore::WriteSnapshotLocked(std::string* error) {
         if (error) {
             *error = "failed to reopen archive wal: " + wal_path_;
         }
+        return false;
+    }
+    wal_has_magic_ = true;
+    if (!EnsureWalMagicLocked(error)) {
         return false;
     }
     if (wal_fsync_enabled_ && !FsyncPath(wal_path_)) {

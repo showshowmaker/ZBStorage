@@ -1139,6 +1139,7 @@ bool MdsServiceImpl::DeleteInodeData(uint64_t inode_id, std::string* error) {
     for (const auto& chunk_id : chunk_ids) {
         batch.Delete(ReverseChunkKey(chunk_id));
         batch.Delete(ArchiveStateKey(chunk_id));
+        batch.Delete(ArchiveReverseRepairKey(chunk_id));
     }
     if (batch.Count() == 0) {
         return true;

@@ -93,13 +93,17 @@ public:
 
 private:
     struct ReplicationRepairTask {
+        std::string key;
         zb::msg::WriteChunkRequest request;
         uint64_t epoch{0};
         uint32_t attempts{0};
+        uint64_t generation{0};
     };
 
     zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
     void EnqueueReplicationRepair(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
+    uint64_t BumpReplicationRepairGeneration(const zb::msg::WriteChunkRequest& request);
+    static std::string BuildReplicationRepairKey(const zb::msg::WriteChunkRequest& request);
     void ReplicationRepairLoop();
     void TrackChunkAccess(const std::string& disk_id,
                           const std::string& chunk_id,
@@ -123,6 +127,7 @@ private:
     std::mutex repl_repair_mu_;
     std::condition_variable repl_repair_cv_;
     std::deque<ReplicationRepairTask> repl_repair_queue_;
+    std::unordered_map<std::string, uint64_t> repl_repair_generation_;
     std::atomic<bool> stop_repl_repair_{false};
     std::thread repl_repair_thread_;
 

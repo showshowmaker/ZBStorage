@@ -141,11 +141,18 @@ zb::msg::WriteChunkReply StorageServiceImpl::WriteChunk(const zb::msg::WriteChun
 
     if (repl_snapshot.replication_enabled && repl_snapshot.is_primary && !request.is_replication &&
         !repl_snapshot.peer_address.empty()) {
+        const uint64_t generation = BumpReplicationRepairGeneration(request);
         zb::msg::Status repl_status = ReplicateWriteToSecondary(request, repl_snapshot.epoch);
         if (!repl_status.ok()) {
             EnqueueReplicationRepair(request, repl_snapshot.epoch);
             reply.status = repl_status;
             return reply;
+        }
+        std::lock_guard<std::mutex> lock(repl_repair_mu_);
+        const std::string key = BuildReplicationRepairKey(request);
+        auto it = repl_repair_generation_.find(key);
+        if (it != repl_repair_generation_.end() && it->second == generation) {
+            repl_repair_generation_.erase(it);
         }
     }
     return reply;
@@ -281,15 +288,50 @@ zb::msg::Status StorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::Wri
 
 void StorageServiceImpl::EnqueueReplicationRepair(const zb::msg::WriteChunkRequest& request, uint64_t epoch) {
     std::lock_guard<std::mutex> lock(repl_repair_mu_);
+    const std::string key = BuildReplicationRepairKey(request);
+    uint64_t generation = 1;
+    auto gen_it = repl_repair_generation_.find(key);
+    if (gen_it != repl_repair_generation_.end()) {
+        generation = gen_it->second;
+    } else {
+        repl_repair_generation_[key] = generation;
+    }
+    for (auto qit = repl_repair_queue_.begin(); qit != repl_repair_queue_.end();) {
+        if (qit->key == key) {
+            qit = repl_repair_queue_.erase(qit);
+        } else {
+            ++qit;
+        }
+    }
     if (repl_repair_queue_.size() >= kReplicationRepairMaxQueue) {
+        const ReplicationRepairTask dropped = std::move(repl_repair_queue_.front());
         repl_repair_queue_.pop_front();
+        auto dropped_it = repl_repair_generation_.find(dropped.key);
+        if (dropped_it != repl_repair_generation_.end() && dropped_it->second == dropped.generation) {
+            repl_repair_generation_.erase(dropped_it);
+        }
     }
     ReplicationRepairTask task;
+    task.key = key;
     task.request = request;
     task.epoch = epoch;
     task.attempts = 0;
+    task.generation = generation;
     repl_repair_queue_.push_back(std::move(task));
     repl_repair_cv_.notify_one();
+}
+
+uint64_t StorageServiceImpl::BumpReplicationRepairGeneration(const zb::msg::WriteChunkRequest& request) {
+    std::lock_guard<std::mutex> lock(repl_repair_mu_);
+    const std::string key = BuildReplicationRepairKey(request);
+    uint64_t& generation = repl_repair_generation_[key];
+    generation += 1;
+    return generation;
+}
+
+std::string StorageServiceImpl::BuildReplicationRepairKey(const zb::msg::WriteChunkRequest& request) {
+    return request.disk_id + "|" + request.chunk_id + "|" +
+           std::to_string(request.offset) + "|" + std::to_string(request.data.size());
 }
 
 void StorageServiceImpl::ReplicationRepairLoop() {
@@ -305,13 +347,27 @@ void StorageServiceImpl::ReplicationRepairLoop() {
             }
             task = std::move(repl_repair_queue_.front());
             repl_repair_queue_.pop_front();
+            auto gen_it = repl_repair_generation_.find(task.key);
+            if (gen_it != repl_repair_generation_.end() && gen_it->second != task.generation) {
+                continue;
+            }
         }
 
         zb::msg::Status status = ReplicateWriteToSecondary(task.request, task.epoch);
         if (status.ok()) {
+            std::lock_guard<std::mutex> lock(repl_repair_mu_);
+            auto gen_it = repl_repair_generation_.find(task.key);
+            if (gen_it != repl_repair_generation_.end() && gen_it->second == task.generation) {
+                repl_repair_generation_.erase(gen_it);
+            }
             continue;
         }
         if (task.attempts + 1 >= kReplicationRepairMaxRetry) {
+            std::lock_guard<std::mutex> lock(repl_repair_mu_);
+            auto gen_it = repl_repair_generation_.find(task.key);
+            if (gen_it != repl_repair_generation_.end() && gen_it->second == task.generation) {
+                repl_repair_generation_.erase(gen_it);
+            }
             continue;
         }
 
@@ -322,8 +378,17 @@ void StorageServiceImpl::ReplicationRepairLoop() {
         if (stop_repl_repair_.load()) {
             continue;
         }
+        auto gen_it = repl_repair_generation_.find(task.key);
+        if (gen_it != repl_repair_generation_.end() && gen_it->second != task.generation) {
+            continue;
+        }
         if (repl_repair_queue_.size() >= kReplicationRepairMaxQueue) {
+            const ReplicationRepairTask dropped = std::move(repl_repair_queue_.front());
             repl_repair_queue_.pop_front();
+            auto dropped_it = repl_repair_generation_.find(dropped.key);
+            if (dropped_it != repl_repair_generation_.end() && dropped_it->second == dropped.generation) {
+                repl_repair_generation_.erase(dropped_it);
+            }
         }
         repl_repair_queue_.push_back(std::move(task));
         repl_repair_cv_.notify_one();

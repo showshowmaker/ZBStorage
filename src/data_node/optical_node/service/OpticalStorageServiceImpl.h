@@ -58,7 +58,14 @@ public:
                                        uint64_t version);
 
 private:
+    struct ArchiveOpCacheEntry {
+        std::string op_id;
+        uint64_t last_seen_ts_ms{0};
+    };
+
     zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
+    static uint64_t NowMilliseconds();
+    void PruneArchiveOpCacheLocked(uint64_t now_ms);
 
     ImageStore* store_{};
 
@@ -70,7 +77,8 @@ private:
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> peer_channels_;
 
     mutable std::mutex archive_op_mu_;
-    std::unordered_map<std::string, std::string> last_archive_op_by_chunk_;
+    std::unordered_map<std::string, ArchiveOpCacheEntry> last_archive_op_by_chunk_;
+    uint64_t archive_op_cache_touch_{0};
 };
 
 } // namespace zb::optical_node

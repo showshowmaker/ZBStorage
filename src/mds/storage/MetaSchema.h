@@ -44,6 +44,14 @@ inline std::string ArchiveOpticalWritePrefix() {
     return "AOW/";
 }
 
+inline std::string ArchiveReverseRepairKey(const std::string& chunk_id) {
+    return "ARR/" + chunk_id;
+}
+
+inline std::string ArchiveReverseRepairPrefix() {
+    return "ARR/";
+}
+
 inline bool ParseChunkKey(const std::string& key, uint64_t* inode_id, uint32_t* index) {
     if (!inode_id || !index) {
         return false;

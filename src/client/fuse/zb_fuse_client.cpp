@@ -538,10 +538,12 @@ private:
 };
 
 struct ReplicaRepairTask {
+    std::string key;
     zb::rpc::ReplicaLocation replica;
     uint64_t offset{0};
     std::string data;
     uint32_t attempts{0};
+    uint64_t generation{0};
 };
 
 struct FuseState {
@@ -552,12 +554,27 @@ struct FuseState {
     std::mutex repair_mu;
     std::condition_variable repair_cv;
     std::deque<ReplicaRepairTask> repair_queue;
+    std::unordered_map<std::string, uint64_t> repair_generation;
     std::atomic<bool> stop_repair{false};
     std::thread repair_thread;
 };
 
 FuseState* GetState() {
     return static_cast<FuseState*>(fuse_get_context()->private_data);
+}
+
+std::string BuildRepairKey(const zb::rpc::ReplicaLocation& replica, uint64_t offset, size_t size) {
+    return replica.disk_id() + "|" + replica.chunk_id() + "|" + std::to_string(offset) + "|" + std::to_string(size);
+}
+
+uint64_t BumpRepairGeneration(FuseState* state, const std::string& key) {
+    if (!state || key.empty()) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(state->repair_mu);
+    uint64_t& generation = state->repair_generation[key];
+    generation += 1;
+    return generation;
 }
 
 void EnqueueReplicaRepair(FuseState* state,
@@ -568,14 +585,36 @@ void EnqueueReplicaRepair(FuseState* state,
         return;
     }
     std::lock_guard<std::mutex> lock(state->repair_mu);
+    const std::string key = BuildRepairKey(replica, offset, data.size());
+    uint64_t generation = 1;
+    auto it = state->repair_generation.find(key);
+    if (it != state->repair_generation.end()) {
+        generation = it->second;
+    } else {
+        state->repair_generation[key] = generation;
+    }
+    for (auto qit = state->repair_queue.begin(); qit != state->repair_queue.end();) {
+        if (qit->key == key) {
+            qit = state->repair_queue.erase(qit);
+        } else {
+            ++qit;
+        }
+    }
     const size_t max_queue = static_cast<size_t>(std::max(1, FLAGS_repair_max_queue));
     if (state->repair_queue.size() >= max_queue) {
+        const ReplicaRepairTask dropped = std::move(state->repair_queue.front());
         state->repair_queue.pop_front();
+        auto dropped_it = state->repair_generation.find(dropped.key);
+        if (dropped_it != state->repair_generation.end() && dropped_it->second == dropped.generation) {
+            state->repair_generation.erase(dropped_it);
+        }
     }
     ReplicaRepairTask task;
+    task.key = key;
     task.replica = replica;
     task.offset = offset;
     task.data = data;
+    task.generation = generation;
     state->repair_queue.push_back(std::move(task));
     state->repair_cv.notify_one();
 }
@@ -598,13 +637,27 @@ void RepairWorkerLoop(FuseState* state) {
             }
             task = std::move(state->repair_queue.front());
             state->repair_queue.pop_front();
+            auto it = state->repair_generation.find(task.key);
+            if (it != state->repair_generation.end() && it->second != task.generation) {
+                continue;
+            }
         }
 
         std::string error;
         if (state->data_nodes.Write(task.replica, task.offset, task.data, &error)) {
+            std::lock_guard<std::mutex> lock(state->repair_mu);
+            auto it = state->repair_generation.find(task.key);
+            if (it != state->repair_generation.end() && it->second == task.generation) {
+                state->repair_generation.erase(it);
+            }
             continue;
         }
         if (task.attempts + 1 >= max_retry) {
+            std::lock_guard<std::mutex> lock(state->repair_mu);
+            auto it = state->repair_generation.find(task.key);
+            if (it != state->repair_generation.end() && it->second == task.generation) {
+                state->repair_generation.erase(it);
+            }
             continue;
         }
 
@@ -613,9 +666,18 @@ void RepairWorkerLoop(FuseState* state) {
         {
             std::lock_guard<std::mutex> lock(state->repair_mu);
             if (!state->stop_repair.load()) {
+                auto it = state->repair_generation.find(task.key);
+                if (it != state->repair_generation.end() && it->second != task.generation) {
+                    continue;
+                }
                 const size_t max_queue = static_cast<size_t>(std::max(1, FLAGS_repair_max_queue));
                 if (state->repair_queue.size() >= max_queue) {
+                    const ReplicaRepairTask dropped = std::move(state->repair_queue.front());
                     state->repair_queue.pop_front();
+                    auto dropped_it = state->repair_generation.find(dropped.key);
+                    if (dropped_it != state->repair_generation.end() && dropped_it->second == dropped.generation) {
+                        state->repair_generation.erase(dropped_it);
+                    }
                 }
                 state->repair_queue.push_back(std::move(task));
                 state->repair_cv.notify_one();
@@ -858,6 +920,8 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
             if (replica.storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
                 continue;
             }
+            const std::string repair_key = BuildRepairKey(replica, chunk_off, data.size());
+            (void)BumpRepairGeneration(state, repair_key);
             std::string error;
             if (!state->data_nodes.Write(replica, chunk_off, data, &error)) {
                 failed_replicas.push_back(replica);
