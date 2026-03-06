@@ -282,18 +282,18 @@ if [[ "${SKIP_MOUNT}" != "true" ]]; then
      base='${MOUNT_DIR}/e2e_meta_${UNIQ}'; \
      mkdir -p \"${MOUNT_DIR}\"; \
      test -d \"${MOUNT_DIR}\"; \
-     mkdir -p \"${base}/dir1\"; \
-     echo 'meta-hello-${UNIQ}' > \"${base}/dir1/file1.txt\"; \
-     test -f \"${base}/dir1/file1.txt\"; \
-     mv \"${base}/dir1/file1.txt\" \"${base}/dir1/file2.txt\"; \
-     test -f \"${base}/dir1/file2.txt\"; \
-     stat \"${base}/dir1/file2.txt\" >/dev/null; \
-     truncate -s 1024 \"${base}/dir1/file2.txt\"; \
-     test \"\$(stat -c%s \"${base}/dir1/file2.txt\")\" -eq 1024; \
-     ls -la \"${base}/dir1\" >/dev/null; \
-     rm -f \"${base}/dir1/file2.txt\"; \
-     rmdir \"${base}/dir1\"; \
-     rmdir \"${base}\""
+     mkdir -p \"\${base}/dir1\"; \
+     echo 'meta-hello-${UNIQ}' > \"\${base}/dir1/file1.txt\"; \
+     test -f \"\${base}/dir1/file1.txt\"; \
+     mv \"\${base}/dir1/file1.txt\" \"\${base}/dir1/file2.txt\"; \
+     test -f \"\${base}/dir1/file2.txt\"; \
+     stat \"\${base}/dir1/file2.txt\" >/dev/null; \
+     truncate -s 1024 \"\${base}/dir1/file2.txt\"; \
+     test \"\$(stat -c%s \"\${base}/dir1/file2.txt\")\" -eq 1024; \
+     ls -la \"\${base}/dir1\" >/dev/null; \
+     rm -f \"\${base}/dir1/file2.txt\"; \
+     rmdir \"\${base}/dir1\"; \
+     rmdir \"\${base}\""
 else
   echo "[SKIP] mds_metadata_ops_via_fuse (SKIP_MOUNT=true)"
 fi
