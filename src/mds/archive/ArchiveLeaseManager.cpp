@@ -8,6 +8,9 @@
 
 namespace zb::mds {
 
+ArchiveLeaseManager::ArchiveLeaseManager(RocksMetaStore* store)
+    : ArchiveLeaseManager(store, Options()) {}
+
 ArchiveLeaseManager::ArchiveLeaseManager(RocksMetaStore* store, Options options)
     : store_(store), options_(options) {
     if (options_.min_lease_ms == 0) {

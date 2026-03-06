@@ -17,7 +17,8 @@ public:
         uint64_t max_lease_ms{300000};
     };
 
-    explicit ArchiveLeaseManager(RocksMetaStore* store, Options options = {});
+    explicit ArchiveLeaseManager(RocksMetaStore* store);
+    explicit ArchiveLeaseManager(RocksMetaStore* store, Options options);
 
     bool Claim(const zb::rpc::ClaimArchiveTaskRequest& request,
                zb::rpc::ClaimArchiveTaskReply* reply,
