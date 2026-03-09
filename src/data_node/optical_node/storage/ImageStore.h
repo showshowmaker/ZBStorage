@@ -4,6 +4,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -20,7 +21,12 @@ struct ImageLocation {
 class ImageStore {
 public:
     ImageStore(std::string root,
+               std::string cache_root,
                std::vector<std::string> disk_ids,
+               bool simulate_io,
+               uint64_t optical_read_bytes_per_sec,
+               uint64_t optical_write_bytes_per_sec,
+               uint64_t cache_read_bytes_per_sec,
                uint64_t max_image_size_bytes,
                uint64_t disk_capacity_bytes,
                std::string mount_point_prefix);
@@ -50,6 +56,7 @@ private:
     struct DiskContext {
         std::string disk_id;
         std::string root_path;
+        std::string cache_root_path;
         std::string mount_point;
         std::string manifest_path;
         uint64_t capacity_bytes{0};
@@ -59,6 +66,8 @@ private:
         std::string current_image_id;
         std::string current_image_path;
         uint64_t current_image_size{0};
+        std::unordered_map<std::string, uint64_t> image_sizes;
+        std::unordered_set<std::string> cached_images;
 
         std::unordered_map<std::string, ChunkRecord> chunks;
     };
@@ -68,6 +77,8 @@ private:
     static std::string ToHex(uint64_t value, size_t width);
     static std::string BuildHashPrefix(const std::string& chunk_id);
     static std::string JoinChunkKey(const std::string& disk_id, const std::string& chunk_id);
+    static void SleepByBytes(uint64_t bytes, uint64_t bytes_per_sec);
+    static std::string BuildSimulatedChunkData(const std::string& chunk_id, uint64_t offset, uint64_t size);
     static std::vector<std::string> Split(const std::string& input, char delimiter);
 
     bool EnsureDiskContextLocked(const std::string& disk_id, DiskContext** ctx, std::string* error) const;
@@ -76,7 +87,12 @@ private:
     bool AppendManifestLocked(const DiskContext& ctx, const std::string& line, std::string* error) const;
 
     std::string root_;
+    std::string cache_root_;
     std::vector<std::string> disk_ids_;
+    bool simulate_io_{true};
+    uint64_t optical_read_bytes_per_sec_{0};
+    uint64_t optical_write_bytes_per_sec_{0};
+    uint64_t cache_read_bytes_per_sec_{0};
     uint64_t max_image_size_bytes_{0};
     uint64_t disk_capacity_bytes_{0};
     std::string mount_point_prefix_;

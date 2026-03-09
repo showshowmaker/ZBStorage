@@ -1,6 +1,13 @@
 #pragma once
 
+#include <brpc/channel.h>
+
+#include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "../allocator/ChunkAllocator.h"
 #include "../archive/ArchiveCandidateQueue.h"
@@ -107,6 +114,11 @@ public:
                            google::protobuf::Closure* done) override;
 
 private:
+    struct RecallTask {
+        std::string chunk_key;
+        zb::rpc::ReplicaLocation optical_replica;
+    };
+
     bool EnsureRoot(std::string* error);
     bool ResolvePath(const std::string& path, uint64_t* inode_id, zb::rpc::InodeAttr* attr, std::string* error);
     bool ResolveParent(const std::string& path, uint64_t* parent_inode, std::string* name, std::string* error);
@@ -116,6 +128,29 @@ private:
     bool DeleteDentry(uint64_t parent_inode, const std::string& name, std::string* error);
     bool DentryExists(uint64_t parent_inode, const std::string& name, std::string* error);
     bool DeleteInodeData(uint64_t inode_id, std::string* error);
+    bool HasReadyDiskReplica(const zb::rpc::ChunkMeta& chunk_meta) const;
+    bool FindReadyOpticalReplica(const zb::rpc::ChunkMeta& chunk_meta, zb::rpc::ReplicaLocation* optical) const;
+    bool CollectRecallTasksByImage(const std::string& seed_chunk_key,
+                                   const zb::rpc::ChunkMeta& seed_meta,
+                                   const zb::rpc::ReplicaLocation& optical_seed,
+                                   std::vector<RecallTask>* tasks,
+                                   std::string* error);
+    bool RecallTasksToDisk(const std::vector<RecallTask>& tasks, std::string* error);
+    bool CacheWholeFileToDisk(uint64_t inode_id, std::string* error);
+    bool EnsureChunkReadableFromDisk(const std::string& chunk_key,
+                                     zb::rpc::ChunkMeta* chunk_meta,
+                                     std::unordered_set<std::string>* recalled_images,
+                                     bool* recalled_from_optical,
+                                     std::string* error);
+    bool ReadChunkFromReplica(const zb::rpc::ReplicaLocation& source,
+                              uint64_t read_size,
+                              std::string* data,
+                              std::string* error);
+    bool WriteChunkToReplica(const zb::rpc::ReplicaLocation& target,
+                             const std::string& chunk_id,
+                             const std::string& data,
+                             std::string* error);
+    brpc::Channel* GetDataChannel(const std::string& address, std::string* error);
 
     uint64_t AllocateInodeId(std::string* error);
     uint64_t AllocateHandleId(std::string* error);
@@ -129,6 +164,8 @@ private:
     uint64_t default_chunk_size_{0};
     ArchiveCandidateQueue* candidate_queue_{};
     ArchiveLeaseManager* lease_manager_{};
+    mutable std::mutex channel_mu_;
+    std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> channels_;
 };
 
 } // namespace zb::mds

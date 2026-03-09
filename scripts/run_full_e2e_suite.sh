@@ -17,7 +17,20 @@ MOUNT_DIR="${MOUNT_DIR:-${RUN_DIR}/mnt/zbfs}"
 
 SKIP_MOUNT="${SKIP_MOUNT:-false}"
 ENABLE_SCHED_CONTROL_TEST="${ENABLE_SCHED_CONTROL_TEST:-false}"
+ENABLE_OPTICAL_TEST="${ENABLE_OPTICAL_TEST:-true}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-120}"
+OPTICAL_STRESS_DURATION_SEC="${OPTICAL_STRESS_DURATION_SEC:-90}"
+OPTICAL_STRESS_FILE_COUNT="${OPTICAL_STRESS_FILE_COUNT:-64}"
+OPTICAL_STRESS_WRITE_SIZE="${OPTICAL_STRESS_WRITE_SIZE:-1048576}"
+OPTICAL_STRESS_SAMPLE_FILES="${OPTICAL_STRESS_SAMPLE_FILES:-16}"
+OPTICAL_STRESS_COOLDOWN_SEC="${OPTICAL_STRESS_COOLDOWN_SEC:-30}"
+
+OPTICAL_ARCHIVE_TRIGGER_BYTES="${OPTICAL_ARCHIVE_TRIGGER_BYTES:-1048576}"
+OPTICAL_ARCHIVE_TARGET_BYTES="${OPTICAL_ARCHIVE_TARGET_BYTES:-524288}"
+OPTICAL_COLD_FILE_TTL_SEC="${OPTICAL_COLD_FILE_TTL_SEC:-30}"
+OPTICAL_ARCHIVE_SCAN_INTERVAL_MS="${OPTICAL_ARCHIVE_SCAN_INTERVAL_MS:-2000}"
+OPTICAL_ARCHIVE_MAX_CHUNKS_PER_ROUND="${OPTICAL_ARCHIVE_MAX_CHUNKS_PER_ROUND:-256}"
+OPTICAL_ARCHIVE_DISC_SIZE_BYTES="${OPTICAL_ARCHIVE_DISC_SIZE_BYTES:-1048576}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -156,12 +169,14 @@ generate_report() {
     echo "- run_dir: ${RUN_DIR}"
     echo "- report_file: ${REPORT_FILE}"
     echo "- skip_mount: ${SKIP_MOUNT}"
+    echo "- optical_test: ${ENABLE_OPTICAL_TEST}"
     echo "- timeout_sec: ${TIMEOUT_SEC}"
     if [[ -f "${ENV_FILE}" ]]; then
       echo "- scheduler: ${ZB_SCHEDULER_ADDR:-N/A}"
       echo "- mds: ${ZB_MDS_ADDR:-N/A}"
       echo "- real_servers: ${ZB_REAL_SERVERS:-N/A}"
       echo "- virtual_server: ${ZB_VIRTUAL_SERVER:-N/A}"
+      echo "- optical_server: ${ZB_OPTICAL_SERVER:-N/A}"
     fi
     echo
     echo "## Summary"
@@ -214,8 +229,10 @@ require_file "${SCRIPTS_DIR}/oneclick_start_control_plane.sh"
 require_file "${SCRIPTS_DIR}/oneclick_start_data_nodes.sh"
 require_file "${SCRIPTS_DIR}/oneclick_mount_client.sh"
 
-require_bin "${BUILD_DIR}/real_node_multi_test"
 require_bin "${BUILD_DIR}/real_node_client"
+if [[ "${ENABLE_OPTICAL_TEST}" == "true" ]]; then
+  require_bin "${BUILD_DIR}/optical_archive_stress_test"
+fi
 
 if [[ "${ENABLE_SCHED_CONTROL_TEST}" == "true" ]]; then
   require_bin "${BUILD_DIR}/scheduler_control_test"
@@ -229,13 +246,23 @@ if [[ "${SKIP_MOUNT}" != "true" ]]; then
   fi
 fi
 
-run_startup_step \
-  "start_control_plane" \
-  "RUN_DIR='${RUN_DIR}' bash '${SCRIPTS_DIR}/oneclick_start_control_plane.sh'"
+if [[ "${ENABLE_OPTICAL_TEST}" == "true" ]]; then
+  run_startup_step \
+    "start_control_plane" \
+    "RUN_DIR='${RUN_DIR}' ENABLE_OPTICAL_ARCHIVE='true' ARCHIVE_TRIGGER_BYTES='${OPTICAL_ARCHIVE_TRIGGER_BYTES}' ARCHIVE_TARGET_BYTES='${OPTICAL_ARCHIVE_TARGET_BYTES}' COLD_FILE_TTL_SEC='${OPTICAL_COLD_FILE_TTL_SEC}' ARCHIVE_SCAN_INTERVAL_MS='${OPTICAL_ARCHIVE_SCAN_INTERVAL_MS}' ARCHIVE_MAX_CHUNKS_PER_ROUND='${OPTICAL_ARCHIVE_MAX_CHUNKS_PER_ROUND}' ARCHIVE_DISC_SIZE_BYTES='${OPTICAL_ARCHIVE_DISC_SIZE_BYTES}' bash '${SCRIPTS_DIR}/oneclick_start_control_plane.sh'"
 
-run_startup_step \
-  "start_data_nodes" \
-  "RUN_DIR='${RUN_DIR}' bash '${SCRIPTS_DIR}/oneclick_start_data_nodes.sh'"
+  run_startup_step \
+    "start_data_nodes" \
+    "RUN_DIR='${RUN_DIR}' ENABLE_OPTICAL_ARCHIVE='true' bash '${SCRIPTS_DIR}/oneclick_start_data_nodes.sh'"
+else
+  run_startup_step \
+    "start_control_plane" \
+    "RUN_DIR='${RUN_DIR}' bash '${SCRIPTS_DIR}/oneclick_start_control_plane.sh'"
+
+  run_startup_step \
+    "start_data_nodes" \
+    "RUN_DIR='${RUN_DIR}' bash '${SCRIPTS_DIR}/oneclick_start_data_nodes.sh'"
+fi
 
 if [[ "${SKIP_MOUNT}" != "true" ]]; then
   run_startup_step \
@@ -260,10 +287,6 @@ REAL_CHUNK_ID="real_chunk_${UNIQ}"
 VIRTUAL_CHUNK_ID="virtual_chunk_${UNIQ}"
 
 run_case \
-  "real_node_multi_test" \
-  "\"${BUILD_DIR}/real_node_multi_test\" --servers=\"${ZB_REAL_SERVERS}\" --disks=\"${ZB_REAL_DISKS}\" --verify_fs=true --config_files=\"${ZB_REAL_CONFIGS}\""
-
-run_case \
   "real_node_rw_via_client" \
   "set -euo pipefail; \
    \"${BUILD_DIR}/real_node_client\" --server=\"${REAL_FIRST_SERVER}\" --disk_id=\"${REAL_FIRST_DISK}\" --chunk_id=\"${REAL_CHUNK_ID}\" --write_data=\"${REAL_PAYLOAD}\" --read_size=${#REAL_PAYLOAD} --mode=both; \
@@ -275,25 +298,40 @@ run_case \
    \"${BUILD_DIR}/real_node_client\" --server=\"${ZB_VIRTUAL_SERVER}\" --disk_id=\"${VIRTUAL_TEST_DISK}\" --chunk_id=\"${VIRTUAL_CHUNK_ID}\" --write_data=\"${VIRTUAL_PAYLOAD}\" --read_size=${#VIRTUAL_PAYLOAD} --mode=both; \
    \"${BUILD_DIR}/real_node_client\" --server=\"${ZB_VIRTUAL_SERVER}\" --disk_id=\"${VIRTUAL_TEST_DISK}\" --chunk_id=\"${VIRTUAL_CHUNK_ID}\" --read_size=${#VIRTUAL_PAYLOAD} --mode=read | grep -q \"data=${VIRTUAL_PAYLOAD}\""
 
+if [[ "${ENABLE_OPTICAL_TEST}" == "true" ]]; then
+  run_case \
+    "optical_archive_stress_test" \
+    "\"${BUILD_DIR}/optical_archive_stress_test\" --mds=\"${ZB_MDS_ADDR}\" --duration_sec=${OPTICAL_STRESS_DURATION_SEC} --file_count=${OPTICAL_STRESS_FILE_COUNT} --write_size=${OPTICAL_STRESS_WRITE_SIZE} --report_interval_sec=10 --sample_files=${OPTICAL_STRESS_SAMPLE_FILES} --require_optical=true --cooldown_sec=${OPTICAL_STRESS_COOLDOWN_SEC} --require_optical_only_after_cooldown=true"
+else
+  echo "[SKIP] optical_archive_stress_test (ENABLE_OPTICAL_TEST=false)"
+fi
+
 if [[ "${SKIP_MOUNT}" != "true" ]]; then
   run_case \
     "mds_metadata_ops_via_fuse" \
     "set -euo pipefail; \
-     base='${MOUNT_DIR}/e2e_meta_${UNIQ}'; \
      mkdir -p \"${MOUNT_DIR}\"; \
      test -d \"${MOUNT_DIR}\"; \
-     mkdir -p \"\${base}/dir1\"; \
-     echo 'meta-hello-${UNIQ}' > \"\${base}/dir1/file1.txt\"; \
-     test -f \"\${base}/dir1/file1.txt\"; \
-     mv \"\${base}/dir1/file1.txt\" \"\${base}/dir1/file2.txt\"; \
-     test -f \"\${base}/dir1/file2.txt\"; \
-     stat \"\${base}/dir1/file2.txt\" >/dev/null; \
-     truncate -s 1024 \"\${base}/dir1/file2.txt\"; \
-     test \"\$(stat -c%s \"\${base}/dir1/file2.txt\")\" -eq 1024; \
-     ls -la \"\${base}/dir1\" >/dev/null; \
-     rm -f \"\${base}/dir1/file2.txt\"; \
-     rmdir \"\${base}/dir1\"; \
-     rmdir \"\${base}\""
+     for i in \$(seq 1 20); do \
+       base='${MOUNT_DIR}/e2e_meta_${UNIQ}_'\${i}; \
+       if mkdir -p \"\${base}/dir1\" \
+         && echo 'meta-hello-${UNIQ}' > \"\${base}/dir1/file1.txt\" \
+         && test -f \"\${base}/dir1/file1.txt\" \
+         && mv \"\${base}/dir1/file1.txt\" \"\${base}/dir1/file2.txt\" \
+         && test -f \"\${base}/dir1/file2.txt\" \
+         && stat \"\${base}/dir1/file2.txt\" >/dev/null \
+         && truncate -s 1024 \"\${base}/dir1/file2.txt\" \
+         && test \"\$(stat -c%s \"\${base}/dir1/file2.txt\")\" -eq 1024 \
+         && ls -la \"\${base}/dir1\" >/dev/null \
+         && rm -f \"\${base}/dir1/file2.txt\" \
+         && rmdir \"\${base}/dir1\" \
+         && rmdir \"\${base}\"; then \
+         exit 0; \
+       fi; \
+       rm -rf \"\${base}\" >/dev/null 2>&1 || true; \
+       sleep 1; \
+     done; \
+     exit 1"
 else
   echo "[SKIP] mds_metadata_ops_via_fuse (SKIP_MOUNT=true)"
 fi

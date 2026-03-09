@@ -160,6 +160,8 @@ bool LoadDiskMapping(const std::string& config_path, std::unordered_map<std::str
 
     std::string line;
     std::string data_root;
+    std::string disk_base_dir;
+    int disk_count = -1;
     while (std::getline(input, line)) {
         std::string trimmed = Trim(line);
         if (trimmed.empty() || trimmed[0] == '#') {
@@ -175,11 +177,29 @@ bool LoadDiskMapping(const std::string& config_path, std::unordered_map<std::str
             *mapping = ParseDiskMap(value);
         } else if (key == "DATA_ROOT") {
             data_root = value;
+        } else if (key == "DISK_BASE_DIR") {
+            disk_base_dir = value;
+        } else if (key == "DISK_COUNT") {
+            try {
+                disk_count = std::stoi(value);
+            } catch (...) {
+                disk_count = -1;
+            }
         }
     }
 
-    if (mapping->empty() && !data_root.empty()) {
-        *mapping = LoadDiskMapFromDataRoot(data_root);
+    if (mapping->empty()) {
+        const std::string& root = !data_root.empty() ? data_root : disk_base_dir;
+        if (!root.empty()) {
+            *mapping = LoadDiskMapFromDataRoot(root);
+        }
+    }
+
+    if (mapping->empty() && !disk_base_dir.empty() && disk_count > 0) {
+        for (int i = 0; i < disk_count; ++i) {
+            const std::string disk_id = "disk" + std::to_string(i);
+            (*mapping)[disk_id] = (fs::path(disk_base_dir) / disk_id).string();
+        }
     }
 
     return !mapping->empty();

@@ -17,6 +17,10 @@ constexpr size_t kArchiveOpCacheMaxEntries = 100000;
 constexpr uint64_t kArchiveOpCacheTtlMs = 24ULL * 60ULL * 60ULL * 1000ULL;
 constexpr uint64_t kArchiveOpCachePruneInterval = 1024;
 
+std::string BuildCacheChunkKey(const std::string& disk_id, const std::string& chunk_id) {
+    return disk_id + "/" + chunk_id;
+}
+
 } // namespace
 
 OpticalStorageServiceImpl::OpticalStorageServiceImpl(ImageStore* store) : store_(store) {}
@@ -106,16 +110,40 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
             now_ms - it->second.last_seen_ts_ms <= kArchiveOpCacheTtlMs) {
             reply.status = zb::msg::Status::Ok();
             reply.bytes = static_cast<uint64_t>(request.data.size());
+            reply.image_id = it->second.image_id;
+            reply.image_offset = it->second.image_offset;
+            reply.image_length = it->second.image_length;
             return reply;
         }
     }
 
     ImageLocation location;
-    reply.status = store_->WriteChunk(request.disk_id, request.chunk_id, request.data, &location);
-    if (!reply.status.ok()) {
-        return reply;
+    if (request.archive_op_id.empty()) {
+        {
+            std::lock_guard<std::mutex> lock(cache_mu_);
+            std::string& blob = cache_chunks_[BuildCacheChunkKey(request.disk_id, request.chunk_id)];
+            if (request.offset > blob.size()) {
+                blob.resize(static_cast<size_t>(request.offset), '\0');
+            }
+            const size_t write_begin = static_cast<size_t>(request.offset);
+            const size_t write_end = write_begin + request.data.size();
+            if (blob.size() < write_end) {
+                blob.resize(write_end, '\0');
+            }
+            std::copy(request.data.begin(), request.data.end(), blob.begin() + write_begin);
+        }
+        reply.status = zb::msg::Status::Ok();
+        reply.bytes = static_cast<uint64_t>(request.data.size());
+    } else {
+        reply.status = store_->WriteChunk(request.disk_id, request.chunk_id, request.data, &location);
+        if (!reply.status.ok()) {
+            return reply;
+        }
+        reply.bytes = static_cast<uint64_t>(request.data.size());
+        reply.image_id = location.image_id;
+        reply.image_offset = location.image_offset;
+        reply.image_length = location.image_length;
     }
-    reply.bytes = static_cast<uint64_t>(request.data.size());
     {
         std::lock_guard<std::mutex> lock(repl_mu_);
         ++repl_.applied_lsn;
@@ -135,6 +163,9 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
         ArchiveOpCacheEntry& entry = last_archive_op_by_chunk_[request.chunk_id];
         entry.op_id = request.archive_op_id;
         entry.last_seen_ts_ms = now_ms;
+        entry.image_id = location.image_id;
+        entry.image_offset = location.image_offset;
+        entry.image_length = location.image_length;
     }
 
     return reply;
@@ -149,6 +180,25 @@ zb::msg::ReadChunkReply OpticalStorageServiceImpl::ReadChunk(const zb::msg::Read
     if (request.disk_id.empty() || request.chunk_id.empty()) {
         reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
         return reply;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mu_);
+        auto it = cache_chunks_.find(BuildCacheChunkKey(request.disk_id, request.chunk_id));
+        if (it != cache_chunks_.end()) {
+            const std::string& blob = it->second;
+            if (request.offset >= blob.size()) {
+                reply.bytes = 0;
+                reply.data.clear();
+            } else {
+                const uint64_t remain = static_cast<uint64_t>(blob.size()) - request.offset;
+                const uint64_t read_len = std::min<uint64_t>(remain, request.size);
+                reply.bytes = read_len;
+                reply.data.assign(blob.data() + static_cast<size_t>(request.offset), static_cast<size_t>(read_len));
+            }
+            reply.status = zb::msg::Status::Ok();
+            return reply;
+        }
     }
 
     reply.status = store_->ReadChunk(request.disk_id,
@@ -169,6 +219,11 @@ zb::msg::DeleteChunkReply OpticalStorageServiceImpl::DeleteChunk(const zb::msg::
     if (request.disk_id.empty() || request.chunk_id.empty()) {
         reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
         return reply;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mu_);
+        cache_chunks_.erase(BuildCacheChunkKey(request.disk_id, request.chunk_id));
     }
 
     reply.status = store_->DeleteChunk(request.disk_id, request.chunk_id);

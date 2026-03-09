@@ -52,6 +52,19 @@ inline std::string ArchiveReverseRepairPrefix() {
     return "ARR/";
 }
 
+inline std::string ArchiveImageChunkPrefix(const std::string& optical_node_id,
+                                           const std::string& optical_disk_id,
+                                           const std::string& image_id) {
+    return "AIC/" + optical_node_id + "/" + optical_disk_id + "/" + image_id + "/";
+}
+
+inline std::string ArchiveImageChunkKey(const std::string& optical_node_id,
+                                        const std::string& optical_disk_id,
+                                        const std::string& image_id,
+                                        const std::string& chunk_id) {
+    return ArchiveImageChunkPrefix(optical_node_id, optical_disk_id, image_id) + chunk_id;
+}
+
 inline bool ParseChunkKey(const std::string& key, uint64_t* inode_id, uint32_t* index) {
     if (!inode_id || !index) {
         return false;

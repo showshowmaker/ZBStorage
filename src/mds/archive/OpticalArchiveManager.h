@@ -55,6 +55,7 @@ private:
                              const std::string& chunk_id,
                              const std::string& op_id,
                              const std::string& data,
+                             zb::rpc::ReplicaLocation* optical_location,
                              std::string* error);
     bool DeleteDiskReplica(const zb::rpc::ReplicaLocation& replica, std::string* error);
     bool ResolveCandidateSource(const ArchiveCandidateEntry& candidate,
@@ -66,6 +67,7 @@ private:
                                const NodeSelection& optical,
                                const std::string& chunk_id,
                                uint64_t data_size,
+                               const zb::rpc::ReplicaLocation* optical_location,
                                rocksdb::WriteBatch* update_batch,
                                std::string* error);
     bool BurnSealedBatch(const NodeSelection& optical,

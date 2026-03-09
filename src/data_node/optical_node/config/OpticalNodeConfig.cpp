@@ -160,6 +160,36 @@ OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::
             cfg.disk_ids = Split(value, ',');
         } else if (key == "ARCHIVE_ROOT") {
             cfg.archive_root = value;
+        } else if (key == "CACHE_ROOT") {
+            cfg.cache_root = value;
+        } else if (key == "SIMULATE_IO") {
+            if (!ParseBool(value, &cfg.simulate_io)) {
+                if (error) {
+                    *error = "Invalid SIMULATE_IO at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "OPTICAL_READ_BYTES_PER_SEC") {
+            if (!ParseUint64(value, &cfg.optical_read_bytes_per_sec)) {
+                if (error) {
+                    *error = "Invalid OPTICAL_READ_BYTES_PER_SEC at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "OPTICAL_WRITE_BYTES_PER_SEC") {
+            if (!ParseUint64(value, &cfg.optical_write_bytes_per_sec)) {
+                if (error) {
+                    *error = "Invalid OPTICAL_WRITE_BYTES_PER_SEC at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "CACHE_READ_BYTES_PER_SEC") {
+            if (!ParseUint64(value, &cfg.cache_read_bytes_per_sec)) {
+                if (error) {
+                    *error = "Invalid CACHE_READ_BYTES_PER_SEC at line " + std::to_string(line_no);
+                }
+                return {};
+            }
         } else if (key == "MAX_IMAGE_SIZE_BYTES") {
             if (!ParseUint64(value, &cfg.max_image_size_bytes)) {
                 if (error) {
@@ -200,8 +230,20 @@ OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::
     if (cfg.archive_root.empty()) {
         cfg.archive_root = "/tmp/zb_optical";
     }
+    if (cfg.cache_root.empty()) {
+        cfg.cache_root = cfg.archive_root + "/cache";
+    }
     if (cfg.mount_point_prefix.empty()) {
         cfg.mount_point_prefix = "/optical";
+    }
+    if (cfg.optical_read_bytes_per_sec == 0) {
+        cfg.optical_read_bytes_per_sec = 1;
+    }
+    if (cfg.optical_write_bytes_per_sec == 0) {
+        cfg.optical_write_bytes_per_sec = 1;
+    }
+    if (cfg.cache_read_bytes_per_sec == 0) {
+        cfg.cache_read_bytes_per_sec = 1;
     }
     return cfg;
 }

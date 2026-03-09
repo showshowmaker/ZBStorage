@@ -868,6 +868,10 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
         std::string data;
         std::string error;
         for (const auto& replica : chunk.replicas()) {
+            if (replica.storage_tier() != zb::rpc::STORAGE_TIER_DISK ||
+                replica.replica_state() != zb::rpc::REPLICA_READY) {
+                continue;
+            }
             if (state->data_nodes.Read(replica, chunk_off, read_len, &data, &error)) {
                 read_ok = true;
                 break;

@@ -63,6 +63,9 @@ void BrpcVirtualStorageService::WriteChunk(google::protobuf::RpcController* cntl
     zb::msg::WriteChunkReply internal_reply = service_->WriteChunk(internal_req);
     FillStatus(internal_reply.status, response->mutable_status());
     response->set_bytes(internal_reply.bytes);
+    response->set_image_id(internal_reply.image_id);
+    response->set_image_offset(internal_reply.image_offset);
+    response->set_image_length(internal_reply.image_length);
 }
 
 void BrpcVirtualStorageService::ReadChunk(google::protobuf::RpcController* cntl_base,

@@ -61,6 +61,9 @@ private:
     struct ArchiveOpCacheEntry {
         std::string op_id;
         uint64_t last_seen_ts_ms{0};
+        std::string image_id;
+        uint64_t image_offset{0};
+        uint64_t image_length{0};
     };
 
     zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
@@ -79,6 +82,9 @@ private:
     mutable std::mutex archive_op_mu_;
     std::unordered_map<std::string, ArchiveOpCacheEntry> last_archive_op_by_chunk_;
     uint64_t archive_op_cache_touch_{0};
+
+    mutable std::mutex cache_mu_;
+    std::unordered_map<std::string, std::string> cache_chunks_;
 };
 
 } // namespace zb::optical_node

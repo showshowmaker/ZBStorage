@@ -21,6 +21,9 @@ struct WriteChunkRequest {
 struct WriteChunkReply {
     Status status;
     uint64_t bytes{0};
+    std::string image_id;
+    uint64_t image_offset{0};
+    uint64_t image_length{0};
 };
 
 struct ReadChunkRequest {

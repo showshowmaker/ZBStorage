@@ -32,6 +32,9 @@ message WriteChunkRequest {
 message WriteChunkReply {
   Status status = 1;
   uint64 bytes = 2;
+  string image_id = 3;
+  uint64 image_offset = 4;
+  uint64 image_length = 5;
 }
 
 message ReadChunkRequest {

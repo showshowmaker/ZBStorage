@@ -22,6 +22,11 @@ struct OpticalNodeConfig {
 
     std::vector<std::string> disk_ids;
     std::string archive_root{"/tmp/zb_optical"};
+    std::string cache_root;
+    bool simulate_io{true};
+    uint64_t optical_read_bytes_per_sec{100ULL * 1024ULL * 1024ULL};   // 100MB/s
+    uint64_t optical_write_bytes_per_sec{50ULL * 1024ULL * 1024ULL};   // 50MB/s
+    uint64_t cache_read_bytes_per_sec{400ULL * 1024ULL * 1024ULL};     // 400MB/s
     uint64_t max_image_size_bytes{1024ULL * 1024ULL * 1024ULL};
     uint64_t disk_capacity_bytes{10ULL * 1024ULL * 1024ULL * 1024ULL};
     std::string mount_point_prefix{"/optical"};

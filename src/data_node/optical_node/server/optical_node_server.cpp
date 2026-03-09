@@ -177,7 +177,12 @@ int main(int argc, char* argv[]) {
     }
 
     zb::optical_node::ImageStore image_store(cfg.archive_root,
+                                             cfg.cache_root,
                                              cfg.disk_ids,
+                                             cfg.simulate_io,
+                                             cfg.optical_read_bytes_per_sec,
+                                             cfg.optical_write_bytes_per_sec,
+                                             cfg.cache_read_bytes_per_sec,
                                              cfg.max_image_size_bytes,
                                              cfg.disk_capacity_bytes,
                                              cfg.mount_point_prefix);
