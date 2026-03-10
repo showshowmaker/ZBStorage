@@ -345,6 +345,9 @@ target_link_libraries(mds_server
         ${CMAKE_THREAD_LIBS_INIT}
         ${ROCKSDB_TARGET}
 )
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(mds_server PRIVATE -Wno-deprecated-declarations)
+endif()
 if(BRPC_DYNAMIC_LIB)
     target_link_libraries(mds_server PRIVATE ${BRPC_DYNAMIC_LIB})
 endif()

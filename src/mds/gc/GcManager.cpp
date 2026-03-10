@@ -21,6 +21,8 @@ std::string LayoutObjectIdFromKey(const std::string& key) {
 
 } // namespace
 
+GcManager::GcManager(RocksMetaStore* store) : GcManager(store, Options()) {}
+
 GcManager::GcManager(RocksMetaStore* store, Options options) : store_(store), options_(std::move(options)) {
     if (options_.orphan_grace_ms == 0) {
         options_.orphan_grace_ms = 1;

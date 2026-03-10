@@ -15,7 +15,8 @@ public:
         uint32_t max_delete_per_round{1024};
     };
 
-    explicit GcManager(RocksMetaStore* store, Options options = {});
+    explicit GcManager(RocksMetaStore* store);
+    explicit GcManager(RocksMetaStore* store, Options options);
 
     bool RunOnce(std::string* error);
 
