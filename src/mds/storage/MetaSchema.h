@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace zb::mds {
@@ -63,6 +64,116 @@ inline std::string ArchiveImageChunkKey(const std::string& optical_node_id,
                                         const std::string& image_id,
                                         const std::string& chunk_id) {
     return ArchiveImageChunkPrefix(optical_node_id, optical_disk_id, image_id) + chunk_id;
+}
+
+inline std::string LayoutRootKey(uint64_t inode_id) {
+    return "LR/" + std::to_string(inode_id);
+}
+
+inline std::string LayoutRootPrefix() {
+    return "LR/";
+}
+
+inline std::string LayoutObjectKey(const std::string& layout_obj_id) {
+    return "LO/" + layout_obj_id;
+}
+
+inline std::string LayoutObjectPrefix() {
+    return "LO/";
+}
+
+inline std::string LayoutObjectReplicaKey(const std::string& layout_obj_id, uint32_t replica_index) {
+    return "LOR/" + layout_obj_id + "/" + std::to_string(replica_index);
+}
+
+inline std::string LayoutObjectReplicaPrefix(const std::string& layout_obj_id) {
+    return "LOR/" + layout_obj_id + "/";
+}
+
+inline std::string LayoutObjectReplicaGlobalPrefix() {
+    return "LOR/";
+}
+
+inline std::string PgViewKey(uint64_t epoch, uint32_t pg_id) {
+    return "PV/" + std::to_string(epoch) + "/" + std::to_string(pg_id);
+}
+
+inline std::string PgViewPrefix(uint64_t epoch) {
+    return "PV/" + std::to_string(epoch) + "/";
+}
+
+inline std::string PgViewEpochKey() {
+    return "PV/current_epoch";
+}
+
+inline std::string LayoutGcSeenKey(const std::string& layout_obj_id) {
+    return "LGS/" + layout_obj_id;
+}
+
+inline std::string LayoutGcSeenPrefix() {
+    return "LGS/";
+}
+
+inline bool ParseLayoutRootKey(const std::string& key, uint64_t* inode_id) {
+    if (!inode_id) {
+        return false;
+    }
+    constexpr char kPrefix[] = "LR/";
+    if (key.rfind(kPrefix, 0) != 0) {
+        return false;
+    }
+    try {
+        *inode_id = static_cast<uint64_t>(std::stoull(key.substr(sizeof(kPrefix) - 1)));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+inline bool ParsePgViewKey(const std::string& key, uint64_t* epoch, uint32_t* pg_id) {
+    if (!epoch || !pg_id) {
+        return false;
+    }
+    constexpr char kPrefix[] = "PV/";
+    if (key.rfind(kPrefix, 0) != 0) {
+        return false;
+    }
+    size_t sep = key.find('/', sizeof(kPrefix) - 1);
+    if (sep == std::string::npos) {
+        return false;
+    }
+    try {
+        *epoch = static_cast<uint64_t>(std::stoull(key.substr(sizeof(kPrefix) - 1, sep - (sizeof(kPrefix) - 1))));
+        *pg_id = static_cast<uint32_t>(std::stoul(key.substr(sep + 1)));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+inline bool ParseLayoutObjectReplicaKey(const std::string& key, std::string* layout_obj_id, uint32_t* replica_index) {
+    if (!layout_obj_id || !replica_index) {
+        return false;
+    }
+    constexpr char kPrefix[] = "LOR/";
+    if (key.rfind(kPrefix, 0) != 0) {
+        return false;
+    }
+    size_t slash = key.find('/', sizeof(kPrefix) - 1);
+    if (slash == std::string::npos) {
+        return false;
+    }
+    const std::string obj_id = key.substr(sizeof(kPrefix) - 1, slash - (sizeof(kPrefix) - 1));
+    if (obj_id.empty()) {
+        return false;
+    }
+    try {
+        *replica_index = static_cast<uint32_t>(std::stoul(key.substr(slash + 1)));
+        *layout_obj_id = obj_id;
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 inline bool ParseChunkKey(const std::string& key, uint64_t* inode_id, uint32_t* index) {

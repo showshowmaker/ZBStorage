@@ -19,6 +19,11 @@ public:
                    zb::rpc::ReadChunkReply* response,
                    google::protobuf::Closure* done) override;
 
+    void ReadArchivedFile(google::protobuf::RpcController* cntl_base,
+                          const zb::rpc::ReadArchivedFileRequest* request,
+                          zb::rpc::ReadArchivedFileReply* response,
+                          google::protobuf::Closure* done) override;
+
     void DeleteChunk(google::protobuf::RpcController* cntl_base,
                      const zb::rpc::DeleteChunkRequest* request,
                      zb::rpc::DeleteChunkReply* response,

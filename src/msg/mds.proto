@@ -11,6 +11,7 @@ enum MdsStatusCode {
   MDS_ALREADY_EXISTS = 3;
   MDS_NOT_EMPTY = 4;
   MDS_INTERNAL_ERROR = 5;
+  MDS_STALE_EPOCH = 6;
 }
 
 message MdsStatus {
@@ -86,6 +87,37 @@ message FileLayout {
   uint64 inode_id = 1;
   uint64 chunk_size = 2;
   repeated ChunkMeta chunks = 3;
+}
+
+message OpticalReadPlan {
+  bool enabled = 1;
+  string node_id = 2;
+  string node_address = 3;
+  string disc_id = 4;
+  uint64 inode_id = 5;
+  string file_id = 6;
+  uint64 file_size = 7;
+  uint64 layout_version = 8;
+}
+
+message LayoutRoot {
+  uint64 inode_id = 1;
+  string layout_root_id = 2;
+  uint64 layout_version = 3;
+  uint64 file_size = 4;
+  uint64 epoch = 5;
+  uint64 update_ts = 6;
+  uint64 chunk_size = 7;
+}
+
+message LayoutExtent {
+  uint64 logical_offset = 1;
+  uint64 length = 2;
+  string object_id = 3;
+  uint64 object_offset = 4;
+  uint64 object_length = 5;
+  uint64 object_version = 6;
+  uint32 chunk_index = 7;
 }
 
 message LookupRequest {
@@ -205,6 +237,7 @@ message GetLayoutRequest {
 message GetLayoutReply {
   MdsStatus status = 1;
   FileLayout layout = 2;
+  OpticalReadPlan optical_plan = 3;
 }
 
 message CommitWriteRequest {
@@ -214,6 +247,44 @@ message CommitWriteRequest {
 
 message CommitWriteReply {
   MdsStatus status = 1;
+}
+
+message GetLayoutRootRequest {
+  uint64 inode_id = 1;
+}
+
+message GetLayoutRootReply {
+  MdsStatus status = 1;
+  LayoutRoot root = 2;
+  bool from_legacy = 3;
+}
+
+message ResolveLayoutRequest {
+  uint64 inode_id = 1;
+  uint64 offset = 2;
+  uint64 size = 3;
+}
+
+message ResolveLayoutReply {
+  MdsStatus status = 1;
+  LayoutRoot root = 2;
+  repeated LayoutExtent extents = 3;
+  FileLayout read_plan = 4;
+  bool from_legacy = 5;
+  OpticalReadPlan optical_plan = 6;
+}
+
+message CommitLayoutRootRequest {
+  uint64 inode_id = 1;
+  LayoutRoot root = 2;
+  uint64 expected_layout_version = 3;
+  bool update_inode_size = 4;
+  uint64 new_size = 5;
+}
+
+message CommitLayoutRootReply {
+  MdsStatus status = 1;
+  LayoutRoot root = 2;
 }
 
 message DiskStat {
@@ -339,6 +410,9 @@ service MdsService {
   rpc AllocateWrite(AllocateWriteRequest) returns (AllocateWriteReply);
   rpc GetLayout(GetLayoutRequest) returns (GetLayoutReply);
   rpc CommitWrite(CommitWriteRequest) returns (CommitWriteReply);
+  rpc GetLayoutRoot(GetLayoutRootRequest) returns (GetLayoutRootReply);
+  rpc ResolveLayout(ResolveLayoutRequest) returns (ResolveLayoutReply);
+  rpc CommitLayoutRoot(CommitLayoutRootRequest) returns (CommitLayoutRootReply);
   rpc ReportNodeStatus(ReportNodeStatusRequest) returns (ReportNodeStatusReply);
   rpc ReportArchiveCandidates(ReportArchiveCandidatesRequest) returns (ReportArchiveCandidatesReply);
   rpc ClaimArchiveTask(ClaimArchiveTaskRequest) returns (ClaimArchiveTaskReply);

@@ -59,6 +59,16 @@ void BrpcVirtualStorageService::WriteChunk(google::protobuf::RpcController* cntl
     internal_req.is_replication = request->is_replication();
     internal_req.epoch = request->epoch();
     internal_req.archive_op_id = request->archive_op_id();
+    internal_req.inode_id = request->inode_id();
+    internal_req.file_id = request->file_id();
+    internal_req.file_path = request->file_path();
+    internal_req.file_size = request->file_size();
+    internal_req.file_offset = request->file_offset();
+    internal_req.file_mode = request->file_mode();
+    internal_req.file_uid = request->file_uid();
+    internal_req.file_gid = request->file_gid();
+    internal_req.file_mtime = request->file_mtime();
+    internal_req.file_chunk_index = request->file_chunk_index();
 
     zb::msg::WriteChunkReply internal_reply = service_->WriteChunk(internal_req);
     FillStatus(internal_reply.status, response->mutable_status());
@@ -88,8 +98,39 @@ void BrpcVirtualStorageService::ReadChunk(google::protobuf::RpcController* cntl_
     internal_req.chunk_id = request->chunk_id();
     internal_req.offset = request->offset();
     internal_req.size = request->size();
+    internal_req.image_id = request->image_id();
+    internal_req.image_offset = request->image_offset();
+    internal_req.image_length = request->image_length();
 
     zb::msg::ReadChunkReply internal_reply = service_->ReadChunk(internal_req);
+    FillStatus(internal_reply.status, response->mutable_status());
+    response->set_bytes(internal_reply.bytes);
+    response->set_data(internal_reply.data);
+}
+
+void BrpcVirtualStorageService::ReadArchivedFile(google::protobuf::RpcController* cntl_base,
+                                                 const zb::rpc::ReadArchivedFileRequest* request,
+                                                 zb::rpc::ReadArchivedFileReply* response,
+                                                 google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!service_ || !request || !response) {
+        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
+        if (status) {
+            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            status->set_message("Service not initialized");
+        }
+        return;
+    }
+
+    zb::msg::ReadArchivedFileRequest internal_req;
+    internal_req.disc_id = request->disc_id();
+    internal_req.inode_id = request->inode_id();
+    internal_req.file_id = request->file_id();
+    internal_req.offset = request->offset();
+    internal_req.size = request->size();
+
+    const zb::msg::ReadArchivedFileReply internal_reply = service_->ReadArchivedFile(internal_req);
     FillStatus(internal_reply.status, response->mutable_status());
     response->set_bytes(internal_reply.bytes);
     response->set_data(internal_reply.data);

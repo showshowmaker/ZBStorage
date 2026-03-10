@@ -202,6 +202,13 @@ VirtualNodeConfig VirtualNodeConfig::LoadFromFile(const std::string& path, std::
                 }
                 return {};
             }
+        } else if (key == "ALLOW_DYNAMIC_DISKS") {
+            if (!ParseBool(value, &cfg.allow_dynamic_disks)) {
+                if (error) {
+                    *error = "Invalid ALLOW_DYNAMIC_DISKS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
         } else if (key == "DISKS") {
             cfg.disk_ids = Split(value, ',');
         } else if (key == "READ_BYTES_PER_SEC") {

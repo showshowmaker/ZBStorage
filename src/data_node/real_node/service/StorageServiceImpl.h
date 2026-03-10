@@ -17,6 +17,7 @@
 #include "../io/DiskManager.h"
 #include "../io/IOExecutor.h"
 #include "../io/LocalPathResolver.h"
+#include "../../common/ObjectStore.h"
 #include "../../../msg/storage_node_messages.h"
 
 namespace zb::real_node {
@@ -75,7 +76,11 @@ public:
 
     zb::msg::WriteChunkReply WriteChunk(const zb::msg::WriteChunkRequest& request);
     zb::msg::ReadChunkReply ReadChunk(const zb::msg::ReadChunkRequest& request);
+    zb::msg::ReadArchivedFileReply ReadArchivedFile(const zb::msg::ReadArchivedFileRequest& request);
     zb::msg::DeleteChunkReply DeleteChunk(const zb::msg::DeleteChunkRequest& request);
+    zb::msg::Status PutObject(const zb::data_node::ObjectWriteRequest& request);
+    zb::data_node::ObjectReadResult GetObject(const zb::data_node::ObjectReadRequest& request);
+    zb::msg::Status DeleteObject(const zb::data_node::ObjectDeleteRequest& request);
     zb::msg::DiskReportReply GetDiskReport() const;
 
     bool InitArchiveMetaStore(const std::string& meta_dir,

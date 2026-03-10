@@ -185,7 +185,9 @@ int main(int argc, char* argv[]) {
                                              cfg.cache_read_bytes_per_sec,
                                              cfg.max_image_size_bytes,
                                              cfg.disk_capacity_bytes,
-                                             cfg.mount_point_prefix);
+                                             cfg.mount_point_prefix,
+                                             cfg.cache_disc_slots,
+                                             cfg.startup_scan_mode == "full");
     if (!image_store.Init(&config_error)) {
         std::cerr << "Failed to init optical image store: " << config_error << std::endl;
         return 1;

@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cctype>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -49,6 +50,8 @@ int StatusToErrno(const zb::rpc::MdsStatus& status) {
             return EEXIST;
         case zb::rpc::MDS_NOT_EMPTY:
             return ENOTEMPTY;
+        case zb::rpc::MDS_STALE_EPOCH:
+            return EAGAIN;
         default:
             return EIO;
     }
@@ -351,7 +354,11 @@ public:
         return true;
     }
 
-    bool GetLayout(uint64_t inode_id, uint64_t offset, uint64_t size, zb::rpc::FileLayout* layout,
+    bool GetLayout(uint64_t inode_id,
+                   uint64_t offset,
+                   uint64_t size,
+                   zb::rpc::FileLayout* layout,
+                   zb::rpc::OpticalReadPlan* optical_plan,
                    zb::rpc::MdsStatus* status) {
         zb::rpc::GetLayoutRequest request;
         request.set_inode_id(inode_id);
@@ -376,6 +383,159 @@ public:
         if (layout) {
             *layout = reply.layout();
         }
+        if (optical_plan) {
+            *optical_plan = reply.optical_plan();
+        }
+        return true;
+    }
+
+    bool GetLayoutRoot(uint64_t inode_id,
+                       zb::rpc::LayoutRoot* root,
+                       bool* from_legacy,
+                       zb::rpc::MdsStatus* status) {
+        zb::rpc::GetLayoutRootRequest request;
+        request.set_inode_id(inode_id);
+        zb::rpc::GetLayoutRootReply reply;
+        brpc::Controller cntl;
+        stub_.GetLayoutRoot(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            SetRpcFailureStatus(cntl, status);
+            return false;
+        }
+        if (status) {
+            *status = reply.status();
+        }
+        if (reply.status().code() != zb::rpc::MDS_OK) {
+            return false;
+        }
+        if (root) {
+            *root = reply.root();
+        }
+        if (from_legacy) {
+            *from_legacy = reply.from_legacy();
+        }
+        if (reply.root().inode_id() != 0) {
+            UpdateCachedEpoch(reply.root().inode_id(), reply.root().epoch());
+        }
+        return true;
+    }
+
+    bool ResolveLayout(uint64_t inode_id,
+                       uint64_t offset,
+                       uint64_t size,
+                       zb::rpc::ResolveLayoutReply* out,
+                       zb::rpc::MdsStatus* status) {
+        if (!out) {
+            if (status) {
+                status->set_code(zb::rpc::MDS_INVALID_ARGUMENT);
+                status->set_message("ResolveLayout output is null");
+            }
+            return false;
+        }
+        zb::rpc::ResolveLayoutRequest request;
+        request.set_inode_id(inode_id);
+        request.set_offset(offset);
+        request.set_size(size);
+        if (uint64_t cached_epoch = GetCachedEpoch(inode_id); cached_epoch > 0) {
+            (void)cached_epoch;
+        }
+
+        zb::rpc::ResolveLayoutReply reply;
+        brpc::Controller cntl;
+        stub_.ResolveLayout(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            SetRpcFailureStatus(cntl, status);
+            return false;
+        }
+        if (reply.status().code() == zb::rpc::MDS_OK) {
+            *out = reply;
+            if (status) {
+                *status = reply.status();
+            }
+            UpdateCachedEpoch(inode_id, reply.root().epoch());
+            return true;
+        }
+
+        if (IsStaleEpochStatus(reply.status())) {
+            InvalidateCachedEpoch(inode_id);
+            zb::rpc::LayoutRoot refreshed_root;
+            zb::rpc::MdsStatus refresh_status;
+            bool from_legacy = false;
+            if (GetLayoutRoot(inode_id, &refreshed_root, &from_legacy, &refresh_status)) {
+                zb::rpc::ResolveLayoutReply retry_reply;
+                brpc::Controller retry_cntl;
+                stub_.ResolveLayout(&retry_cntl, &request, &retry_reply, nullptr);
+                if (!retry_cntl.Failed()) {
+                    if (status) {
+                        *status = retry_reply.status();
+                    }
+                    if (retry_reply.status().code() == zb::rpc::MDS_OK) {
+                        *out = retry_reply;
+                        UpdateCachedEpoch(inode_id, retry_reply.root().epoch());
+                        return true;
+                    }
+                } else {
+                    SetRpcFailureStatus(retry_cntl, status);
+                    return false;
+                }
+            }
+        }
+
+        if (status) {
+            *status = reply.status();
+        }
+        return false;
+    }
+
+    bool CommitLayoutRoot(uint64_t inode_id,
+                          uint64_t expected_layout_version,
+                          uint64_t new_size,
+                          const zb::rpc::LayoutRoot* base_root,
+                          zb::rpc::LayoutRoot* committed_root,
+                          zb::rpc::MdsStatus* status) {
+        zb::rpc::CommitLayoutRootRequest request;
+        request.set_inode_id(inode_id);
+        request.set_expected_layout_version(expected_layout_version);
+        request.set_update_inode_size(true);
+        request.set_new_size(new_size);
+
+        zb::rpc::LayoutRoot* root = request.mutable_root();
+        root->set_inode_id(inode_id);
+        root->set_layout_version(expected_layout_version > 0 ? expected_layout_version + 1 : 1);
+        root->set_file_size(new_size);
+        root->set_update_ts(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count()));
+        if (base_root) {
+            if (!base_root->layout_root_id().empty()) {
+                root->set_layout_root_id(base_root->layout_root_id());
+            }
+            root->set_epoch(base_root->epoch());
+        } else {
+            root->set_epoch(GetCachedEpoch(inode_id));
+        }
+
+        zb::rpc::CommitLayoutRootReply reply;
+        brpc::Controller cntl;
+        stub_.CommitLayoutRoot(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            SetRpcFailureStatus(cntl, status);
+            return false;
+        }
+        if (status) {
+            *status = reply.status();
+        }
+        if (reply.status().code() != zb::rpc::MDS_OK) {
+            if (IsStaleEpochStatus(reply.status())) {
+                InvalidateCachedEpoch(inode_id);
+            }
+            return false;
+        }
+        if (committed_root) {
+            *committed_root = reply.root();
+        }
+        UpdateCachedEpoch(inode_id, reply.root().epoch());
         return true;
     }
 
@@ -400,8 +560,55 @@ public:
     }
 
 private:
+    static void SetRpcFailureStatus(const brpc::Controller& cntl, zb::rpc::MdsStatus* status) {
+        if (!status) {
+            return;
+        }
+        status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+        status->set_message(cntl.ErrorText());
+    }
+
+    static bool IsStaleEpochStatus(const zb::rpc::MdsStatus& status) {
+        if (status.code() == zb::rpc::MDS_STALE_EPOCH) {
+            return true;
+        }
+        std::string lower = status.message();
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        return lower.find("stale epoch") != std::string::npos ||
+               lower.find("layout version mismatch") != std::string::npos;
+    }
+
+    void UpdateCachedEpoch(uint64_t inode_id, uint64_t epoch) {
+        if (inode_id == 0 || epoch == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(epoch_mu_);
+        inode_epoch_cache_[inode_id] = epoch;
+    }
+
+    void InvalidateCachedEpoch(uint64_t inode_id) {
+        if (inode_id == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(epoch_mu_);
+        inode_epoch_cache_.erase(inode_id);
+    }
+
+    uint64_t GetCachedEpoch(uint64_t inode_id) const {
+        if (inode_id == 0) {
+            return 0;
+        }
+        std::lock_guard<std::mutex> lock(epoch_mu_);
+        auto it = inode_epoch_cache_.find(inode_id);
+        return it == inode_epoch_cache_.end() ? 0 : it->second;
+    }
+
     brpc::Channel channel_;
     zb::rpc::MdsService_Stub stub_{&channel_};
+    mutable std::mutex epoch_mu_;
+    std::unordered_map<uint64_t, uint64_t> inode_epoch_cache_;
 };
 
 class DataNodeClient {
@@ -513,6 +720,54 @@ public:
         return false;
     }
 
+    bool ReadArchivedFile(const zb::rpc::OpticalReadPlan& plan,
+                          uint64_t offset,
+                          uint64_t size,
+                          std::string* out,
+                          std::string* error) {
+        if (!plan.enabled() || plan.node_address().empty() || plan.disc_id().empty()) {
+            if (error) {
+                *error = "invalid optical read plan";
+            }
+            return false;
+        }
+        brpc::Channel* channel = GetChannel(plan.node_address());
+        if (!channel) {
+            if (error) {
+                *error = "Failed to init channel: " + plan.node_address();
+            }
+            return false;
+        }
+
+        zb::rpc::RealNodeService_Stub stub(channel);
+        zb::rpc::ReadArchivedFileRequest request;
+        request.set_disc_id(plan.disc_id());
+        request.set_inode_id(plan.inode_id());
+        request.set_file_id(plan.file_id());
+        request.set_offset(offset);
+        request.set_size(size);
+
+        zb::rpc::ReadArchivedFileReply reply;
+        brpc::Controller cntl;
+        stub.ReadArchivedFile(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            if (error) {
+                *error = cntl.ErrorText();
+            }
+            return false;
+        }
+        if (reply.status().code() != zb::rpc::STATUS_OK) {
+            if (error) {
+                *error = reply.status().message();
+            }
+            return false;
+        }
+        if (out) {
+            *out = reply.data();
+        }
+        return true;
+    }
+
 private:
     brpc::Channel* GetChannel(const std::string& address) {
         std::lock_guard<std::mutex> lock(mu_);
@@ -547,10 +802,18 @@ struct ReplicaRepairTask {
 };
 
 struct FuseState {
+    struct LayoutCacheEntry {
+        uint64_t inode_id{0};
+        uint64_t layout_version{0};
+        uint64_t file_size{0};
+        zb::rpc::FileLayout layout;
+    };
+
     MdsClient mds;
     DataNodeClient data_nodes;
     std::mutex mu;
     std::unordered_map<uint64_t, uint64_t> handle_to_inode;
+    std::unordered_map<uint64_t, LayoutCacheEntry> inode_layout_cache;
     std::mutex repair_mu;
     std::condition_variable repair_cv;
     std::deque<ReplicaRepairTask> repair_queue;
@@ -561,6 +824,92 @@ struct FuseState {
 
 FuseState* GetState() {
     return static_cast<FuseState*>(fuse_get_context()->private_data);
+}
+
+bool IsLegacyFallbackStatus(const zb::rpc::MdsStatus& status) {
+    if (status.code() != zb::rpc::MDS_INTERNAL_ERROR) {
+        return false;
+    }
+    std::string lower = status.message();
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return lower.find("method") != std::string::npos &&
+           lower.find("not") != std::string::npos &&
+           lower.find("found") != std::string::npos;
+}
+
+void InvalidateLayoutCache(FuseState* state, uint64_t inode_id) {
+    if (!state || inode_id == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state->mu);
+    state->inode_layout_cache.erase(inode_id);
+}
+
+void UpdateLayoutCache(FuseState* state,
+                       uint64_t inode_id,
+                       const zb::rpc::LayoutRoot& root,
+                       const zb::rpc::FileLayout& layout) {
+    if (!state || inode_id == 0) {
+        return;
+    }
+    FuseState::LayoutCacheEntry entry;
+    entry.inode_id = inode_id;
+    entry.layout_version = root.layout_version();
+    entry.file_size = root.file_size();
+    entry.layout = layout;
+    std::lock_guard<std::mutex> lock(state->mu);
+    state->inode_layout_cache[inode_id] = std::move(entry);
+}
+
+bool TryGetLayoutCache(FuseState* state,
+                       uint64_t inode_id,
+                       uint64_t offset,
+                       uint64_t requested_size,
+                       zb::rpc::FileLayout* out_layout,
+                       uint64_t* file_size) {
+    if (!state || inode_id == 0 || !out_layout || !file_size) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto it = state->inode_layout_cache.find(inode_id);
+    if (it == state->inode_layout_cache.end()) {
+        return false;
+    }
+    const auto& entry = it->second;
+    if (entry.file_size == 0 || offset >= entry.file_size) {
+        *file_size = entry.file_size;
+        *out_layout = entry.layout;
+        return true;
+    }
+    uint64_t chunk_size = entry.layout.chunk_size();
+    if (chunk_size == 0) {
+        return false;
+    }
+    uint64_t end = std::min(entry.file_size, offset + requested_size);
+    if (end <= offset) {
+        *file_size = entry.file_size;
+        *out_layout = entry.layout;
+        return true;
+    }
+    uint32_t start_idx = static_cast<uint32_t>(offset / chunk_size);
+    uint32_t end_idx = static_cast<uint32_t>((end - 1) / chunk_size);
+    for (uint32_t idx = start_idx; idx <= end_idx; ++idx) {
+        bool found = false;
+        for (const auto& chunk : entry.layout.chunks()) {
+            if (chunk.index() == idx) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    *file_size = entry.file_size;
+    *out_layout = entry.layout;
+    return true;
 }
 
 std::string BuildRepairKey(const zb::rpc::ReplicaLocation& replica, uint64_t offset, size_t size) {
@@ -834,30 +1183,74 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
         return -StatusToErrno(status);
     }
 
-    zb::rpc::InodeAttr attr;
-    if (!state->mds.Getattr(inode_id, &attr, &status)) {
-        return -StatusToErrno(status);
+    const uint64_t request_offset = static_cast<uint64_t>(offset);
+    zb::rpc::FileLayout layout;
+    zb::rpc::OpticalReadPlan optical_plan;
+    uint64_t file_size = 0;
+    if (!TryGetLayoutCache(state, inode_id, request_offset, static_cast<uint64_t>(size), &layout, &file_size)) {
+        zb::rpc::InodeAttr attr;
+        if (!state->mds.Getattr(inode_id, &attr, &status)) {
+            return -StatusToErrno(status);
+        }
+        file_size = attr.size();
+        if (request_offset >= file_size) {
+            return 0;
+        }
+
+        zb::rpc::ResolveLayoutReply resolved;
+        if (state->mds.ResolveLayout(inode_id, 0, file_size, &resolved, &status)) {
+            layout = resolved.read_plan();
+            optical_plan = resolved.optical_plan();
+            UpdateLayoutCache(state, inode_id, resolved.root(), layout);
+        } else {
+            if (!state->mds.GetLayout(inode_id,
+                                      request_offset,
+                                      static_cast<uint64_t>(size),
+                                      &layout,
+                                      &optical_plan,
+                                      &status)) {
+                return -StatusToErrno(status);
+            }
+            if (layout.chunk_size() > 0) {
+                zb::rpc::LayoutRoot pseudo_root;
+                pseudo_root.set_inode_id(inode_id);
+                pseudo_root.set_layout_version(attr.version());
+                pseudo_root.set_file_size(file_size);
+                UpdateLayoutCache(state, inode_id, pseudo_root, layout);
+            }
+        }
     }
-    if (static_cast<uint64_t>(offset) >= attr.size()) {
+
+    if (request_offset >= file_size) {
         return 0;
     }
     uint64_t read_size = static_cast<uint64_t>(size);
-    if (read_size > attr.size() - static_cast<uint64_t>(offset)) {
-        read_size = attr.size() - static_cast<uint64_t>(offset);
+    if (read_size > file_size - request_offset) {
+        read_size = file_size - request_offset;
     }
-
-    zb::rpc::FileLayout layout;
-    if (!state->mds.GetLayout(inode_id, static_cast<uint64_t>(offset), read_size, &layout, &status)) {
-        return -StatusToErrno(status);
+    if (optical_plan.enabled()) {
+        std::string data;
+        std::string error;
+        if (!state->data_nodes.ReadArchivedFile(optical_plan, request_offset, read_size, &data, &error)) {
+            return -EIO;
+        }
+        if (data.size() > read_size) {
+            data.resize(static_cast<size_t>(read_size));
+        }
+        std::memcpy(buf, data.data(), data.size());
+        return static_cast<int>(data.size());
     }
 
     std::string output(read_size, '\0');
     uint64_t chunk_size = layout.chunk_size();
+    if (chunk_size == 0) {
+        return -EIO;
+    }
     for (const auto& chunk : layout.chunks()) {
         uint64_t chunk_start = static_cast<uint64_t>(chunk.index()) * chunk_size;
         uint64_t chunk_end = chunk_start + chunk_size;
-        uint64_t read_start = std::max<uint64_t>(chunk_start, static_cast<uint64_t>(offset));
-        uint64_t read_end = std::min<uint64_t>(chunk_end, static_cast<uint64_t>(offset) + read_size);
+        uint64_t read_start = std::max<uint64_t>(chunk_start, request_offset);
+        uint64_t read_end = std::min<uint64_t>(chunk_end, request_offset + read_size);
         if (read_end <= read_start) {
             continue;
         }
@@ -883,7 +1276,7 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
         if (data.size() > read_len) {
             data.resize(read_len);
         }
-        std::memcpy(output.data() + (read_start - static_cast<uint64_t>(offset)), data.data(), data.size());
+        std::memcpy(output.data() + (read_start - request_offset), data.data(), data.size());
     }
 
     std::memcpy(buf, output.data(), output.size());
@@ -897,6 +1290,15 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
     if (inode_id == 0) {
         return -StatusToErrno(status);
     }
+
+    zb::rpc::LayoutRoot base_root;
+    bool from_legacy_layout = false;
+    if (!state->mds.GetLayoutRoot(inode_id, &base_root, &from_legacy_layout, &status)) {
+        base_root.Clear();
+        base_root.set_inode_id(inode_id);
+        from_legacy_layout = true;
+    }
+    (void)from_legacy_layout;
 
     zb::rpc::FileLayout layout;
     if (!state->mds.AllocateWrite(inode_id, static_cast<uint64_t>(offset), static_cast<uint64_t>(size), &layout, &status)) {
@@ -947,10 +1349,21 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
     }
 
     uint64_t new_size = static_cast<uint64_t>(offset + size);
-    if (!state->mds.CommitWrite(inode_id, new_size, &status)) {
-        return -StatusToErrno(status);
+    zb::rpc::LayoutRoot committed_root;
+    const uint64_t expected_layout_version = base_root.layout_version();
+    if (!state->mds.CommitLayoutRoot(inode_id,
+                                     expected_layout_version,
+                                     new_size,
+                                     &base_root,
+                                     &committed_root,
+                                     &status)) {
+        const bool allow_legacy_commit = IsLegacyFallbackStatus(status);
+        if (!allow_legacy_commit || !state->mds.CommitWrite(inode_id, new_size, &status)) {
+            return -StatusToErrno(status);
+        }
     }
 
+    InvalidateLayoutCache(state, inode_id);
     return static_cast<int>(size - remaining);
 }
 
@@ -961,9 +1374,26 @@ int FuseTruncate(const char* path, off_t size, struct fuse_file_info* fi) {
     if (inode_id == 0) {
         return -StatusToErrno(status);
     }
-    if (!state->mds.CommitWrite(inode_id, static_cast<uint64_t>(size), &status)) {
+    zb::rpc::LayoutRoot base_root;
+    bool from_legacy = false;
+    if (state->mds.GetLayoutRoot(inode_id, &base_root, &from_legacy, &status)) {
+        (void)from_legacy;
+        zb::rpc::LayoutRoot committed;
+        if (state->mds.CommitLayoutRoot(inode_id,
+                                        base_root.layout_version(),
+                                        static_cast<uint64_t>(size),
+                                        &base_root,
+                                        &committed,
+                                        &status)) {
+            InvalidateLayoutCache(state, inode_id);
+            return 0;
+        }
+    }
+    if (!IsLegacyFallbackStatus(status) ||
+        !state->mds.CommitWrite(inode_id, static_cast<uint64_t>(size), &status)) {
         return -StatusToErrno(status);
     }
+    InvalidateLayoutCache(state, inode_id);
     return 0;
 }
 

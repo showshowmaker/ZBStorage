@@ -16,6 +16,16 @@ struct WriteChunkRequest {
     bool is_replication{false};
     uint64_t epoch{0};
     std::string archive_op_id;
+    uint64_t inode_id{0};
+    std::string file_id;
+    std::string file_path;
+    uint64_t file_size{0};
+    uint64_t file_offset{0};
+    uint32_t file_mode{0};
+    uint32_t file_uid{0};
+    uint32_t file_gid{0};
+    uint64_t file_mtime{0};
+    uint32_t file_chunk_index{0};
 };
 
 struct WriteChunkReply {
@@ -31,9 +41,26 @@ struct ReadChunkRequest {
     std::string chunk_id;
     uint64_t offset{0};
     uint64_t size{0};
+    std::string image_id;
+    uint64_t image_offset{0};
+    uint64_t image_length{0};
 };
 
 struct ReadChunkReply {
+    Status status;
+    uint64_t bytes{0};
+    std::string data;
+};
+
+struct ReadArchivedFileRequest {
+    std::string disc_id;
+    uint64_t inode_id{0};
+    std::string file_id;
+    uint64_t offset{0};
+    uint64_t size{0};
+};
+
+struct ReadArchivedFileReply {
     Status status;
     uint64_t bytes{0};
     std::string data;

@@ -21,11 +21,18 @@ namespace zb::mds {
 
 class MdsServiceImpl : public zb::rpc::MdsService {
 public:
+    struct LayoutObjectOptions {
+        uint32_t replica_count{3};
+        bool scrub_on_load{true};
+    };
+
     MdsServiceImpl(RocksMetaStore* store,
                    ChunkAllocator* allocator,
                    uint64_t default_chunk_size,
                    ArchiveCandidateQueue* candidate_queue = nullptr,
                    ArchiveLeaseManager* lease_manager = nullptr);
+
+    void SetLayoutObjectOptions(LayoutObjectOptions options);
 
     void Lookup(google::protobuf::RpcController* cntl_base,
                 const zb::rpc::LookupRequest* request,
@@ -91,6 +98,18 @@ public:
                      const zb::rpc::CommitWriteRequest* request,
                      zb::rpc::CommitWriteReply* response,
                      google::protobuf::Closure* done) override;
+    void GetLayoutRoot(google::protobuf::RpcController* cntl_base,
+                       const zb::rpc::GetLayoutRootRequest* request,
+                       zb::rpc::GetLayoutRootReply* response,
+                       google::protobuf::Closure* done) override;
+    void ResolveLayout(google::protobuf::RpcController* cntl_base,
+                       const zb::rpc::ResolveLayoutRequest* request,
+                       zb::rpc::ResolveLayoutReply* response,
+                       google::protobuf::Closure* done) override;
+    void CommitLayoutRoot(google::protobuf::RpcController* cntl_base,
+                          const zb::rpc::CommitLayoutRootRequest* request,
+                          zb::rpc::CommitLayoutRootReply* response,
+                          google::protobuf::Closure* done) override;
 
     void ReportNodeStatus(google::protobuf::RpcController* cntl_base,
                           const zb::rpc::ReportNodeStatusRequest* request,
@@ -118,6 +137,13 @@ private:
         std::string chunk_key;
         zb::rpc::ReplicaLocation optical_replica;
     };
+    struct PendingWriteTransaction {
+        uint64_t inode_id{0};
+        uint64_t base_layout_version{0};
+        uint64_t pending_layout_version{0};
+        uint64_t create_ts_ms{0};
+        std::unordered_map<uint32_t, zb::rpc::ChunkMeta> chunk_updates;
+    };
 
     bool EnsureRoot(std::string* error);
     bool ResolvePath(const std::string& path, uint64_t* inode_id, zb::rpc::InodeAttr* attr, std::string* error);
@@ -128,6 +154,62 @@ private:
     bool DeleteDentry(uint64_t parent_inode, const std::string& name, std::string* error);
     bool DentryExists(uint64_t parent_inode, const std::string& name, std::string* error);
     bool DeleteInodeData(uint64_t inode_id, std::string* error);
+    bool LoadLayoutRoot(uint64_t inode_id,
+                        LayoutRootRecord* root,
+                        bool* from_legacy,
+                        std::string* error);
+    bool StoreLayoutRootAtomic(uint64_t inode_id,
+                               const LayoutRootRecord& root,
+                               uint64_t expected_layout_version,
+                               bool update_inode_size,
+                               uint64_t new_size,
+                               LayoutRootRecord* committed,
+                               std::string* error);
+    bool BuildLayoutNodeFromChunks(uint64_t inode_id,
+                                   const std::string& layout_obj_id,
+                                   uint64_t object_version,
+                                   LayoutNodeRecord* node,
+                                   std::string* error);
+    bool LoadHealthyLayoutNode(uint64_t inode_id,
+                               const std::string& layout_obj_id,
+                               uint64_t object_version,
+                               LayoutNodeRecord* node,
+                               bool* recovered,
+                               std::string* error);
+    bool StoreLayoutNodeWithReplicas(const std::string& layout_obj_id,
+                                     const LayoutNodeRecord& node,
+                                     rocksdb::WriteBatch* batch,
+                                     std::string* error);
+    bool ValidateLayoutObjectOnLoad(uint64_t inode_id,
+                                    const LayoutRootRecord& root,
+                                    std::string* error);
+    bool BuildReadPlan(uint64_t inode_id,
+                       uint64_t offset,
+                       uint64_t size,
+                       zb::rpc::FileLayout* layout,
+                       std::string* error);
+    bool BuildOpticalReadPlan(uint64_t inode_id,
+                              uint64_t offset,
+                              uint64_t size,
+                              zb::rpc::OpticalReadPlan* plan,
+                              bool* optical_only,
+                              std::string* error);
+    bool ResolveExtents(const zb::rpc::FileLayout& read_plan,
+                        uint64_t request_offset,
+                        uint64_t request_size,
+                        uint64_t object_version,
+                        std::vector<LayoutExtentRecord>* extents,
+                        std::string* error);
+    bool SelectReadableDiskReplica(const zb::rpc::ChunkMeta& chunk_meta, zb::rpc::ReplicaLocation* source) const;
+    bool SeedChunkForCowWrite(const zb::rpc::ChunkMeta& old_meta,
+                              const std::vector<zb::rpc::ReplicaLocation>& new_replicas,
+                              uint64_t chunk_size,
+                              std::string* error);
+    bool ConsumePendingWriteForCommit(uint64_t inode_id,
+                                      uint64_t expected_base_layout_version,
+                                      uint64_t new_file_size,
+                                      LayoutRootRecord* committed_root,
+                                      std::string* error);
     bool HasReadyDiskReplica(const zb::rpc::ChunkMeta& chunk_meta) const;
     bool FindReadyOpticalReplica(const zb::rpc::ChunkMeta& chunk_meta, zb::rpc::ReplicaLocation* optical) const;
     bool CollectRecallTasksByImage(const std::string& seed_chunk_key,
@@ -166,6 +248,10 @@ private:
     ArchiveLeaseManager* lease_manager_{};
     mutable std::mutex channel_mu_;
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> channels_;
+    mutable std::mutex pending_write_mu_;
+    std::unordered_map<uint64_t, PendingWriteTransaction> pending_writes_;
+    mutable std::mutex layout_object_mu_;
+    LayoutObjectOptions layout_object_options_;
 };
 
 } // namespace zb::mds

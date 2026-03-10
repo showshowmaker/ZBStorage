@@ -27,6 +27,16 @@ message WriteChunkRequest {
   bool is_replication = 5;
   uint64 epoch = 6;
   string archive_op_id = 7;
+  uint64 inode_id = 8;
+  string file_id = 9;
+  string file_path = 10;
+  uint64 file_size = 11;
+  uint64 file_offset = 12;
+  uint32 file_mode = 13;
+  uint32 file_uid = 14;
+  uint32 file_gid = 15;
+  uint64 file_mtime = 16;
+  uint32 file_chunk_index = 17;
 }
 
 message WriteChunkReply {
@@ -42,9 +52,26 @@ message ReadChunkRequest {
   string chunk_id = 2;
   uint64 offset = 3;
   uint64 size = 4;
+  string image_id = 5;
+  uint64 image_offset = 6;
+  uint64 image_length = 7;
 }
 
 message ReadChunkReply {
+  Status status = 1;
+  uint64 bytes = 2;
+  bytes data = 3;
+}
+
+message ReadArchivedFileRequest {
+  string disc_id = 1;
+  uint64 inode_id = 2;
+  string file_id = 3;
+  uint64 offset = 4;
+  uint64 size = 5;
+}
+
+message ReadArchivedFileReply {
   Status status = 1;
   uint64 bytes = 2;
   bytes data = 3;
@@ -86,6 +113,7 @@ message DiskReportReply {
 service RealNodeService {
   rpc WriteChunk(WriteChunkRequest) returns (WriteChunkReply);
   rpc ReadChunk(ReadChunkRequest) returns (ReadChunkReply);
+  rpc ReadArchivedFile(ReadArchivedFileRequest) returns (ReadArchivedFileReply);
   rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkReply);
   rpc UpdateArchiveState(UpdateArchiveStateRequest) returns (UpdateArchiveStateReply);
   rpc GetDiskReport(google.protobuf.Empty) returns (DiskReportReply);

@@ -117,25 +117,30 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
         }
     }
 
-    ImageLocation location;
     if (request.archive_op_id.empty()) {
-        {
-            std::lock_guard<std::mutex> lock(cache_mu_);
-            std::string& blob = cache_chunks_[BuildCacheChunkKey(request.disk_id, request.chunk_id)];
-            if (request.offset > blob.size()) {
-                blob.resize(static_cast<size_t>(request.offset), '\0');
-            }
-            const size_t write_begin = static_cast<size_t>(request.offset);
-            const size_t write_end = write_begin + request.data.size();
-            if (blob.size() < write_end) {
-                blob.resize(write_end, '\0');
-            }
-            std::copy(request.data.begin(), request.data.end(), blob.begin() + write_begin);
-        }
-        reply.status = zb::msg::Status::Ok();
-        reply.bytes = static_cast<uint64_t>(request.data.size());
-    } else {
-        reply.status = store_->WriteChunk(request.disk_id, request.chunk_id, request.data, &location);
+        reply.status = zb::msg::Status::InvalidArgument("optical node only accepts archive writes");
+        return reply;
+    }
+
+    ImageLocation location;
+    {
+        FileArchiveMeta file_meta;
+        file_meta.inode_id = request.inode_id;
+        file_meta.file_id = request.file_id;
+        file_meta.file_path = request.file_path;
+        file_meta.file_size = request.file_size;
+        file_meta.file_offset = request.file_offset;
+        file_meta.file_mode = request.file_mode;
+        file_meta.file_uid = request.file_uid;
+        file_meta.file_gid = request.file_gid;
+        file_meta.file_mtime = request.file_mtime;
+        file_meta.file_chunk_index = request.file_chunk_index;
+
+        reply.status = store_->WriteChunk(request.disk_id,
+                                          request.chunk_id,
+                                          request.data,
+                                          &file_meta,
+                                          &location);
         if (!reply.status.ok()) {
             return reply;
         }
@@ -182,7 +187,7 @@ zb::msg::ReadChunkReply OpticalStorageServiceImpl::ReadChunk(const zb::msg::Read
         return reply;
     }
 
-    {
+    if (request.image_id.empty()) {
         std::lock_guard<std::mutex> lock(cache_mu_);
         auto it = cache_chunks_.find(BuildCacheChunkKey(request.disk_id, request.chunk_id));
         if (it != cache_chunks_.end()) {
@@ -205,8 +210,32 @@ zb::msg::ReadChunkReply OpticalStorageServiceImpl::ReadChunk(const zb::msg::Read
                                      request.chunk_id,
                                      request.offset,
                                      request.size,
+                                     request.image_id,
+                                     request.image_offset,
+                                     request.image_length,
                                      &reply.data,
                                      &reply.bytes);
+    return reply;
+}
+
+zb::msg::ReadArchivedFileReply OpticalStorageServiceImpl::ReadArchivedFile(
+    const zb::msg::ReadArchivedFileRequest& request) {
+    zb::msg::ReadArchivedFileReply reply;
+    if (!store_) {
+        reply.status = zb::msg::Status::InternalError("Service not initialized");
+        return reply;
+    }
+    if (request.disc_id.empty() || (request.inode_id == 0 && request.file_id.empty())) {
+        reply.status = zb::msg::Status::InvalidArgument("disc_id and file identity are required");
+        return reply;
+    }
+    reply.status = store_->ReadArchivedFile(request.disc_id,
+                                            request.inode_id,
+                                            request.file_id,
+                                            request.offset,
+                                            request.size,
+                                            &reply.data,
+                                            &reply.bytes);
     return reply;
 }
 
@@ -293,6 +322,16 @@ zb::msg::Status OpticalStorageServiceImpl::ReplicateWriteToSecondary(const zb::m
     replicate_req.set_is_replication(true);
     replicate_req.set_epoch(epoch);
     replicate_req.set_archive_op_id(request.archive_op_id);
+    replicate_req.set_inode_id(request.inode_id);
+    replicate_req.set_file_id(request.file_id);
+    replicate_req.set_file_path(request.file_path);
+    replicate_req.set_file_size(request.file_size);
+    replicate_req.set_file_offset(request.file_offset);
+    replicate_req.set_file_mode(request.file_mode);
+    replicate_req.set_file_uid(request.file_uid);
+    replicate_req.set_file_gid(request.file_gid);
+    replicate_req.set_file_mtime(request.file_mtime);
+    replicate_req.set_file_chunk_index(request.file_chunk_index);
 
     zb::rpc::WriteChunkReply replicate_resp;
     brpc::Controller cntl;

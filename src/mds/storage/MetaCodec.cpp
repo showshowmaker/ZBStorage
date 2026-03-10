@@ -4,6 +4,183 @@
 
 namespace zb::mds {
 
+namespace {
+
+constexpr uint32_t kEnvelopeMagic = 0x5A424D44U; // ZBMD
+constexpr uint32_t kEnvelopeVersion = 1;
+
+constexpr size_t kU32Size = sizeof(uint32_t);
+constexpr size_t kU64Size = sizeof(uint64_t);
+
+uint32_t Crc32(const char* data, size_t len) {
+    static uint32_t table[256];
+    static bool inited = false;
+    if (!inited) {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) {
+                c = (c & 1U) ? (0xEDB88320U ^ (c >> 1U)) : (c >> 1U);
+            }
+            table[i] = c;
+        }
+        inited = true;
+    }
+    uint32_t crc = 0xFFFFFFFFU;
+    for (size_t i = 0; i < len; ++i) {
+        crc = table[(crc ^ static_cast<uint8_t>(data[i])) & 0xFFU] ^ (crc >> 8U);
+    }
+    return crc ^ 0xFFFFFFFFU;
+}
+
+void AppendU32(std::string* out, uint32_t value) {
+    out->append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+void AppendU64(std::string* out, uint64_t value) {
+    out->append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+void AppendBool(std::string* out, bool value) {
+    const uint8_t v = value ? 1 : 0;
+    out->push_back(static_cast<char>(v));
+}
+
+void AppendString(std::string* out, const std::string& value) {
+    AppendU32(out, static_cast<uint32_t>(value.size()));
+    out->append(value);
+}
+
+bool ReadU32(const std::string& in, size_t* cursor, uint32_t* value) {
+    if (!cursor || !value || *cursor + kU32Size > in.size()) {
+        return false;
+    }
+    std::memcpy(value, in.data() + *cursor, kU32Size);
+    *cursor += kU32Size;
+    return true;
+}
+
+bool ReadU64(const std::string& in, size_t* cursor, uint64_t* value) {
+    if (!cursor || !value || *cursor + kU64Size > in.size()) {
+        return false;
+    }
+    std::memcpy(value, in.data() + *cursor, kU64Size);
+    *cursor += kU64Size;
+    return true;
+}
+
+bool ReadBool(const std::string& in, size_t* cursor, bool* value) {
+    if (!cursor || !value || *cursor >= in.size()) {
+        return false;
+    }
+    const uint8_t v = static_cast<uint8_t>(in[*cursor]);
+    if (v > 1U) {
+        return false;
+    }
+    *value = (v == 1U);
+    *cursor += 1;
+    return true;
+}
+
+bool ReadString(const std::string& in, size_t* cursor, std::string* value) {
+    if (!cursor || !value) {
+        return false;
+    }
+    uint32_t len = 0;
+    if (!ReadU32(in, cursor, &len)) {
+        return false;
+    }
+    if (*cursor + len > in.size()) {
+        return false;
+    }
+    *value = in.substr(*cursor, len);
+    *cursor += len;
+    return true;
+}
+
+std::string EncodeEnvelope(const std::string& payload) {
+    std::string out;
+    out.reserve(sizeof(uint32_t) * 4 + payload.size());
+    AppendU32(&out, kEnvelopeMagic);
+    AppendU32(&out, kEnvelopeVersion);
+    AppendU32(&out, static_cast<uint32_t>(payload.size()));
+    out.append(payload);
+    AppendU32(&out, Crc32(payload.data(), payload.size()));
+    return out;
+}
+
+bool DecodeEnvelope(const std::string& data, std::string* payload) {
+    if (!payload) {
+        return false;
+    }
+    size_t cursor = 0;
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint32_t len = 0;
+    if (!ReadU32(data, &cursor, &magic) || !ReadU32(data, &cursor, &version) ||
+        !ReadU32(data, &cursor, &len)) {
+        return false;
+    }
+    if (magic != kEnvelopeMagic || version != kEnvelopeVersion) {
+        return false;
+    }
+    if (cursor + len + kU32Size != data.size()) {
+        return false;
+    }
+    *payload = data.substr(cursor, len);
+    cursor += len;
+    uint32_t crc = 0;
+    if (!ReadU32(data, &cursor, &crc)) {
+        return false;
+    }
+    return crc == Crc32(payload->data(), payload->size());
+}
+
+void EncodeExtentPayload(const LayoutExtentRecord& extent, std::string* payload) {
+    AppendU64(payload, extent.logical_offset);
+    AppendU64(payload, extent.length);
+    AppendString(payload, extent.object_id);
+    AppendU64(payload, extent.object_offset);
+    AppendU64(payload, extent.object_length);
+    AppendU64(payload, extent.object_version);
+}
+
+bool DecodeExtentPayload(const std::string& payload, size_t* cursor, LayoutExtentRecord* extent) {
+    return ReadU64(payload, cursor, &extent->logical_offset) &&
+           ReadU64(payload, cursor, &extent->length) &&
+           ReadString(payload, cursor, &extent->object_id) &&
+           ReadU64(payload, cursor, &extent->object_offset) &&
+           ReadU64(payload, cursor, &extent->object_length) &&
+           ReadU64(payload, cursor, &extent->object_version);
+}
+
+void EncodePgMemberPayload(const PgViewMemberRecord& member, std::string* payload) {
+    AppendString(payload, member.node_id);
+    AppendString(payload, member.node_address);
+    AppendString(payload, member.disk_id);
+    AppendString(payload, member.group_id);
+    AppendU64(payload, member.epoch);
+    AppendString(payload, member.primary_node_id);
+    AppendString(payload, member.primary_address);
+    AppendString(payload, member.secondary_node_id);
+    AppendString(payload, member.secondary_address);
+    AppendBool(payload, member.sync_ready);
+}
+
+bool DecodePgMemberPayload(const std::string& payload, size_t* cursor, PgViewMemberRecord* member) {
+    return ReadString(payload, cursor, &member->node_id) &&
+           ReadString(payload, cursor, &member->node_address) &&
+           ReadString(payload, cursor, &member->disk_id) &&
+           ReadString(payload, cursor, &member->group_id) &&
+           ReadU64(payload, cursor, &member->epoch) &&
+           ReadString(payload, cursor, &member->primary_node_id) &&
+           ReadString(payload, cursor, &member->primary_address) &&
+           ReadString(payload, cursor, &member->secondary_node_id) &&
+           ReadString(payload, cursor, &member->secondary_address) &&
+           ReadBool(payload, cursor, &member->sync_ready);
+}
+
+} // namespace
+
 std::string MetaCodec::EncodeUInt64(uint64_t value) {
     std::string out(sizeof(uint64_t), '\0');
     std::memcpy(&out[0], &value, sizeof(uint64_t));
@@ -42,6 +219,137 @@ bool MetaCodec::DecodeChunkMeta(const std::string& data, zb::rpc::ChunkMeta* met
         return false;
     }
     return meta->ParseFromString(data);
+}
+
+std::string MetaCodec::EncodeLayoutRoot(const LayoutRootRecord& root) {
+    std::string payload;
+    payload.reserve(128 + root.layout_root_id.size());
+    AppendU64(&payload, root.inode_id);
+    AppendString(&payload, root.layout_root_id);
+    AppendU64(&payload, root.layout_version);
+    AppendU64(&payload, root.file_size);
+    AppendU64(&payload, root.epoch);
+    AppendU64(&payload, root.update_ts);
+    return EncodeEnvelope(payload);
+}
+
+bool MetaCodec::DecodeLayoutRoot(const std::string& data, LayoutRootRecord* root) {
+    if (!root) {
+        return false;
+    }
+    std::string payload;
+    if (!DecodeEnvelope(data, &payload)) {
+        return false;
+    }
+    size_t cursor = 0;
+    if (!ReadU64(payload, &cursor, &root->inode_id) ||
+        !ReadString(payload, &cursor, &root->layout_root_id) ||
+        !ReadU64(payload, &cursor, &root->layout_version) ||
+        !ReadU64(payload, &cursor, &root->file_size) ||
+        !ReadU64(payload, &cursor, &root->epoch) ||
+        !ReadU64(payload, &cursor, &root->update_ts)) {
+        return false;
+    }
+    return cursor == payload.size();
+}
+
+std::string MetaCodec::EncodeLayoutNode(const LayoutNodeRecord& node) {
+    std::string payload;
+    payload.reserve(256);
+    AppendString(&payload, node.node_id);
+    AppendU32(&payload, node.level);
+    AppendU32(&payload, static_cast<uint32_t>(node.extents.size()));
+    for (const auto& extent : node.extents) {
+        EncodeExtentPayload(extent, &payload);
+    }
+    AppendU32(&payload, static_cast<uint32_t>(node.child_layout_ids.size()));
+    for (const auto& child_id : node.child_layout_ids) {
+        AppendString(&payload, child_id);
+    }
+    return EncodeEnvelope(payload);
+}
+
+bool MetaCodec::DecodeLayoutNode(const std::string& data, LayoutNodeRecord* node) {
+    if (!node) {
+        return false;
+    }
+    std::string payload;
+    if (!DecodeEnvelope(data, &payload)) {
+        return false;
+    }
+    size_t cursor = 0;
+    if (!ReadString(payload, &cursor, &node->node_id) || !ReadU32(payload, &cursor, &node->level)) {
+        return false;
+    }
+
+    uint32_t extent_count = 0;
+    if (!ReadU32(payload, &cursor, &extent_count)) {
+        return false;
+    }
+    node->extents.clear();
+    node->extents.reserve(extent_count);
+    for (uint32_t i = 0; i < extent_count; ++i) {
+        LayoutExtentRecord extent;
+        if (!DecodeExtentPayload(payload, &cursor, &extent)) {
+            return false;
+        }
+        node->extents.push_back(std::move(extent));
+    }
+
+    uint32_t child_count = 0;
+    if (!ReadU32(payload, &cursor, &child_count)) {
+        return false;
+    }
+    node->child_layout_ids.clear();
+    node->child_layout_ids.reserve(child_count);
+    for (uint32_t i = 0; i < child_count; ++i) {
+        std::string child;
+        if (!ReadString(payload, &cursor, &child)) {
+            return false;
+        }
+        node->child_layout_ids.push_back(std::move(child));
+    }
+    return cursor == payload.size();
+}
+
+std::string MetaCodec::EncodePgView(const PgViewRecord& view) {
+    std::string payload;
+    payload.reserve(256);
+    AppendU64(&payload, view.epoch);
+    AppendU32(&payload, view.pg_id);
+    AppendU32(&payload, static_cast<uint32_t>(view.members.size()));
+    for (const auto& member : view.members) {
+        EncodePgMemberPayload(member, &payload);
+    }
+    return EncodeEnvelope(payload);
+}
+
+bool MetaCodec::DecodePgView(const std::string& data, PgViewRecord* view) {
+    if (!view) {
+        return false;
+    }
+    std::string payload;
+    if (!DecodeEnvelope(data, &payload)) {
+        return false;
+    }
+    size_t cursor = 0;
+    if (!ReadU64(payload, &cursor, &view->epoch) || !ReadU32(payload, &cursor, &view->pg_id)) {
+        return false;
+    }
+    uint32_t member_count = 0;
+    if (!ReadU32(payload, &cursor, &member_count)) {
+        return false;
+    }
+    view->members.clear();
+    view->members.reserve(member_count);
+    for (uint32_t i = 0; i < member_count; ++i) {
+        PgViewMemberRecord member;
+        if (!DecodePgMemberPayload(payload, &cursor, &member)) {
+            return false;
+        }
+        view->members.push_back(std::move(member));
+    }
+    return cursor == payload.size();
 }
 
 } // namespace zb::mds

@@ -111,6 +111,12 @@ bash scripts/run_three_real_nodes.sh
 ./build/optical_node_server --config=config/optical_node.conf.example --port=39080
 ```
 
+说明：
+- `STARTUP_SCAN_MODE=fast`（默认）只加载 manifest 与运行所需元数据，不回放全部光盘镜像，启动更快。
+- `STARTUP_SCAN_MODE=full` 会启动时回放全部镜像记录，适合迁移/重建场景。
+- `CACHE_DISC_SLOTS` 控制光盘节点最多缓存的光盘数量（按 LRU 淘汰，仅做缓存状态模拟）。
+- 光盘节点只接受归档写入（带 `archive_op_id`），普通 `WriteChunk` 会被拒绝。
+
 ### 4.6 FUSE 客户端（Linux）
 
 ```bash

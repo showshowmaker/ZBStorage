@@ -190,6 +190,13 @@ zb::msg::ReadChunkReply StorageServiceImpl::ReadChunk(const zb::msg::ReadChunkRe
     return reply;
 }
 
+zb::msg::ReadArchivedFileReply StorageServiceImpl::ReadArchivedFile(const zb::msg::ReadArchivedFileRequest& request) {
+    (void)request;
+    zb::msg::ReadArchivedFileReply reply;
+    reply.status = zb::msg::Status::InvalidArgument("real node does not support archived-file read");
+    return reply;
+}
+
 zb::msg::DeleteChunkReply StorageServiceImpl::DeleteChunk(const zb::msg::DeleteChunkRequest& request) {
     zb::msg::DeleteChunkReply reply;
     if (!disk_manager_ || !path_resolver_ || !io_executor_) {
@@ -220,6 +227,38 @@ zb::msg::DeleteChunkReply StorageServiceImpl::DeleteChunk(const zb::msg::DeleteC
         RemoveChunkTracking(request.disk_id, request.chunk_id);
     }
     return reply;
+}
+
+zb::msg::Status StorageServiceImpl::PutObject(const zb::data_node::ObjectWriteRequest& request) {
+    zb::msg::WriteChunkRequest chunk_request;
+    chunk_request.disk_id = request.disk_id;
+    chunk_request.chunk_id = request.object_id;
+    chunk_request.offset = request.offset;
+    chunk_request.data.assign(request.data.data(), request.data.size());
+    chunk_request.epoch = request.epoch;
+    return WriteChunk(chunk_request).status;
+}
+
+zb::data_node::ObjectReadResult StorageServiceImpl::GetObject(const zb::data_node::ObjectReadRequest& request) {
+    zb::msg::ReadChunkRequest chunk_request;
+    chunk_request.disk_id = request.disk_id;
+    chunk_request.chunk_id = request.object_id;
+    chunk_request.offset = request.offset;
+    chunk_request.size = request.size;
+    const zb::msg::ReadChunkReply reply = ReadChunk(chunk_request);
+    zb::data_node::ObjectReadResult result;
+    result.status = reply.status;
+    if (reply.status.ok()) {
+        result.data = reply.data;
+    }
+    return result;
+}
+
+zb::msg::Status StorageServiceImpl::DeleteObject(const zb::data_node::ObjectDeleteRequest& request) {
+    zb::msg::DeleteChunkRequest chunk_request;
+    chunk_request.disk_id = request.disk_id;
+    chunk_request.chunk_id = request.object_id;
+    return DeleteChunk(chunk_request).status;
 }
 
 zb::msg::DiskReportReply StorageServiceImpl::GetDiskReport() const {
@@ -273,6 +312,16 @@ zb::msg::Status StorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::Wri
     replicate_req.set_is_replication(true);
     replicate_req.set_epoch(epoch);
     replicate_req.set_archive_op_id(request.archive_op_id);
+    replicate_req.set_inode_id(request.inode_id);
+    replicate_req.set_file_id(request.file_id);
+    replicate_req.set_file_path(request.file_path);
+    replicate_req.set_file_size(request.file_size);
+    replicate_req.set_file_offset(request.file_offset);
+    replicate_req.set_file_mode(request.file_mode);
+    replicate_req.set_file_uid(request.file_uid);
+    replicate_req.set_file_gid(request.file_gid);
+    replicate_req.set_file_mtime(request.file_mtime);
+    replicate_req.set_file_chunk_index(request.file_chunk_index);
 
     zb::rpc::WriteChunkReply replicate_resp;
     brpc::Controller cntl;

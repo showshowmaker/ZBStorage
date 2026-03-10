@@ -163,3 +163,20 @@ b) 测试结果说明
 ## 4.5 结论
 
 依据本章 9 个测试角度的执行结果，分布式文件系统在节点/设备统计、文件统计、元数据查询、真实/虚拟节点读写、`fio` 数据面验证以及 `mdtest` 元数据面验证方面表现正常，功能性与性能效率评测结论为：**通过**。
+
+## 4.6 一键 E2E（增量）
+
+新增脚本：`scripts/run_full_e2e_suite.sh`（端到端启动、测试、回收）。
+
+新增用例：
+1. `layout_commit_conflict_test`：覆盖 `CommitLayoutRoot` 版本冲突返回 `MDS_STALE_EPOCH`。
+2. `layout_cow_rw_via_fuse`：覆盖 layout/COW 基本读写可见性。
+3. `migrate_chunk_to_layout_dry_run`：覆盖迁移工具 dry-run 基本可用性。
+4. `pg_migration_sim_test`：覆盖 PG 迁移（epoch 切换）时“部分迁移+部分稳定”与同 epoch 定位稳定性。
+5. `layout_gc_reclaim_orphan_object`：覆盖布局对象孤儿回收（`LO/LOR`）端到端。
+
+新增开关：
+1. `ENABLE_LAYOUT_TESTS`（默认 `true`）：控制 `layout_cow_rw_via_fuse`。
+2. `ENABLE_MIGRATION_DRYRUN_TEST`（默认 `true`）：控制迁移工具 dry-run 用例。
+3. `ENABLE_PG_MIGRATION_SIM_TEST`（默认 `true`）：控制 `pg_migration_sim_test`。
+4. `ENABLE_LAYOUT_GC_TEST`（默认 `true`）：控制 `layout_gc_reclaim_orphan_object`。

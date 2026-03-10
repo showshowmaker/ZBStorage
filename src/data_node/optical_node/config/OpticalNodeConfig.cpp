@@ -190,6 +190,13 @@ OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::
                 }
                 return {};
             }
+        } else if (key == "CACHE_DISC_SLOTS") {
+            if (!ParseUint32(value, &cfg.cache_disc_slots)) {
+                if (error) {
+                    *error = "Invalid CACHE_DISC_SLOTS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
         } else if (key == "MAX_IMAGE_SIZE_BYTES") {
             if (!ParseUint64(value, &cfg.max_image_size_bytes)) {
                 if (error) {
@@ -206,6 +213,8 @@ OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::
             }
         } else if (key == "MOUNT_POINT_PREFIX") {
             cfg.mount_point_prefix = value;
+        } else if (key == "STARTUP_SCAN_MODE") {
+            cfg.startup_scan_mode = value;
         }
     }
 
@@ -236,6 +245,13 @@ OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::
     if (cfg.mount_point_prefix.empty()) {
         cfg.mount_point_prefix = "/optical";
     }
+    std::transform(cfg.startup_scan_mode.begin(),
+                   cfg.startup_scan_mode.end(),
+                   cfg.startup_scan_mode.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (cfg.startup_scan_mode != "full" && cfg.startup_scan_mode != "fast") {
+        cfg.startup_scan_mode = "fast";
+    }
     if (cfg.optical_read_bytes_per_sec == 0) {
         cfg.optical_read_bytes_per_sec = 1;
     }
@@ -244,6 +260,9 @@ OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::
     }
     if (cfg.cache_read_bytes_per_sec == 0) {
         cfg.cache_read_bytes_per_sec = 1;
+    }
+    if (cfg.cache_disc_slots == 0) {
+        cfg.cache_disc_slots = 1;
     }
     return cfg;
 }

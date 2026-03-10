@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build"
 SCRIPTS_DIR="${ROOT_DIR}/scripts"
 TS="$(date +%Y%m%d_%H%M%S)"
+GC_ORPHAN_ID="gc_orphan_${TS}"
 
 RUN_DIR="${RUN_DIR:-${ROOT_DIR}/runtime/e2e_${TS}}"
 LOG_DIR="${RUN_DIR}/logs"
@@ -18,6 +19,10 @@ MOUNT_DIR="${MOUNT_DIR:-${RUN_DIR}/mnt/zbfs}"
 SKIP_MOUNT="${SKIP_MOUNT:-false}"
 ENABLE_SCHED_CONTROL_TEST="${ENABLE_SCHED_CONTROL_TEST:-false}"
 ENABLE_OPTICAL_TEST="${ENABLE_OPTICAL_TEST:-true}"
+ENABLE_LAYOUT_TESTS="${ENABLE_LAYOUT_TESTS:-true}"
+ENABLE_MIGRATION_DRYRUN_TEST="${ENABLE_MIGRATION_DRYRUN_TEST:-true}"
+ENABLE_PG_MIGRATION_SIM_TEST="${ENABLE_PG_MIGRATION_SIM_TEST:-true}"
+ENABLE_LAYOUT_GC_TEST="${ENABLE_LAYOUT_GC_TEST:-true}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-120}"
 OPTICAL_STRESS_DURATION_SEC="${OPTICAL_STRESS_DURATION_SEC:-90}"
 OPTICAL_STRESS_FILE_COUNT="${OPTICAL_STRESS_FILE_COUNT:-64}"
@@ -31,6 +36,9 @@ OPTICAL_COLD_FILE_TTL_SEC="${OPTICAL_COLD_FILE_TTL_SEC:-30}"
 OPTICAL_ARCHIVE_SCAN_INTERVAL_MS="${OPTICAL_ARCHIVE_SCAN_INTERVAL_MS:-2000}"
 OPTICAL_ARCHIVE_MAX_CHUNKS_PER_ROUND="${OPTICAL_ARCHIVE_MAX_CHUNKS_PER_ROUND:-256}"
 OPTICAL_ARCHIVE_DISC_SIZE_BYTES="${OPTICAL_ARCHIVE_DISC_SIZE_BYTES:-1048576}"
+LAYOUT_GC_INTERVAL_MS="${LAYOUT_GC_INTERVAL_MS:-1000}"
+LAYOUT_GC_ORPHAN_GRACE_MS="${LAYOUT_GC_ORPHAN_GRACE_MS:-1000}"
+LAYOUT_GC_MAX_DELETE_PER_ROUND="${LAYOUT_GC_MAX_DELETE_PER_ROUND:-1024}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -170,6 +178,8 @@ generate_report() {
     echo "- report_file: ${REPORT_FILE}"
     echo "- skip_mount: ${SKIP_MOUNT}"
     echo "- optical_test: ${ENABLE_OPTICAL_TEST}"
+    echo "- pg_migration_sim_test: ${ENABLE_PG_MIGRATION_SIM_TEST}"
+    echo "- layout_gc_test: ${ENABLE_LAYOUT_GC_TEST}"
     echo "- timeout_sec: ${TIMEOUT_SEC}"
     if [[ -f "${ENV_FILE}" ]]; then
       echo "- scheduler: ${ZB_SCHEDULER_ADDR:-N/A}"
@@ -230,8 +240,20 @@ require_file "${SCRIPTS_DIR}/oneclick_start_data_nodes.sh"
 require_file "${SCRIPTS_DIR}/oneclick_mount_client.sh"
 
 require_bin "${BUILD_DIR}/real_node_client"
+if [[ "${ENABLE_LAYOUT_TESTS}" == "true" ]]; then
+  require_bin "${BUILD_DIR}/layout_commit_conflict_test"
+fi
+if [[ "${ENABLE_PG_MIGRATION_SIM_TEST}" == "true" ]]; then
+  require_bin "${BUILD_DIR}/pg_migration_sim_test"
+fi
 if [[ "${ENABLE_OPTICAL_TEST}" == "true" ]]; then
   require_bin "${BUILD_DIR}/optical_archive_stress_test"
+fi
+if [[ "${ENABLE_MIGRATION_DRYRUN_TEST}" == "true" ]]; then
+  require_bin "${BUILD_DIR}/migrate_chunk_to_layout"
+fi
+if [[ "${ENABLE_LAYOUT_GC_TEST}" == "true" ]]; then
+  require_bin "${BUILD_DIR}/layout_gc_probe"
 fi
 
 if [[ "${ENABLE_SCHED_CONTROL_TEST}" == "true" ]]; then
@@ -246,10 +268,17 @@ if [[ "${SKIP_MOUNT}" != "true" ]]; then
   fi
 fi
 
+PRESTART_MDS_DB_PATH="${RUN_DIR}/data/mds_rocks"
+if [[ "${ENABLE_LAYOUT_GC_TEST}" == "true" ]]; then
+  run_startup_step \
+    "prepare_gc_orphan" \
+    "mkdir -p '${PRESTART_MDS_DB_PATH}'; \"${BUILD_DIR}/layout_gc_probe\" --mode=inject --db_path='${PRESTART_MDS_DB_PATH}' --orphan_id='${GC_ORPHAN_ID}' --replica_count=3 --seed_seen_age_ms=60000"
+fi
+
 if [[ "${ENABLE_OPTICAL_TEST}" == "true" ]]; then
   run_startup_step \
     "start_control_plane" \
-    "RUN_DIR='${RUN_DIR}' ENABLE_OPTICAL_ARCHIVE='true' ARCHIVE_TRIGGER_BYTES='${OPTICAL_ARCHIVE_TRIGGER_BYTES}' ARCHIVE_TARGET_BYTES='${OPTICAL_ARCHIVE_TARGET_BYTES}' COLD_FILE_TTL_SEC='${OPTICAL_COLD_FILE_TTL_SEC}' ARCHIVE_SCAN_INTERVAL_MS='${OPTICAL_ARCHIVE_SCAN_INTERVAL_MS}' ARCHIVE_MAX_CHUNKS_PER_ROUND='${OPTICAL_ARCHIVE_MAX_CHUNKS_PER_ROUND}' ARCHIVE_DISC_SIZE_BYTES='${OPTICAL_ARCHIVE_DISC_SIZE_BYTES}' bash '${SCRIPTS_DIR}/oneclick_start_control_plane.sh'"
+    "RUN_DIR='${RUN_DIR}' ENABLE_OPTICAL_ARCHIVE='true' ENABLE_LAYOUT_GC='${ENABLE_LAYOUT_GC_TEST}' LAYOUT_GC_INTERVAL_MS='${LAYOUT_GC_INTERVAL_MS}' LAYOUT_GC_ORPHAN_GRACE_MS='${LAYOUT_GC_ORPHAN_GRACE_MS}' LAYOUT_GC_MAX_DELETE_PER_ROUND='${LAYOUT_GC_MAX_DELETE_PER_ROUND}' ARCHIVE_TRIGGER_BYTES='${OPTICAL_ARCHIVE_TRIGGER_BYTES}' ARCHIVE_TARGET_BYTES='${OPTICAL_ARCHIVE_TARGET_BYTES}' COLD_FILE_TTL_SEC='${OPTICAL_COLD_FILE_TTL_SEC}' ARCHIVE_SCAN_INTERVAL_MS='${OPTICAL_ARCHIVE_SCAN_INTERVAL_MS}' ARCHIVE_MAX_CHUNKS_PER_ROUND='${OPTICAL_ARCHIVE_MAX_CHUNKS_PER_ROUND}' ARCHIVE_DISC_SIZE_BYTES='${OPTICAL_ARCHIVE_DISC_SIZE_BYTES}' bash '${SCRIPTS_DIR}/oneclick_start_control_plane.sh'"
 
   run_startup_step \
     "start_data_nodes" \
@@ -257,7 +286,7 @@ if [[ "${ENABLE_OPTICAL_TEST}" == "true" ]]; then
 else
   run_startup_step \
     "start_control_plane" \
-    "RUN_DIR='${RUN_DIR}' bash '${SCRIPTS_DIR}/oneclick_start_control_plane.sh'"
+    "RUN_DIR='${RUN_DIR}' ENABLE_LAYOUT_GC='${ENABLE_LAYOUT_GC_TEST}' LAYOUT_GC_INTERVAL_MS='${LAYOUT_GC_INTERVAL_MS}' LAYOUT_GC_ORPHAN_GRACE_MS='${LAYOUT_GC_ORPHAN_GRACE_MS}' LAYOUT_GC_MAX_DELETE_PER_ROUND='${LAYOUT_GC_MAX_DELETE_PER_ROUND}' bash '${SCRIPTS_DIR}/oneclick_start_control_plane.sh'"
 
   run_startup_step \
     "start_data_nodes" \
@@ -275,6 +304,8 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   exit 1
 fi
 source "${ENV_FILE}"
+MDS_DB_PATH="$(grep '^MDS_DB_PATH=' "${RUN_DIR}/config/mds.conf" | head -n1 | cut -d= -f2- || true)"
+MDS_DB_PATH="${MDS_DB_PATH:-${RUN_DIR}/data/mds_rocks}"
 
 REAL_FIRST_SERVER="${ZB_REAL_SERVERS%%,*}"
 REAL_FIRST_DISK="${ZB_REAL_DISKS%%,*}"
@@ -298,6 +329,22 @@ run_case \
    \"${BUILD_DIR}/real_node_client\" --server=\"${ZB_VIRTUAL_SERVER}\" --disk_id=\"${VIRTUAL_TEST_DISK}\" --chunk_id=\"${VIRTUAL_CHUNK_ID}\" --write_data=\"${VIRTUAL_PAYLOAD}\" --read_size=${#VIRTUAL_PAYLOAD} --mode=both; \
    \"${BUILD_DIR}/real_node_client\" --server=\"${ZB_VIRTUAL_SERVER}\" --disk_id=\"${VIRTUAL_TEST_DISK}\" --chunk_id=\"${VIRTUAL_CHUNK_ID}\" --read_size=${#VIRTUAL_PAYLOAD} --mode=read | grep -q \"data=${VIRTUAL_PAYLOAD}\""
 
+if [[ "${ENABLE_PG_MIGRATION_SIM_TEST}" == "true" ]]; then
+  run_case \
+    "pg_migration_sim_test" \
+    "\"${BUILD_DIR}/pg_migration_sim_test\" --pg_count=128 --replica=2 --sample_objects=1000 --expect_moved_min=1 --expect_stable_min=1"
+else
+  echo "[SKIP] pg_migration_sim_test (ENABLE_PG_MIGRATION_SIM_TEST=false)"
+fi
+
+if [[ "${ENABLE_LAYOUT_TESTS}" == "true" ]]; then
+  run_case \
+    "layout_commit_conflict_test" \
+    "\"${BUILD_DIR}/layout_commit_conflict_test\" --mds=\"${ZB_MDS_ADDR}\" --path=\"/e2e_layout_conflict_${UNIQ}\" --new_size=32"
+else
+  echo "[SKIP] layout_commit_conflict_test (ENABLE_LAYOUT_TESTS=false)"
+fi
+
 if [[ "${ENABLE_OPTICAL_TEST}" == "true" ]]; then
   run_case \
     "optical_archive_stress_test" \
@@ -307,6 +354,21 @@ else
 fi
 
 if [[ "${SKIP_MOUNT}" != "true" ]]; then
+  if [[ "${ENABLE_LAYOUT_TESTS}" == "true" ]]; then
+    run_case \
+      "layout_cow_rw_via_fuse" \
+      "set -euo pipefail; \
+       base='${MOUNT_DIR}/e2e_layout_${UNIQ}'; \
+       mkdir -p \"${MOUNT_DIR}\"; \
+       mkdir -p \"\${base}\"; \
+       f=\"\${base}/cow.txt\"; \
+       python3 -c \"import sys;f=sys.argv[1];tag=sys.argv[2];v1=('A'*4096)+tag;v2=('B'*4096)+tag;open(f,'wb').write(v1.encode());assert open(f,'rb').read().decode()==v1;fp=open(f,'r+b');fp.seek(0);fp.write(v2.encode());fp.close();assert open(f,'rb').read().decode()==v2;print('ok')\" \"\${f}\" '${UNIQ}'; \
+       rm -f \"\${f}\"; \
+       rmdir \"\${base}\""
+  else
+    echo "[SKIP] layout_cow_rw_via_fuse (ENABLE_LAYOUT_TESTS=false)"
+  fi
+
   run_case \
     "mds_metadata_ops_via_fuse" \
     "set -euo pipefail; \
@@ -334,6 +396,22 @@ if [[ "${SKIP_MOUNT}" != "true" ]]; then
      exit 1"
 else
   echo "[SKIP] mds_metadata_ops_via_fuse (SKIP_MOUNT=true)"
+fi
+
+if [[ "${ENABLE_MIGRATION_DRYRUN_TEST}" == "true" ]]; then
+  run_case \
+    "migrate_chunk_to_layout_dry_run" \
+    "\"${BUILD_DIR}/migrate_chunk_to_layout\" --db_path=\"${MDS_DB_PATH}\" --dry_run=true --progress_every=100 --limit=50"
+else
+  echo "[SKIP] migrate_chunk_to_layout_dry_run (ENABLE_MIGRATION_DRYRUN_TEST=false)"
+fi
+
+if [[ "${ENABLE_LAYOUT_GC_TEST}" == "true" ]]; then
+  run_case \
+    "layout_gc_reclaim_orphan_object" \
+    "\"${BUILD_DIR}/layout_gc_probe\" --mode=wait_deleted --db_path=\"${MDS_DB_PATH}\" --orphan_id=\"${GC_ORPHAN_ID}\" --timeout_sec=30 --poll_interval_ms=200"
+else
+  echo "[SKIP] layout_gc_reclaim_orphan_object (ENABLE_LAYOUT_GC_TEST=false)"
 fi
 
 if [[ "${ENABLE_SCHED_CONTROL_TEST}" == "true" ]]; then

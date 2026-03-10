@@ -21,6 +21,7 @@ ARCHIVE_TRACK_MAX_CHUNKS=500000
 ARCHIVE_META_DIR=/tmp/zb_virtual_node_meta
 ARCHIVE_META_SNAPSHOT_INTERVAL_OPS=20000
 ARCHIVE_META_WAL_FSYNC=false
+ALLOW_DYNAMIC_DISKS=true
 
 # Exposed disk IDs (no real mount points needed)
 DISKS=disk0,disk1,disk2,disk3,disk4,disk5,disk6,disk7,disk8,disk9,disk10,disk11,disk12,disk13,disk14,disk15,disk16,disk17,disk18,disk19,disk20,disk21,disk22,disk23

@@ -104,10 +104,13 @@ zb::msg::WriteChunkReply VirtualStorageServiceImpl::WriteChunk(const zb::msg::Wr
         reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
         return reply;
     }
-    if (!ValidateDisk(request.disk_id)) {
+    std::string effective_disk;
+    if (!ResolveEffectiveDisk(request.disk_id, request.chunk_id, true, &effective_disk)) {
         reply.status = zb::msg::Status::NotFound("Unknown disk_id: " + request.disk_id);
         return reply;
     }
+    zb::msg::WriteChunkRequest normalized_request = request;
+    normalized_request.disk_id = effective_disk;
 
     ReplicationStatusSnapshot repl_snapshot = GetReplicationStatus();
     if (repl_snapshot.replication_enabled && !request.is_replication && !repl_snapshot.is_primary) {
@@ -124,23 +127,23 @@ zb::msg::WriteChunkReply VirtualStorageServiceImpl::WriteChunk(const zb::msg::Wr
     SimulateIo(reply.bytes, false);
     {
         std::lock_guard<std::mutex> lock(chunk_mu_);
-        const std::string key = BuildChunkKey(request.disk_id, request.chunk_id);
+        const std::string key = BuildChunkKey(normalized_request.disk_id, normalized_request.chunk_id);
         std::string& blob = chunk_data_[key];
-        if (request.offset > blob.size()) {
-            blob.resize(static_cast<size_t>(request.offset), '\0');
+        if (normalized_request.offset > blob.size()) {
+            blob.resize(static_cast<size_t>(normalized_request.offset), '\0');
         }
-        const size_t write_begin = static_cast<size_t>(request.offset);
-        const size_t write_end = write_begin + request.data.size();
+        const size_t write_begin = static_cast<size_t>(normalized_request.offset);
+        const size_t write_end = write_begin + normalized_request.data.size();
         if (blob.size() < write_end) {
             blob.resize(write_end, '\0');
         }
-        std::copy(request.data.begin(), request.data.end(), blob.begin() + write_begin);
+        std::copy(normalized_request.data.begin(), normalized_request.data.end(), blob.begin() + write_begin);
 
         const uint64_t old_size = chunk_sizes_[key];
         const uint64_t new_size = static_cast<uint64_t>(blob.size());
         if (new_size > old_size) {
             const uint64_t increase = new_size - old_size;
-            const uint64_t used = disk_used_bytes_[request.disk_id];
+            const uint64_t used = disk_used_bytes_[normalized_request.disk_id];
             if (used + increase > config_.disk_capacity_bytes) {
                 // rollback write growth when capacity exceeded
                 blob.resize(static_cast<size_t>(old_size));
@@ -148,31 +151,32 @@ zb::msg::WriteChunkReply VirtualStorageServiceImpl::WriteChunk(const zb::msg::Wr
                 reply.bytes = 0;
                 return reply;
             }
-            disk_used_bytes_[request.disk_id] = used + increase;
+            disk_used_bytes_[normalized_request.disk_id] = used + increase;
         }
+        chunk_home_disk_[normalized_request.chunk_id] = normalized_request.disk_id;
         chunk_sizes_[key] = static_cast<uint64_t>(blob.size());
     }
-    TrackChunkAccess(request.disk_id,
-                     request.chunk_id,
-                     request.offset + reply.bytes,
+    TrackChunkAccess(normalized_request.disk_id,
+                     normalized_request.chunk_id,
+                     normalized_request.offset + reply.bytes,
                      true,
-                     FastChecksum64(request.data));
+                     FastChecksum64(normalized_request.data));
     {
         std::lock_guard<std::mutex> lock(repl_mu_);
         ++repl_.applied_lsn;
     }
 
-    if (repl_snapshot.replication_enabled && repl_snapshot.is_primary && !request.is_replication &&
+    if (repl_snapshot.replication_enabled && repl_snapshot.is_primary && !normalized_request.is_replication &&
         !repl_snapshot.peer_address.empty()) {
-        const uint64_t generation = BumpReplicationRepairGeneration(request);
-        zb::msg::Status repl_status = ReplicateWriteToSecondary(request, repl_snapshot.epoch);
+        const uint64_t generation = BumpReplicationRepairGeneration(normalized_request);
+        zb::msg::Status repl_status = ReplicateWriteToSecondary(normalized_request, repl_snapshot.epoch);
         if (!repl_status.ok()) {
-            EnqueueReplicationRepair(request, repl_snapshot.epoch);
+            EnqueueReplicationRepair(normalized_request, repl_snapshot.epoch);
             reply.status = repl_status;
             return reply;
         }
         std::lock_guard<std::mutex> lock(repl_repair_mu_);
-        const std::string key = BuildReplicationRepairKey(request);
+        const std::string key = BuildReplicationRepairKey(normalized_request);
         auto it = repl_repair_generation_.find(key);
         if (it != repl_repair_generation_.end() && it->second == generation) {
             repl_repair_generation_.erase(it);
@@ -189,7 +193,8 @@ zb::msg::ReadChunkReply VirtualStorageServiceImpl::ReadChunk(const zb::msg::Read
         reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
         return reply;
     }
-    if (!ValidateDisk(request.disk_id)) {
+    std::string effective_disk;
+    if (!ResolveEffectiveDisk(request.disk_id, request.chunk_id, false, &effective_disk)) {
         reply.status = zb::msg::Status::NotFound("Unknown disk_id: " + request.disk_id);
         return reply;
     }
@@ -197,7 +202,7 @@ zb::msg::ReadChunkReply VirtualStorageServiceImpl::ReadChunk(const zb::msg::Read
     SimulateIo(request.size, true);
     {
         std::lock_guard<std::mutex> lock(chunk_mu_);
-        const std::string key = BuildChunkKey(request.disk_id, request.chunk_id);
+        const std::string key = BuildChunkKey(effective_disk, request.chunk_id);
         auto it = chunk_data_.find(key);
         if (it == chunk_data_.end()) {
             reply.status = zb::msg::Status::NotFound("chunk not found");
@@ -214,8 +219,16 @@ zb::msg::ReadChunkReply VirtualStorageServiceImpl::ReadChunk(const zb::msg::Read
             reply.data.assign(blob.data() + static_cast<size_t>(request.offset), static_cast<size_t>(read_len));
         }
     }
-    TrackChunkAccess(request.disk_id, request.chunk_id, request.offset + reply.bytes, false, 0);
+    TrackChunkAccess(effective_disk, request.chunk_id, request.offset + reply.bytes, false, 0);
     reply.status = zb::msg::Status::Ok();
+    return reply;
+}
+
+zb::msg::ReadArchivedFileReply VirtualStorageServiceImpl::ReadArchivedFile(
+    const zb::msg::ReadArchivedFileRequest& request) {
+    (void)request;
+    zb::msg::ReadArchivedFileReply reply;
+    reply.status = zb::msg::Status::InvalidArgument("virtual node does not support archived-file read");
     return reply;
 }
 
@@ -225,35 +238,78 @@ zb::msg::DeleteChunkReply VirtualStorageServiceImpl::DeleteChunk(const zb::msg::
         reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
         return reply;
     }
-    if (!ValidateDisk(request.disk_id)) {
+    std::string effective_disk;
+    if (!ResolveEffectiveDisk(request.disk_id, request.chunk_id, false, &effective_disk)) {
         reply.status = zb::msg::Status::NotFound("Unknown disk_id: " + request.disk_id);
         return reply;
     }
     {
         std::lock_guard<std::mutex> lock(chunk_mu_);
-        const std::string key = BuildChunkKey(request.disk_id, request.chunk_id);
+        const std::string key = BuildChunkKey(effective_disk, request.chunk_id);
         auto it = chunk_data_.find(key);
         if (it != chunk_data_.end()) {
             const uint64_t size = static_cast<uint64_t>(it->second.size());
             chunk_data_.erase(it);
             chunk_sizes_.erase(key);
-            uint64_t& used = disk_used_bytes_[request.disk_id];
+            auto home_it = chunk_home_disk_.find(request.chunk_id);
+            if (home_it != chunk_home_disk_.end() && home_it->second == effective_disk) {
+                chunk_home_disk_.erase(home_it);
+            }
+            uint64_t& used = disk_used_bytes_[effective_disk];
             used = used > size ? (used - size) : 0;
         }
     }
-    RemoveChunkTracking(request.disk_id, request.chunk_id);
+    RemoveChunkTracking(effective_disk, request.chunk_id);
     reply.status = zb::msg::Status::Ok();
     return reply;
+}
+
+zb::msg::Status VirtualStorageServiceImpl::PutObject(const zb::data_node::ObjectWriteRequest& request) {
+    zb::msg::WriteChunkRequest chunk_request;
+    chunk_request.disk_id = request.disk_id;
+    chunk_request.chunk_id = request.object_id;
+    chunk_request.offset = request.offset;
+    chunk_request.data.assign(request.data.data(), request.data.size());
+    chunk_request.epoch = request.epoch;
+    return WriteChunk(chunk_request).status;
+}
+
+zb::data_node::ObjectReadResult VirtualStorageServiceImpl::GetObject(const zb::data_node::ObjectReadRequest& request) {
+    zb::msg::ReadChunkRequest chunk_request;
+    chunk_request.disk_id = request.disk_id;
+    chunk_request.chunk_id = request.object_id;
+    chunk_request.offset = request.offset;
+    chunk_request.size = request.size;
+    const zb::msg::ReadChunkReply reply = ReadChunk(chunk_request);
+    zb::data_node::ObjectReadResult result;
+    result.status = reply.status;
+    if (reply.status.ok()) {
+        result.data = reply.data;
+    }
+    return result;
+}
+
+zb::msg::Status VirtualStorageServiceImpl::DeleteObject(const zb::data_node::ObjectDeleteRequest& request) {
+    zb::msg::DeleteChunkRequest chunk_request;
+    chunk_request.disk_id = request.disk_id;
+    chunk_request.chunk_id = request.object_id;
+    return DeleteChunk(chunk_request).status;
 }
 
 zb::msg::DiskReportReply VirtualStorageServiceImpl::GetDiskReport() const {
     zb::msg::DiskReportReply reply;
     std::unordered_map<std::string, uint64_t> used_snapshot;
+    std::vector<std::string> disks;
     {
         std::lock_guard<std::mutex> lock(chunk_mu_);
         used_snapshot = disk_used_bytes_;
+        disks.reserve(disk_set_.size());
+        for (const auto& disk_id : disk_set_) {
+            disks.push_back(disk_id);
+        }
     }
-    for (const auto& disk_id : disk_set_) {
+    std::sort(disks.begin(), disks.end());
+    for (const auto& disk_id : disks) {
         zb::msg::DiskReport report;
         report.id = disk_id;
         report.mount_point = config_.mount_point_prefix + "/" + disk_id;
@@ -291,7 +347,11 @@ zb::msg::Status VirtualStorageServiceImpl::UpdateArchiveState(const std::string&
     if (disk_id.empty() || chunk_id.empty() || archive_state.empty()) {
         return zb::msg::Status::InvalidArgument("disk_id/chunk_id/archive_state is empty");
     }
-    if (!archive_meta_store_.UpdateArchiveState(disk_id, chunk_id, archive_state, version)) {
+    std::string effective_disk;
+    if (!ResolveEffectiveDisk(disk_id, chunk_id, false, &effective_disk)) {
+        effective_disk = disk_id;
+    }
+    if (!archive_meta_store_.UpdateArchiveState(effective_disk, chunk_id, archive_state, version)) {
         return zb::msg::Status::IoError("failed to update archive state");
     }
     return zb::msg::Status::Ok();
@@ -326,7 +386,58 @@ std::vector<ArchiveCandidateStat> VirtualStorageServiceImpl::CollectArchiveCandi
     return out;
 }
 
+bool VirtualStorageServiceImpl::ResolveEffectiveDisk(const std::string& requested_disk_id,
+                                                     const std::string& chunk_id,
+                                                     bool allow_dynamic_register,
+                                                     std::string* effective_disk) {
+    if (!effective_disk || requested_disk_id.empty()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(chunk_mu_);
+    auto disk_it = disk_set_.find(requested_disk_id);
+    if (disk_it != disk_set_.end()) {
+        *effective_disk = requested_disk_id;
+        return true;
+    }
+
+    auto home_it = chunk_home_disk_.find(chunk_id);
+    if (home_it != chunk_home_disk_.end() && disk_set_.find(home_it->second) != disk_set_.end()) {
+        *effective_disk = home_it->second;
+        return true;
+    }
+
+    if (!chunk_id.empty()) {
+        const std::string suffix = "|" + chunk_id;
+        for (const auto& entry : chunk_data_) {
+            const std::string& key = entry.first;
+            if (key.size() <= suffix.size() || key.compare(key.size() - suffix.size(), suffix.size(), suffix) != 0) {
+                continue;
+            }
+            const size_t split = key.find('|');
+            if (split == std::string::npos || split == 0) {
+                continue;
+            }
+            const std::string disk_from_key = key.substr(0, split);
+            if (disk_set_.find(disk_from_key) == disk_set_.end()) {
+                continue;
+            }
+            chunk_home_disk_[chunk_id] = disk_from_key;
+            *effective_disk = disk_from_key;
+            return true;
+        }
+    }
+
+    if (allow_dynamic_register && config_.allow_dynamic_disks) {
+        disk_set_.insert(requested_disk_id);
+        disk_used_bytes_.emplace(requested_disk_id, 0);
+        *effective_disk = requested_disk_id;
+        return true;
+    }
+    return false;
+}
+
 bool VirtualStorageServiceImpl::ValidateDisk(const std::string& disk_id) const {
+    std::lock_guard<std::mutex> lock(chunk_mu_);
     return disk_set_.find(disk_id) != disk_set_.end();
 }
 
@@ -407,6 +518,16 @@ zb::msg::Status VirtualStorageServiceImpl::ReplicateWriteToSecondary(const zb::m
     replicate_req.set_is_replication(true);
     replicate_req.set_epoch(epoch);
     replicate_req.set_archive_op_id(request.archive_op_id);
+    replicate_req.set_inode_id(request.inode_id);
+    replicate_req.set_file_id(request.file_id);
+    replicate_req.set_file_path(request.file_path);
+    replicate_req.set_file_size(request.file_size);
+    replicate_req.set_file_offset(request.file_offset);
+    replicate_req.set_file_mode(request.file_mode);
+    replicate_req.set_file_uid(request.file_uid);
+    replicate_req.set_file_gid(request.file_gid);
+    replicate_req.set_file_mtime(request.file_mtime);
+    replicate_req.set_file_chunk_index(request.file_chunk_index);
 
     zb::rpc::WriteChunkReply replicate_resp;
     brpc::Controller cntl;

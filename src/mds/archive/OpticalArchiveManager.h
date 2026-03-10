@@ -55,6 +55,9 @@ private:
                              const std::string& chunk_id,
                              const std::string& op_id,
                              const std::string& data,
+                             uint64_t inode_id,
+                             uint32_t chunk_index,
+                             const zb::rpc::InodeAttr* inode_attr,
                              zb::rpc::ReplicaLocation* optical_location,
                              std::string* error);
     bool DeleteDiskReplica(const zb::rpc::ReplicaLocation& replica, std::string* error);

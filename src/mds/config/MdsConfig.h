@@ -42,6 +42,10 @@ struct MdsConfig {
     std::string db_path;
     std::string scheduler_address;
     uint32_t scheduler_refresh_ms{2000};
+    bool enable_pg_layout{false};
+    uint64_t pg_view_epoch{1};
+    uint32_t pg_count{1024};
+    std::string layout_mode{"legacy"};
     uint64_t chunk_size{4 * 1024 * 1024};
     uint32_t replica{2};
     std::vector<NodeInfo> nodes;
@@ -59,6 +63,12 @@ struct MdsConfig {
     bool archive_strict_full_disc{true};
     std::string archive_staging_dir;
     uint64_t archive_batch_max_age_ms{0};
+    bool enable_layout_gc{false};
+    uint32_t layout_gc_interval_ms{30000};
+    uint64_t layout_gc_orphan_grace_ms{10ULL * 60ULL * 1000ULL};
+    uint32_t layout_gc_max_delete_per_round{1024};
+    uint32_t layout_object_replica_count{3};
+    bool layout_object_scrub_on_load{true};
 
     static MdsConfig LoadFromFile(const std::string& path, std::string* error);
 };

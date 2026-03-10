@@ -50,6 +50,7 @@ public:
 
     zb::msg::WriteChunkReply WriteChunk(const zb::msg::WriteChunkRequest& request);
     zb::msg::ReadChunkReply ReadChunk(const zb::msg::ReadChunkRequest& request);
+    zb::msg::ReadArchivedFileReply ReadArchivedFile(const zb::msg::ReadArchivedFileRequest& request);
     zb::msg::DeleteChunkReply DeleteChunk(const zb::msg::DeleteChunkRequest& request);
     zb::msg::DiskReportReply GetDiskReport() const;
     zb::msg::Status UpdateArchiveState(const std::string& disk_id,

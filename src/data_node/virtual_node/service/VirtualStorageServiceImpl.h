@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #include "../config/VirtualNodeConfig.h"
+#include "../../common/ObjectStore.h"
 #include "../../real_node/service/ArchiveChunkMetaStore.h"
 #include "../../../msg/storage_node_messages.h"
 
@@ -72,7 +73,11 @@ public:
 
     zb::msg::WriteChunkReply WriteChunk(const zb::msg::WriteChunkRequest& request);
     zb::msg::ReadChunkReply ReadChunk(const zb::msg::ReadChunkRequest& request);
+    zb::msg::ReadArchivedFileReply ReadArchivedFile(const zb::msg::ReadArchivedFileRequest& request);
     zb::msg::DeleteChunkReply DeleteChunk(const zb::msg::DeleteChunkRequest& request);
+    zb::msg::Status PutObject(const zb::data_node::ObjectWriteRequest& request);
+    zb::data_node::ObjectReadResult GetObject(const zb::data_node::ObjectReadRequest& request);
+    zb::msg::Status DeleteObject(const zb::data_node::ObjectDeleteRequest& request);
     zb::msg::DiskReportReply GetDiskReport() const;
     bool InitArchiveMetaStore(const std::string& meta_dir,
                               size_t max_chunks,
@@ -96,6 +101,10 @@ private:
         uint64_t generation{0};
     };
 
+    bool ResolveEffectiveDisk(const std::string& requested_disk_id,
+                              const std::string& chunk_id,
+                              bool allow_dynamic_register,
+                              std::string* effective_disk);
     bool ValidateDisk(const std::string& disk_id) const;
     void SimulateIo(uint64_t bytes, bool is_read);
     void TrackChunkAccess(const std::string& disk_id,
@@ -118,6 +127,7 @@ private:
     std::unordered_set<std::string> disk_set_;
     mutable std::mutex chunk_mu_;
     std::unordered_map<std::string, std::string> chunk_data_;
+    std::unordered_map<std::string, std::string> chunk_home_disk_;
     std::unordered_map<std::string, uint64_t> chunk_sizes_;
     std::unordered_map<std::string, uint64_t> disk_used_bytes_;
     mutable std::mutex rng_mu_;

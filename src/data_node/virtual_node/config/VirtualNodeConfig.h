@@ -27,6 +27,7 @@ struct VirtualNodeConfig {
     std::string archive_meta_dir;
     uint32_t archive_meta_snapshot_interval_ops{20000};
     bool archive_meta_wal_fsync{false};
+    bool allow_dynamic_disks{true};
 
     std::vector<std::string> disk_ids;
     uint64_t read_bytes_per_sec{500ULL * 1024ULL * 1024ULL};
