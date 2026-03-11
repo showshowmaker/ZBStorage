@@ -29,11 +29,11 @@ struct FileArchiveMeta {
     uint32_t file_uid{0};
     uint32_t file_gid{0};
     uint64_t file_mtime{0};
-    uint32_t file_chunk_index{0};
+    uint32_t file_object_index{0};
 };
 
 struct ImageFileExtent {
-    std::string chunk_id;
+    std::string object_id;
     std::string image_id;
     uint64_t file_offset{0};
     uint64_t image_offset{0};
@@ -69,20 +69,21 @@ public:
 
     bool Init(std::string* error);
 
-    zb::msg::Status WriteChunk(const std::string& disk_id,
-                               const std::string& chunk_id,
-                               const std::string& data,
-                               const FileArchiveMeta* file_meta,
-                               ImageLocation* location);
-    zb::msg::Status ReadChunk(const std::string& disk_id,
-                              const std::string& chunk_id,
-                              uint64_t offset,
-                              uint64_t size,
-                              const std::string& image_id_hint,
-                              uint64_t image_offset_hint,
-                              uint64_t image_length_hint,
-                              std::string* out,
-                              uint64_t* bytes_read) const;
+    zb::msg::Status WriteObject(const std::string& disk_id,
+                                const std::string& object_id,
+                                const std::string& data,
+                                const FileArchiveMeta* file_meta,
+                                ImageLocation* location);
+    zb::msg::Status ReadObject(const std::string& disk_id,
+                               const std::string& object_id,
+                               uint64_t offset,
+                               uint64_t size,
+                               const std::string& image_id_hint,
+                               uint64_t image_offset_hint,
+                               uint64_t image_length_hint,
+                               std::string* out,
+                               uint64_t* bytes_read) const;
+    zb::msg::Status DeleteObject(const std::string& disk_id, const std::string& object_id);
     zb::msg::Status ReadArchivedFile(const std::string& disc_id,
                                      uint64_t inode_id,
                                      const std::string& file_id,
@@ -90,7 +91,6 @@ public:
                                      uint64_t size,
                                      std::string* out,
                                      uint64_t* bytes_read) const;
-    zb::msg::Status DeleteChunk(const std::string& disk_id, const std::string& chunk_id);
     zb::msg::DiskReportReply GetDiskReport() const;
     bool RebuildFileSystemMetadata(const std::string& disk_id,
                                    std::vector<ImageFileEntry>* files,
@@ -107,7 +107,7 @@ private:
         uint32_t data_crc32{0};
     };
 
-    struct ChunkRecord {
+    struct ObjectRecord {
         std::string image_id;
         uint64_t offset{0};
         uint64_t length{0};
@@ -132,17 +132,17 @@ private:
         std::list<std::string> cached_lru;
         std::unordered_map<std::string, std::list<std::string>::iterator> cached_lru_pos;
 
-        std::unordered_map<std::string, ChunkRecord> chunks;
+        std::unordered_map<std::string, ObjectRecord> objects;
         std::unordered_map<std::string, ImageFileEntry> files;
     };
 
     static std::string BuildImageId(uint64_t index);
     static bool ParseImageIndex(const std::string& name, uint64_t* index);
     static std::string ToHex(uint64_t value, size_t width);
-    static std::string BuildHashPrefix(const std::string& chunk_id);
-    static std::string JoinChunkKey(const std::string& disk_id, const std::string& chunk_id);
+    static std::string BuildHashPrefix(const std::string& object_id);
+    static std::string JoinObjectKey(const std::string& disk_id, const std::string& object_id);
     static void SleepByBytes(uint64_t bytes, uint64_t bytes_per_sec);
-    static std::string BuildSimulatedChunkData(const std::string& chunk_id, uint64_t offset, uint64_t size);
+    static std::string BuildSimulatedObjectData(const std::string& object_id, uint64_t offset, uint64_t size);
     static std::vector<std::string> Split(const std::string& input, char delimiter);
     static uint32_t Crc32(const std::string& data);
     static void AppendU16(std::string* out, uint16_t value);
@@ -153,29 +153,29 @@ private:
     static bool ReadU64(const std::string& in, size_t* cursor, uint64_t* value);
     static void AppendString(std::string* out, const std::string& value);
     static bool ReadString(const std::string& in, size_t* cursor, std::string* value);
-    static std::string BuildFileId(const FileArchiveMeta* meta, uint64_t inode_id_hint, const std::string& chunk_id);
+    static std::string BuildFileId(const FileArchiveMeta* meta, uint64_t inode_id_hint, const std::string& object_id);
     static bool EncodeFileArchiveMeta(const FileArchiveMeta& meta,
                                       const std::string& disk_id,
-                                      const std::string& chunk_id,
+                                      const std::string& object_id,
                                       uint64_t commit_ts_ms,
                                       std::string* out);
     static bool DecodeFileArchiveMeta(const std::string& data,
                                       FileArchiveMeta* meta,
                                       std::string* disk_id,
-                                      std::string* chunk_id,
+                                      std::string* object_id,
                                       uint64_t* commit_ts_ms);
     static std::string EncodeImageRecordHeader(const ImageRecordHeader& header);
     static bool DecodeImageRecordHeader(const char* bytes, size_t size, ImageRecordHeader* header);
     bool AppendRecordLocked(DiskContext* ctx,
-                            const std::string& chunk_id,
+                            const std::string& object_id,
                             const std::string& data,
                             const FileArchiveMeta* file_meta,
                             uint64_t* payload_offset,
                             std::string* error);
     bool ReplayImageFileLocked(DiskContext* ctx, const std::string& image_path, std::string* error);
     static void UpsertFileExtent(DiskContext* ctx,
-                                 const std::string& chunk_id,
-                                 const ChunkRecord& rec);
+                                 const std::string& object_id,
+                                 const ObjectRecord& rec);
 
     bool EnsureDiskContextLocked(const std::string& disk_id, DiskContext** ctx, std::string* error) const;
     bool RotateImageIfNeededLocked(DiskContext* ctx, uint64_t incoming_size, std::string* error);

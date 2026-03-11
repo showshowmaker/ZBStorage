@@ -68,8 +68,8 @@ set(REAL_NODE_SOURCES
     src/data_node/real_node/io/DiskManager.cpp
     src/data_node/real_node/io/LocalPathResolver.cpp
     src/data_node/real_node/io/IOExecutor.cpp
-    src/data_node/common/RealChunkObjectStore.cpp
-    src/data_node/real_node/service/ArchiveChunkMetaStore.cpp
+    src/data_node/common/RealObjectStore.cpp
+    src/data_node/real_node/service/ArchiveObjectMetaStore.cpp
     src/data_node/real_node/service/StorageServiceImpl.cpp
     src/data_node/real_node/service/BrpcStorageService.cpp
     src/data_node/real_node/server/real_node_server.cpp
@@ -99,8 +99,8 @@ endif()
 
 add_executable(virtual_node_server
     src/data_node/virtual_node/config/VirtualNodeConfig.cpp
-    src/data_node/common/VirtualChunkObjectStore.cpp
-    src/data_node/real_node/service/ArchiveChunkMetaStore.cpp
+    src/data_node/common/VirtualObjectStore.cpp
+    src/data_node/real_node/service/ArchiveObjectMetaStore.cpp
     src/data_node/virtual_node/service/VirtualStorageServiceImpl.cpp
     src/data_node/virtual_node/service/BrpcVirtualStorageService.cpp
     src/data_node/virtual_node/server/virtual_node_server.cpp
@@ -316,7 +316,7 @@ add_executable(mds_server
     src/mds/storage/RocksMetaStore.cpp
     src/mds/allocator/NodeStateCache.cpp
     src/mds/allocator/PGManager.cpp
-    src/mds/allocator/ChunkAllocator.cpp
+    src/mds/allocator/ObjectAllocator.cpp
     src/mds/archive/ArchiveBatchStager.cpp
     src/mds/archive/ArchiveLeaseManager.cpp
     src/mds/archive/OpticalArchiveManager.cpp
@@ -407,31 +407,6 @@ if(UNIX)
     endif()
 endif()
 
-add_executable(migrate_chunk_to_layout
-    src/mds/storage/MetaCodec.cpp
-    src/mds/storage/RocksMetaStore.cpp
-    src/mds/tools/migrate_chunk_to_layout.cpp
-)
-set_target_properties(migrate_chunk_to_layout PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF
-)
-target_include_directories(migrate_chunk_to_layout
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${GFLAGS_INCLUDE_PATH}
-        ${ROCKSDB_ROOT}/include
-        ${CMAKE_CURRENT_BINARY_DIR}
-)
-target_link_libraries(migrate_chunk_to_layout
-    PRIVATE
-        zb_proto
-        ${GFLAGS_LIBRARY}
-        ${CMAKE_THREAD_LIBS_INIT}
-        ${ROCKSDB_TARGET}
-)
-
 add_executable(layout_gc_probe
     src/mds/storage/MetaCodec.cpp
     src/mds/storage/RocksMetaStore.cpp
@@ -450,6 +425,31 @@ target_include_directories(layout_gc_probe
         ${CMAKE_CURRENT_BINARY_DIR}
 )
 target_link_libraries(layout_gc_probe
+    PRIVATE
+        zb_proto
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+        ${ROCKSDB_TARGET}
+)
+
+add_executable(layout_consistency_check
+    src/mds/storage/MetaCodec.cpp
+    src/mds/storage/RocksMetaStore.cpp
+    src/mds/tools/layout_consistency_check.cpp
+)
+set_target_properties(layout_consistency_check PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(layout_consistency_check
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${ROCKSDB_ROOT}/include
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(layout_consistency_check
     PRIVATE
         zb_proto
         ${GFLAGS_LIBRARY}

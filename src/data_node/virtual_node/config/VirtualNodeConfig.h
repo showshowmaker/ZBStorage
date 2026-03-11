@@ -23,7 +23,7 @@ struct VirtualNodeConfig {
     uint32_t archive_report_interval_ms{3000};
     uint32_t archive_report_topk{256};
     uint64_t archive_report_min_age_ms{30000};
-    uint32_t archive_track_max_chunks{500000};
+    uint32_t archive_track_max_objects{500000};
     std::string archive_meta_dir;
     uint32_t archive_meta_snapshot_interval_ops{20000};
     bool archive_meta_wal_fsync{false};

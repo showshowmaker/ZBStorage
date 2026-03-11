@@ -88,14 +88,15 @@ ReplicationStatusSnapshot StorageServiceImpl::GetReplicationStatus() const {
     return repl_;
 }
 
-zb::msg::WriteChunkReply StorageServiceImpl::WriteChunk(const zb::msg::WriteChunkRequest& request) {
-    zb::msg::WriteChunkReply reply;
+zb::msg::WriteObjectReply StorageServiceImpl::WriteObject(const zb::msg::WriteObjectRequest& request) {
+    zb::msg::WriteObjectReply reply;
     if (!disk_manager_ || !path_resolver_ || !io_executor_) {
         reply.status = zb::msg::Status::InternalError("Service not initialized");
         return reply;
     }
-    if (request.disk_id.empty() || request.chunk_id.empty()) {
-        reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
+    const std::string object_id = request.ArchiveObjectId();
+    if (request.disk_id.empty() || object_id.empty()) {
+        reply.status = zb::msg::Status::InvalidArgument("disk_id or object_id is empty");
         return reply;
     }
 
@@ -116,7 +117,7 @@ zb::msg::WriteChunkReply StorageServiceImpl::WriteChunk(const zb::msg::WriteChun
         return reply;
     }
 
-    std::string path = path_resolver_->Resolve(mount_point, request.chunk_id, true);
+    std::string path = path_resolver_->Resolve(mount_point, object_id, true);
     if (path.empty()) {
         reply.status = zb::msg::Status::InvalidArgument("Failed to resolve path");
         return reply;
@@ -128,11 +129,11 @@ zb::msg::WriteChunkReply StorageServiceImpl::WriteChunk(const zb::msg::WriteChun
     if (!reply.status.ok()) {
         return reply;
     }
-    TrackChunkAccess(request.disk_id,
-                     request.chunk_id,
-                     request.offset + bytes_written,
-                     true,
-                     FastChecksum64(request.data));
+    TrackObjectAccess(request.disk_id,
+                      object_id,
+                      request.offset + bytes_written,
+                      true,
+                      FastChecksum64(request.data));
 
     {
         std::lock_guard<std::mutex> lock(repl_mu_);
@@ -158,14 +159,15 @@ zb::msg::WriteChunkReply StorageServiceImpl::WriteChunk(const zb::msg::WriteChun
     return reply;
 }
 
-zb::msg::ReadChunkReply StorageServiceImpl::ReadChunk(const zb::msg::ReadChunkRequest& request) {
-    zb::msg::ReadChunkReply reply;
+zb::msg::ReadObjectReply StorageServiceImpl::ReadObject(const zb::msg::ReadObjectRequest& request) {
+    zb::msg::ReadObjectReply reply;
     if (!disk_manager_ || !path_resolver_ || !io_executor_) {
         reply.status = zb::msg::Status::InternalError("Service not initialized");
         return reply;
     }
-    if (request.disk_id.empty() || request.chunk_id.empty()) {
-        reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
+    const std::string object_id = request.ArchiveObjectId();
+    if (request.disk_id.empty() || object_id.empty()) {
+        reply.status = zb::msg::Status::InvalidArgument("disk_id or object_id is empty");
         return reply;
     }
 
@@ -175,7 +177,7 @@ zb::msg::ReadChunkReply StorageServiceImpl::ReadChunk(const zb::msg::ReadChunkRe
         return reply;
     }
 
-    std::string path = path_resolver_->Resolve(mount_point, request.chunk_id, false);
+    std::string path = path_resolver_->Resolve(mount_point, object_id, false);
     if (path.empty()) {
         reply.status = zb::msg::Status::InvalidArgument("Failed to resolve path");
         return reply;
@@ -185,7 +187,7 @@ zb::msg::ReadChunkReply StorageServiceImpl::ReadChunk(const zb::msg::ReadChunkRe
     reply.status = io_executor_->Read(path, request.offset, request.size, &reply.data, &bytes_read);
     reply.bytes = bytes_read;
     if (reply.status.ok()) {
-        TrackChunkAccess(request.disk_id, request.chunk_id, request.offset + bytes_read, false, 0);
+        TrackObjectAccess(request.disk_id, object_id, request.offset + bytes_read, false, 0);
     }
     return reply;
 }
@@ -197,14 +199,15 @@ zb::msg::ReadArchivedFileReply StorageServiceImpl::ReadArchivedFile(const zb::ms
     return reply;
 }
 
-zb::msg::DeleteChunkReply StorageServiceImpl::DeleteChunk(const zb::msg::DeleteChunkRequest& request) {
-    zb::msg::DeleteChunkReply reply;
+zb::msg::DeleteObjectReply StorageServiceImpl::DeleteObject(const zb::msg::DeleteObjectRequest& request) {
+    zb::msg::DeleteObjectReply reply;
     if (!disk_manager_ || !path_resolver_ || !io_executor_) {
         reply.status = zb::msg::Status::InternalError("Service not initialized");
         return reply;
     }
-    if (request.disk_id.empty() || request.chunk_id.empty()) {
-        reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
+    const std::string object_id = request.ArchiveObjectId();
+    if (request.disk_id.empty() || object_id.empty()) {
+        reply.status = zb::msg::Status::InvalidArgument("disk_id or object_id is empty");
         return reply;
     }
 
@@ -214,7 +217,7 @@ zb::msg::DeleteChunkReply StorageServiceImpl::DeleteChunk(const zb::msg::DeleteC
         return reply;
     }
 
-    std::string path = path_resolver_->Resolve(mount_point, request.chunk_id, false);
+    std::string path = path_resolver_->Resolve(mount_point, object_id, false);
     if (path.empty()) {
         reply.status = zb::msg::Status::InvalidArgument("Failed to resolve path");
         return reply;
@@ -224,28 +227,29 @@ zb::msg::DeleteChunkReply StorageServiceImpl::DeleteChunk(const zb::msg::DeleteC
         reply.status = zb::msg::Status::Ok();
     }
     if (reply.status.ok()) {
-        RemoveChunkTracking(request.disk_id, request.chunk_id);
+        RemoveObjectTracking(request.disk_id, object_id);
     }
     return reply;
 }
 
 zb::msg::Status StorageServiceImpl::PutObject(const zb::data_node::ObjectWriteRequest& request) {
-    zb::msg::WriteChunkRequest chunk_request;
-    chunk_request.disk_id = request.disk_id;
-    chunk_request.chunk_id = request.object_id;
-    chunk_request.offset = request.offset;
-    chunk_request.data.assign(request.data.data(), request.data.size());
-    chunk_request.epoch = request.epoch;
-    return WriteChunk(chunk_request).status;
+    zb::msg::WriteObjectRequest object_request;
+    object_request.disk_id = request.disk_id;
+    object_request.SetArchiveObjectId(request.object_id);
+    object_request.offset = request.offset;
+    object_request.data.assign(request.data.data(), request.data.size());
+    object_request.epoch = request.epoch;
+    object_request.is_replication = request.is_replication;
+    return WriteObject(object_request).status;
 }
 
 zb::data_node::ObjectReadResult StorageServiceImpl::GetObject(const zb::data_node::ObjectReadRequest& request) {
-    zb::msg::ReadChunkRequest chunk_request;
-    chunk_request.disk_id = request.disk_id;
-    chunk_request.chunk_id = request.object_id;
-    chunk_request.offset = request.offset;
-    chunk_request.size = request.size;
-    const zb::msg::ReadChunkReply reply = ReadChunk(chunk_request);
+    zb::msg::ReadObjectRequest object_request;
+    object_request.disk_id = request.disk_id;
+    object_request.SetArchiveObjectId(request.object_id);
+    object_request.offset = request.offset;
+    object_request.size = request.size;
+    const zb::msg::ReadObjectReply reply = ReadObject(object_request);
     zb::data_node::ObjectReadResult result;
     result.status = reply.status;
     if (reply.status.ok()) {
@@ -255,10 +259,10 @@ zb::data_node::ObjectReadResult StorageServiceImpl::GetObject(const zb::data_nod
 }
 
 zb::msg::Status StorageServiceImpl::DeleteObject(const zb::data_node::ObjectDeleteRequest& request) {
-    zb::msg::DeleteChunkRequest chunk_request;
-    chunk_request.disk_id = request.disk_id;
-    chunk_request.chunk_id = request.object_id;
-    return DeleteChunk(chunk_request).status;
+    zb::msg::DeleteObjectRequest object_request;
+    object_request.disk_id = request.disk_id;
+    object_request.SetArchiveObjectId(request.object_id);
+    return DeleteObject(object_request).status;
 }
 
 zb::msg::DiskReportReply StorageServiceImpl::GetDiskReport() const {
@@ -272,7 +276,7 @@ zb::msg::DiskReportReply StorageServiceImpl::GetDiskReport() const {
     return reply;
 }
 
-zb::msg::Status StorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request,
+zb::msg::Status StorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::WriteObjectRequest& request,
                                                               uint64_t epoch) {
     ReplicationStatusSnapshot repl_snapshot = GetReplicationStatus();
     if (!repl_snapshot.replication_enabled || repl_snapshot.peer_address.empty()) {
@@ -304,9 +308,10 @@ zb::msg::Status StorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::Wri
     }
 
     zb::rpc::RealNodeService_Stub stub(channel);
-    zb::rpc::WriteChunkRequest replicate_req;
+    zb::rpc::WriteObjectRequest replicate_req;
+    const std::string object_id = request.ArchiveObjectId();
     replicate_req.set_disk_id(request.disk_id);
-    replicate_req.set_chunk_id(request.chunk_id);
+    replicate_req.set_object_id(object_id);
     replicate_req.set_offset(request.offset);
     replicate_req.set_data(request.data);
     replicate_req.set_is_replication(true);
@@ -321,11 +326,11 @@ zb::msg::Status StorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::Wri
     replicate_req.set_file_uid(request.file_uid);
     replicate_req.set_file_gid(request.file_gid);
     replicate_req.set_file_mtime(request.file_mtime);
-    replicate_req.set_file_chunk_index(request.file_chunk_index);
+    replicate_req.set_file_object_index(request.file_object_index);
 
-    zb::rpc::WriteChunkReply replicate_resp;
+    zb::rpc::WriteObjectReply replicate_resp;
     brpc::Controller cntl;
-    stub.WriteChunk(&cntl, &replicate_req, &replicate_resp, nullptr);
+    stub.WriteObject(&cntl, &replicate_req, &replicate_resp, nullptr);
     if (cntl.Failed()) {
         return zb::msg::Status::IoError("replication rpc failed: " + cntl.ErrorText());
     }
@@ -335,7 +340,7 @@ zb::msg::Status StorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::Wri
     return zb::msg::Status::Ok();
 }
 
-void StorageServiceImpl::EnqueueReplicationRepair(const zb::msg::WriteChunkRequest& request, uint64_t epoch) {
+void StorageServiceImpl::EnqueueReplicationRepair(const zb::msg::WriteObjectRequest& request, uint64_t epoch) {
     std::lock_guard<std::mutex> lock(repl_repair_mu_);
     const std::string key = BuildReplicationRepairKey(request);
     uint64_t generation = 1;
@@ -370,7 +375,7 @@ void StorageServiceImpl::EnqueueReplicationRepair(const zb::msg::WriteChunkReque
     repl_repair_cv_.notify_one();
 }
 
-uint64_t StorageServiceImpl::BumpReplicationRepairGeneration(const zb::msg::WriteChunkRequest& request) {
+uint64_t StorageServiceImpl::BumpReplicationRepairGeneration(const zb::msg::WriteObjectRequest& request) {
     std::lock_guard<std::mutex> lock(repl_repair_mu_);
     const std::string key = BuildReplicationRepairKey(request);
     uint64_t& generation = repl_repair_generation_[key];
@@ -378,8 +383,8 @@ uint64_t StorageServiceImpl::BumpReplicationRepairGeneration(const zb::msg::Writ
     return generation;
 }
 
-std::string StorageServiceImpl::BuildReplicationRepairKey(const zb::msg::WriteChunkRequest& request) {
-    return request.disk_id + "|" + request.chunk_id + "|" +
+std::string StorageServiceImpl::BuildReplicationRepairKey(const zb::msg::WriteObjectRequest& request) {
+    return request.disk_id + "|" + request.ArchiveObjectId() + "|" +
            std::to_string(request.offset) + "|" + std::to_string(request.data.size());
 }
 
@@ -444,9 +449,9 @@ void StorageServiceImpl::ReplicationRepairLoop() {
     }
 }
 
-void StorageServiceImpl::SetArchiveTrackingMaxChunks(size_t max_chunks) {
-    archive_tracking_max_chunks_ = max_chunks > 0 ? max_chunks : 1;
-    archive_meta_store_.SetMaxChunks(archive_tracking_max_chunks_);
+void StorageServiceImpl::SetArchiveTrackingMaxObjects(size_t max_objects) {
+    archive_tracking_max_objects_ = max_objects > 0 ? max_objects : 1;
+    archive_meta_store_.SetMaxObjects(archive_tracking_max_objects_);
 }
 
 std::vector<ArchiveCandidateStat> StorageServiceImpl::CollectArchiveCandidates(uint32_t max_candidates,
@@ -458,7 +463,7 @@ std::vector<ArchiveCandidateStat> StorageServiceImpl::CollectArchiveCandidates(u
     for (const auto& view : views) {
         ArchiveCandidateStat candidate;
         candidate.disk_id = view.disk_id;
-        candidate.chunk_id = view.chunk_id;
+        candidate.SetArchiveObjectId(view.ArchiveObjectId());
         candidate.last_access_ts_ms = view.last_access_ts_ms;
         candidate.size_bytes = view.size_bytes;
         candidate.checksum = view.checksum;
@@ -473,26 +478,26 @@ std::vector<ArchiveCandidateStat> StorageServiceImpl::CollectArchiveCandidates(u
     return out;
 }
 
-void StorageServiceImpl::TrackChunkAccess(const std::string& disk_id,
-                                          const std::string& chunk_id,
-                                          uint64_t end_offset,
-                                          bool is_write,
-                                          uint64_t checksum) {
-    archive_meta_store_.TrackAccess(disk_id, chunk_id, end_offset, is_write, checksum, NowMilliseconds());
+void StorageServiceImpl::TrackObjectAccess(const std::string& disk_id,
+                                           const std::string& object_id,
+                                           uint64_t end_offset,
+                                           bool is_write,
+                                           uint64_t checksum) {
+    archive_meta_store_.TrackObjectAccess(disk_id, object_id, end_offset, is_write, checksum, NowMilliseconds());
 }
 
-void StorageServiceImpl::RemoveChunkTracking(const std::string& disk_id, const std::string& chunk_id) {
-    archive_meta_store_.RemoveChunk(disk_id, chunk_id);
+void StorageServiceImpl::RemoveObjectTracking(const std::string& disk_id, const std::string& object_id) {
+    archive_meta_store_.RemoveObject(disk_id, object_id);
 }
 
 bool StorageServiceImpl::InitArchiveMetaStore(const std::string& meta_dir,
-                                              size_t max_chunks,
+                                              size_t max_objects,
                                               uint32_t snapshot_interval_ops,
                                               bool wal_fsync,
                                               std::string* error) {
-    archive_tracking_max_chunks_ = max_chunks > 0 ? max_chunks : 1;
+    archive_tracking_max_objects_ = max_objects > 0 ? max_objects : 1;
     return archive_meta_store_.Init(meta_dir,
-                                    archive_tracking_max_chunks_,
+                                    archive_tracking_max_objects_,
                                     snapshot_interval_ops,
                                     error,
                                     wal_fsync);
@@ -503,13 +508,13 @@ bool StorageServiceImpl::FlushArchiveMetaSnapshot(std::string* error) {
 }
 
 zb::msg::Status StorageServiceImpl::UpdateArchiveState(const std::string& disk_id,
-                                                       const std::string& chunk_id,
+                                                       const std::string& object_id,
                                                        const std::string& archive_state,
                                                        uint64_t version) {
-    if (disk_id.empty() || chunk_id.empty() || archive_state.empty()) {
-        return zb::msg::Status::InvalidArgument("disk_id/chunk_id/archive_state is empty");
+    if (disk_id.empty() || object_id.empty() || archive_state.empty()) {
+        return zb::msg::Status::InvalidArgument("disk_id/object_id/archive_state is empty");
     }
-    if (!archive_meta_store_.UpdateArchiveState(disk_id, chunk_id, archive_state, version)) {
+    if (!archive_meta_store_.UpdateObjectArchiveState(disk_id, object_id, archive_state, version)) {
         return zb::msg::Status::IoError("failed to update archive state");
     }
     return zb::msg::Status::Ok();

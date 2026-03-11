@@ -39,7 +39,7 @@ bool ArchiveBatchStager::Init(const std::string& staging_dir, Options options, s
 
     std::lock_guard<std::mutex> lock(mu_);
     staging_dir_ = staging_dir;
-    chunk_dir_ = (fs::path(staging_dir_) / "chunks").string();
+    object_dir_ = (fs::path(staging_dir_) / "objects").string();
     manifest_path_ = (fs::path(staging_dir_) / "batch.manifest").string();
     options_ = options;
     if (options_.disc_size_bytes == 0) {
@@ -48,8 +48,8 @@ bool ArchiveBatchStager::Init(const std::string& staging_dir, Options options, s
     if (!EnsureDirsLocked(error)) {
         return false;
     }
-    chunks_.clear();
-    order_.clear();
+    objects_.clear();
+    object_order_.clear();
     batch_id_.clear();
     created_ts_ms_ = 0;
     sealed_ = false;
@@ -68,10 +68,10 @@ bool ArchiveBatchStager::Init(const std::string& staging_dir, Options options, s
     return true;
 }
 
-bool ArchiveBatchStager::StageChunk(const ArchiveCandidateEntry& candidate,
+bool ArchiveBatchStager::StageObject(const ArchiveCandidateEntry& candidate,
                                     const std::string& lease_id,
                                     const std::string& op_id,
-                                    const std::string& chunk_key,
+                                    const std::string& object_key,
                                     uint64_t version,
                                     const std::string& data,
                                     bool* inserted,
@@ -83,9 +83,10 @@ bool ArchiveBatchStager::StageChunk(const ArchiveCandidateEntry& candidate,
     if (deferred) {
         *deferred = false;
     }
-    if (candidate.chunk_id.empty()) {
+    const std::string object_id = candidate.ArchiveObjectId();
+    if (object_id.empty()) {
         if (error) {
-            *error = "chunk_id is empty";
+            *error = "archive object id is empty";
         }
         return false;
     }
@@ -103,19 +104,19 @@ bool ArchiveBatchStager::StageChunk(const ArchiveCandidateEntry& candidate,
         }
         return false;
     }
-    auto existing = chunks_.find(candidate.chunk_id);
-    if (existing != chunks_.end()) {
+    auto existing = objects_.find(object_id);
+    if (existing != objects_.end()) {
         return true;
     }
     const uint64_t data_size = static_cast<uint64_t>(data.size());
     if (data_size > options_.disc_size_bytes) {
         if (error) {
-            *error = "chunk size exceeds disc capacity";
+            *error = "object size exceeds disc capacity";
         }
         return false;
     }
     if (total_bytes_ > 0 && total_bytes_ + data_size > options_.disc_size_bytes) {
-        // Keep current batch <= disc capacity and spill this chunk to the next batch.
+        // Keep current batch <= disc capacity and spill this object to the next batch.
         sealed_ = true;
         if (!PersistManifestLocked(error)) {
             return false;
@@ -126,13 +127,13 @@ bool ArchiveBatchStager::StageChunk(const ArchiveCandidateEntry& candidate,
         return true;
     }
 
-    std::string data_path = ChunkFilePathLocked(candidate.chunk_id);
+    std::string data_path = ObjectFilePathLocked(object_id);
     const std::string tmp_path = data_path + ".tmp";
     {
         std::ofstream out(tmp_path, std::ios::out | std::ios::trunc | std::ios::binary);
         if (!out.is_open()) {
             if (error) {
-                *error = "failed to open staging chunk temp file";
+                *error = "failed to open staging object temp file";
             }
             return false;
         }
@@ -140,7 +141,7 @@ bool ArchiveBatchStager::StageChunk(const ArchiveCandidateEntry& candidate,
         out.flush();
         if (!out.good()) {
             if (error) {
-                *error = "failed to write staging chunk data";
+                *error = "failed to write staging object data";
             }
             return false;
         }
@@ -151,39 +152,39 @@ bool ArchiveBatchStager::StageChunk(const ArchiveCandidateEntry& candidate,
     fs::rename(tmp_path, data_path, ec);
     if (ec) {
         if (error) {
-            *error = "failed to move staging chunk data";
+            *error = "failed to move staging object data";
         }
         return false;
     }
 
-    StagedArchiveChunk staged;
+    StagedArchiveObject staged;
     staged.candidate = candidate;
     staged.lease_id = lease_id;
     staged.op_id = op_id;
-    staged.chunk_key = chunk_key;
+    staged.object_key = object_key;
     staged.version = version;
     staged.size_bytes = data_size;
     staged.data_file = data_path;
     staged.done = false;
 
-    chunks_[candidate.chunk_id] = std::move(staged);
-    order_.push_back(candidate.chunk_id);
+    objects_[object_id] = std::move(staged);
+    object_order_.push_back(object_id);
     total_bytes_ += data_size;
     if (IsReadyToSealLocked()) {
         sealed_ = true;
     }
     if (!PersistManifestLocked(error)) {
-        auto it = chunks_.find(candidate.chunk_id);
-        if (it != chunks_.end()) {
-            chunks_.erase(it);
+        auto it = objects_.find(object_id);
+        if (it != objects_.end()) {
+            objects_.erase(it);
         }
-        if (!order_.empty() && order_.back() == candidate.chunk_id) {
-            order_.pop_back();
+        if (!object_order_.empty() && object_order_.back() == object_id) {
+            object_order_.pop_back();
         }
         total_bytes_ = total_bytes_ >= data_size
                            ? (total_bytes_ - data_size)
                            : 0;
-        (void)RemoveChunkFileNoThrow(data_path);
+        (void)RemoveObjectFileNoThrow(data_path);
         return false;
     }
     if (inserted) {
@@ -215,16 +216,16 @@ bool ArchiveBatchStager::SealIfReady(std::string* error) {
     return PersistManifestLocked(error);
 }
 
-std::vector<StagedArchiveChunk> ArchiveBatchStager::SnapshotSealedBatch() const {
-    std::vector<StagedArchiveChunk> out;
+std::vector<StagedArchiveObject> ArchiveBatchStager::SnapshotSealedBatch() const {
+    std::vector<StagedArchiveObject> out;
     std::lock_guard<std::mutex> lock(mu_);
     if (!inited_ || !sealed_) {
         return out;
     }
-    out.reserve(order_.size());
-    for (const auto& chunk_id : order_) {
-        auto it = chunks_.find(chunk_id);
-        if (it == chunks_.end()) {
+    out.reserve(object_order_.size());
+    for (const auto& object_id : object_order_) {
+        auto it = objects_.find(object_id);
+        if (it == objects_.end()) {
             continue;
         }
         if (it->second.done) {
@@ -235,7 +236,7 @@ std::vector<StagedArchiveChunk> ArchiveBatchStager::SnapshotSealedBatch() const 
     return out;
 }
 
-bool ArchiveBatchStager::ReadChunkData(const StagedArchiveChunk& staged, std::string* data, std::string* error) const {
+bool ArchiveBatchStager::ReadObjectData(const StagedArchiveObject& staged, std::string* data, std::string* error) const {
     if (!data) {
         if (error) {
             *error = "output data buffer is null";
@@ -261,16 +262,16 @@ bool ArchiveBatchStager::ReadChunkData(const StagedArchiveChunk& staged, std::st
     return true;
 }
 
-bool ArchiveBatchStager::UpdateLease(const std::string& chunk_id,
+bool ArchiveBatchStager::UpdateObjectLease(const std::string& object_id,
                                      const std::string& lease_id,
                                      const std::string& op_id,
                                      uint64_t version,
                                      std::string* error) {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = chunks_.find(chunk_id);
-    if (it == chunks_.end()) {
+    auto it = objects_.find(object_id);
+    if (it == objects_.end()) {
         if (error) {
-            *error = "staged chunk not found";
+            *error = "staged object not found";
         }
         return false;
     }
@@ -280,12 +281,12 @@ bool ArchiveBatchStager::UpdateLease(const std::string& chunk_id,
     return PersistManifestLocked(error);
 }
 
-bool ArchiveBatchStager::MarkChunkDone(const std::string& chunk_id, std::string* error) {
+bool ArchiveBatchStager::MarkObjectDone(const std::string& object_id, std::string* error) {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = chunks_.find(chunk_id);
-    if (it == chunks_.end()) {
+    auto it = objects_.find(object_id);
+    if (it == objects_.end()) {
         if (error) {
-            *error = "staged chunk not found";
+            *error = "staged object not found";
         }
         return false;
     }
@@ -293,20 +294,20 @@ bool ArchiveBatchStager::MarkChunkDone(const std::string& chunk_id, std::string*
         return true;
     }
     it->second.done = true;
-    (void)RemoveChunkFileNoThrow(it->second.data_file);
+    (void)RemoveObjectFileNoThrow(it->second.data_file);
     return PersistManifestLocked(error);
 }
 
-bool ArchiveBatchStager::RemoveChunk(const std::string& chunk_id, std::string* error) {
+bool ArchiveBatchStager::RemoveObject(const std::string& object_id, std::string* error) {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = chunks_.find(chunk_id);
-    if (it == chunks_.end()) {
+    auto it = objects_.find(object_id);
+    if (it == objects_.end()) {
         return true;
     }
     total_bytes_ = total_bytes_ > it->second.size_bytes ? (total_bytes_ - it->second.size_bytes) : 0;
-    (void)RemoveChunkFileNoThrow(it->second.data_file);
-    chunks_.erase(it);
-    order_.erase(std::remove(order_.begin(), order_.end(), chunk_id), order_.end());
+    (void)RemoveObjectFileNoThrow(it->second.data_file);
+    objects_.erase(it);
+    object_order_.erase(std::remove(object_order_.begin(), object_order_.end(), object_id), object_order_.end());
     return PersistManifestLocked(error);
 }
 
@@ -315,13 +316,13 @@ bool ArchiveBatchStager::ResetIfDrained(std::string* error) {
     if (!inited_ || !sealed_) {
         return true;
     }
-    for (const auto& item : chunks_) {
+    for (const auto& item : objects_) {
         if (!item.second.done) {
             return true;
         }
     }
-    chunks_.clear();
-    order_.clear();
+    objects_.clear();
+    object_order_.clear();
     total_bytes_ = 0;
     sealed_ = false;
     created_ts_ms_ = NowMilliseconds();
@@ -329,9 +330,9 @@ bool ArchiveBatchStager::ResetIfDrained(std::string* error) {
     return PersistManifestLocked(error);
 }
 
-bool ArchiveBatchStager::ContainsChunk(const std::string& chunk_id) const {
+bool ArchiveBatchStager::ContainsObject(const std::string& object_id) const {
     std::lock_guard<std::mutex> lock(mu_);
-    return chunks_.find(chunk_id) != chunks_.end();
+    return objects_.find(object_id) != objects_.end();
 }
 
 uint64_t ArchiveBatchStager::CurrentBytes() const {
@@ -393,11 +394,11 @@ bool ArchiveBatchStager::LoadManifestLocked(std::string* error) {
             }
             return false;
         }
-        StagedArchiveChunk staged;
+        StagedArchiveObject staged;
         staged.candidate.node_id = parts[2];
         staged.candidate.node_address = parts[3];
         staged.candidate.disk_id = parts[4];
-        staged.candidate.chunk_id = parts[1];
+        staged.candidate.object_id = parts[1];
         try {
             staged.candidate.last_access_ts_ms = static_cast<uint64_t>(std::stoull(parts[5]));
             staged.candidate.size_bytes = static_cast<uint64_t>(std::stoull(parts[6]));
@@ -409,7 +410,7 @@ bool ArchiveBatchStager::LoadManifestLocked(std::string* error) {
             staged.candidate.report_ts_ms = static_cast<uint64_t>(std::stoull(parts[12]));
             staged.lease_id = parts[13];
             staged.op_id = parts[14];
-            staged.chunk_key = parts[15];
+            staged.object_key = parts[15];
             staged.version = static_cast<uint64_t>(std::stoull(parts[16]));
             staged.size_bytes = static_cast<uint64_t>(std::stoull(parts[17]));
             staged.data_file = parts[18];
@@ -421,10 +422,10 @@ bool ArchiveBatchStager::LoadManifestLocked(std::string* error) {
             return false;
         }
         if (staged.data_file.empty()) {
-            staged.data_file = ChunkFilePathLocked(staged.candidate.chunk_id);
+            staged.data_file = ObjectFilePathLocked(staged.candidate.ArchiveObjectId());
         }
-        chunks_[staged.candidate.chunk_id] = staged;
-        order_.push_back(staged.candidate.chunk_id);
+        objects_[staged.candidate.ArchiveObjectId()] = staged;
+        object_order_.push_back(staged.candidate.ArchiveObjectId());
         if (!staged.done) {
             recalculated_total += staged.size_bytes;
         }
@@ -449,17 +450,17 @@ bool ArchiveBatchStager::PersistManifestLocked(std::string* error) const {
     }
     out << "B\t" << batch_id_ << "\t" << created_ts_ms_ << "\t" << (sealed_ ? 1 : 0) << "\t" << total_bytes_ << "\t"
         << options_.disc_size_bytes << "\n";
-    for (const auto& chunk_id : order_) {
-        auto it = chunks_.find(chunk_id);
-        if (it == chunks_.end()) {
+    for (const auto& object_id : object_order_) {
+        auto it = objects_.find(object_id);
+        if (it == objects_.end()) {
             continue;
         }
-        const StagedArchiveChunk& staged = it->second;
+        const StagedArchiveObject& staged = it->second;
         if (staged.done) {
             continue;
         }
         out << "E\t"
-            << staged.candidate.chunk_id << "\t"
+            << staged.candidate.ArchiveObjectId() << "\t"
             << staged.candidate.node_id << "\t"
             << staged.candidate.node_address << "\t"
             << staged.candidate.disk_id << "\t"
@@ -473,7 +474,7 @@ bool ArchiveBatchStager::PersistManifestLocked(std::string* error) const {
             << staged.candidate.report_ts_ms << "\t"
             << staged.lease_id << "\t"
             << staged.op_id << "\t"
-            << staged.chunk_key << "\t"
+            << staged.object_key << "\t"
             << staged.version << "\t"
             << staged.size_bytes << "\t"
             << staged.data_file << "\n";
@@ -510,10 +511,10 @@ bool ArchiveBatchStager::EnsureDirsLocked(std::string* error) const {
         return false;
     }
     ec.clear();
-    fs::create_directories(chunk_dir_, ec);
+    fs::create_directories(object_dir_, ec);
     if (ec) {
         if (error) {
-            *error = "failed to create staging chunk dir";
+            *error = "failed to create staging object dir";
         }
         return false;
     }
@@ -534,11 +535,11 @@ bool ArchiveBatchStager::IsReadyToSealLocked() const {
     return created_ts_ms_ > 0 && now_ms > created_ts_ms_ && now_ms - created_ts_ms_ >= options_.max_batch_age_ms;
 }
 
-std::string ArchiveBatchStager::ChunkFilePathLocked(const std::string& chunk_id) const {
-    return (fs::path(chunk_dir_) / (chunk_id + ".bin")).string();
+std::string ArchiveBatchStager::ObjectFilePathLocked(const std::string& object_id) const {
+    return (fs::path(object_dir_) / (object_id + ".bin")).string();
 }
 
-bool ArchiveBatchStager::RemoveChunkFileNoThrow(const std::string& path) const {
+bool ArchiveBatchStager::RemoveObjectFileNoThrow(const std::string& path) const {
     if (path.empty()) {
         return true;
     }

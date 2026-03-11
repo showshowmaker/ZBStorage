@@ -13,7 +13,7 @@ struct ArchiveCandidateEntry {
     std::string node_id;
     std::string node_address;
     std::string disk_id;
-    std::string chunk_id;
+    std::string object_id;
     uint64_t last_access_ts_ms{0};
     uint64_t size_bytes{0};
     uint64_t checksum{0};
@@ -22,6 +22,14 @@ struct ArchiveCandidateEntry {
     uint64_t version{0};
     double score{0.0};
     uint64_t report_ts_ms{0};
+
+    std::string ArchiveObjectId() const {
+        return object_id;
+    }
+
+    void SetArchiveObjectId(const std::string& id) {
+        object_id = id;
+    }
 };
 
 class ArchiveCandidateQueue {
@@ -70,7 +78,7 @@ public:
         while (!heap_.empty()) {
             HeapEntry top = heap_.top();
             heap_.pop();
-            auto it = latest_.find(top.chunk_id);
+            auto it = latest_.find(top.object_id);
             if (it == latest_.end()) {
                 continue;
             }
@@ -108,7 +116,7 @@ private:
     struct HeapEntry {
         double score{0.0};
         uint64_t report_ts_ms{0};
-        std::string chunk_id;
+        std::string object_id;
         uint64_t version{0};
     };
 
@@ -131,7 +139,7 @@ private:
     };
 
     bool IsActiveVersionLocked(const HeapEntry& entry) const {
-        auto it = latest_.find(entry.chunk_id);
+        auto it = latest_.find(entry.object_id);
         if (it == latest_.end()) {
             return false;
         }
@@ -145,7 +153,7 @@ private:
         if (lhs.report_ts_ms != rhs.report_ts_ms) {
             return lhs.report_ts_ms > rhs.report_ts_ms;
         }
-        return lhs.chunk_id > rhs.chunk_id;
+        return lhs.ArchiveObjectId() > rhs.object_id;
     }
 
     void PruneTopLocked() {
@@ -164,14 +172,15 @@ private:
         if (evicted) {
             *evicted = false;
         }
-        if (candidate.chunk_id.empty() || candidate.disk_id.empty()) {
+        const std::string object_id = candidate.ArchiveObjectId();
+        if (object_id.empty() || candidate.disk_id.empty()) {
             return false;
         }
         if (!candidate.archive_state.empty() && candidate.archive_state != "pending") {
             return false;
         }
-        const bool is_new_chunk = latest_.find(candidate.chunk_id) == latest_.end();
-        if (max_size_ > 0 && is_new_chunk && latest_.size() >= max_size_) {
+        const bool is_new_object = latest_.find(object_id) == latest_.end();
+        if (max_size_ > 0 && is_new_object && latest_.size() >= max_size_) {
             PruneMinTopLocked();
             if (min_heap_.empty()) {
                 return false;
@@ -180,18 +189,21 @@ private:
             if (!IsBetterThanLocked(candidate, worst)) {
                 return false;
             }
-            latest_.erase(worst.chunk_id);
+            latest_.erase(worst.object_id);
             if (evicted) {
                 *evicted = true;
             }
         }
 
         const uint64_t version = ++seq_;
-        CandidateRecord& record = latest_[candidate.chunk_id];
+        CandidateRecord& record = latest_[object_id];
         record.candidate = candidate;
+        if (record.candidate.object_id.empty()) {
+            record.candidate.object_id = object_id;
+        }
         record.version = version;
-        heap_.push({candidate.score, candidate.report_ts_ms, candidate.chunk_id, version});
-        min_heap_.push({candidate.score, candidate.report_ts_ms, candidate.chunk_id, version});
+        heap_.push({candidate.score, candidate.report_ts_ms, object_id, version});
+        min_heap_.push({candidate.score, candidate.report_ts_ms, object_id, version});
         return true;
     }
 

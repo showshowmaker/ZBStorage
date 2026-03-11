@@ -8,6 +8,26 @@
 
 namespace zb::mds {
 
+namespace {
+
+std::string ResolveArchiveObjectId(const zb::rpc::ClaimArchiveTaskRequest& request) {
+    return request.object_id();
+}
+
+std::string ResolveArchiveObjectId(const zb::rpc::RenewArchiveLeaseRequest& request) {
+    return request.object_id();
+}
+
+std::string ResolveArchiveObjectId(const zb::rpc::CommitArchiveTaskRequest& request) {
+    return request.object_id();
+}
+
+std::string ResolveArchiveObjectId(const zb::rpc::ArchiveLeaseRecord& record) {
+    return record.object_id();
+}
+
+} // namespace
+
 ArchiveLeaseManager::ArchiveLeaseManager(RocksMetaStore* store)
     : ArchiveLeaseManager(store, Options()) {}
 
@@ -39,16 +59,17 @@ bool ArchiveLeaseManager::Claim(const zb::rpc::ClaimArchiveTaskRequest& request,
         }
         return false;
     }
-    if (request.chunk_id().empty()) {
+    const std::string object_id = ResolveArchiveObjectId(request);
+    if (object_id.empty()) {
         if (error) {
-            *error = "chunk_id is empty";
+            *error = "archive object_id is empty";
         }
         return false;
     }
 
     std::lock_guard<std::mutex> lock(mu_);
     zb::rpc::ArchiveLeaseRecord record;
-    if (!LoadOrInitRecordLocked(request.chunk_id(), &record, error)) {
+    if (!LoadOrInitRecordLocked(object_id, &record, error)) {
         return false;
     }
 
@@ -100,16 +121,17 @@ bool ArchiveLeaseManager::Renew(const zb::rpc::RenewArchiveLeaseRequest& request
         }
         return false;
     }
-    if (request.chunk_id().empty() || request.lease_id().empty()) {
+    const std::string object_id = ResolveArchiveObjectId(request);
+    if (object_id.empty() || request.lease_id().empty()) {
         if (error) {
-            *error = "chunk_id or lease_id is empty";
+            *error = "archive object_id or lease_id is empty";
         }
         return false;
     }
 
     std::lock_guard<std::mutex> lock(mu_);
     zb::rpc::ArchiveLeaseRecord record;
-    if (!LoadOrInitRecordLocked(request.chunk_id(), &record, error)) {
+    if (!LoadOrInitRecordLocked(object_id, &record, error)) {
         return false;
     }
 
@@ -151,16 +173,17 @@ bool ArchiveLeaseManager::Commit(const zb::rpc::CommitArchiveTaskRequest& reques
         }
         return false;
     }
-    if (request.chunk_id().empty()) {
+    const std::string object_id = ResolveArchiveObjectId(request);
+    if (object_id.empty()) {
         if (error) {
-            *error = "chunk_id is empty";
+            *error = "archive object_id is empty";
         }
         return false;
     }
 
     std::lock_guard<std::mutex> lock(mu_);
     zb::rpc::ArchiveLeaseRecord record;
-    if (!LoadOrInitRecordLocked(request.chunk_id(), &record, error)) {
+    if (!LoadOrInitRecordLocked(object_id, &record, error)) {
         return false;
     }
 
@@ -207,7 +230,7 @@ bool ArchiveLeaseManager::Commit(const zb::rpc::CommitArchiveTaskRequest& reques
     return true;
 }
 
-bool ArchiveLeaseManager::LoadOrInitRecordLocked(const std::string& chunk_id,
+bool ArchiveLeaseManager::LoadOrInitRecordLocked(const std::string& object_id,
                                                  zb::rpc::ArchiveLeaseRecord* record,
                                                  std::string* error) const {
     if (!record) {
@@ -218,10 +241,10 @@ bool ArchiveLeaseManager::LoadOrInitRecordLocked(const std::string& chunk_id,
     }
     std::string data;
     std::string get_error;
-    if (store_->Get(ArchiveStateKey(chunk_id), &data, &get_error)) {
+    if (store_->Get(ObjectArchiveStateKey(object_id), &data, &get_error)) {
         if (!record->ParseFromString(data)) {
             if (error) {
-                *error = "invalid archive lease record for chunk " + chunk_id;
+            *error = "invalid archive lease record for archive object " + object_id;
             }
             return false;
         }
@@ -235,7 +258,7 @@ bool ArchiveLeaseManager::LoadOrInitRecordLocked(const std::string& chunk_id,
     }
 
     record->Clear();
-    record->set_chunk_id(chunk_id);
+    record->set_object_id(object_id);
     record->set_state(zb::rpc::ARCHIVE_STATE_PENDING);
     record->set_version(1);
     record->set_update_ts_ms(NowMilliseconds());
@@ -250,7 +273,8 @@ bool ArchiveLeaseManager::PersistRecordLocked(const zb::rpc::ArchiveLeaseRecord&
         }
         return false;
     }
-    return store_->Put(ArchiveStateKey(record.chunk_id()), value, error);
+    const std::string object_id = ResolveArchiveObjectId(record);
+    return store_->Put(ObjectArchiveStateKey(object_id), value, error);
 }
 
 uint64_t ArchiveLeaseManager::NormalizeLeaseMs(uint64_t requested_lease_ms) const {

@@ -33,8 +33,19 @@ bool IsDiskReplica(const zb::rpc::ReplicaLocation& replica) {
     return replica.storage_tier() == zb::rpc::STORAGE_TIER_DISK;
 }
 
-bool IsLegacyLayoutObjectId(const std::string& layout_obj_id) {
-    return layout_obj_id.rfind("legacy:", 0) == 0;
+std::string ReplicaObjectId(const zb::rpc::ReplicaLocation& replica) {
+    return replica.object_id();
+}
+
+std::string ArchiveObjectId(const zb::rpc::ArchiveCandidate& candidate) {
+    return candidate.object_id();
+}
+
+void EnsureReplicaObjectId(zb::rpc::ReplicaLocation* replica, const std::string& object_id) {
+    if (!replica || object_id.empty()) {
+        return;
+    }
+    replica->set_object_id(object_id);
 }
 
 void FillLayoutRootMessage(const LayoutRootRecord& root, zb::rpc::LayoutRoot* out) {
@@ -49,16 +60,23 @@ void FillLayoutRootMessage(const LayoutRootRecord& root, zb::rpc::LayoutRoot* ou
     out->set_update_ts(root.update_ts);
 }
 
+uint32_t ResolveExtentObjectIndex(const LayoutExtentRecord& extent, uint64_t object_unit_size) {
+    if (extent.object_index > 0 || extent.logical_offset == 0 || object_unit_size == 0) {
+        return extent.object_index;
+    }
+    return static_cast<uint32_t>(extent.logical_offset / object_unit_size);
+}
+
 } // namespace
 
 MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
-                               ChunkAllocator* allocator,
-                               uint64_t default_chunk_size,
+                               ObjectAllocator* allocator,
+                               uint64_t default_object_unit_size,
                                ArchiveCandidateQueue* candidate_queue,
                                ArchiveLeaseManager* lease_manager)
     : store_(store),
       allocator_(allocator),
-      default_chunk_size_(default_chunk_size),
+      default_object_unit_size_(default_object_unit_size),
       candidate_queue_(candidate_queue),
       lease_manager_(lease_manager) {
     std::string error;
@@ -71,6 +89,10 @@ void MdsServiceImpl::SetLayoutObjectOptions(LayoutObjectOptions options) {
     }
     std::lock_guard<std::mutex> lock(layout_object_mu_);
     layout_object_options_ = options;
+}
+
+void MdsServiceImpl::SetSimplifiedAnchorMetadataMode(bool enabled) {
+    simplified_anchor_metadata_mode_ = enabled;
 }
 
 void MdsServiceImpl::Lookup(google::protobuf::RpcController* cntl_base,
@@ -283,13 +305,44 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     attr.set_mtime(now);
     attr.set_ctime(now);
     attr.set_nlink(1);
-    attr.set_chunk_size(request->chunk_size() ? request->chunk_size() : default_chunk_size_);
+    attr.set_object_unit_size(request->object_unit_size() ? request->object_unit_size() : default_object_unit_size_);
     attr.set_replica(request->replica() ? request->replica() : 1);
     attr.set_version(1);
 
     rocksdb::WriteBatch batch;
     batch.Put(DentryKey(parent_inode, name), MetaCodec::EncodeUInt64(inode_id));
     batch.Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(attr));
+    if (simplified_anchor_metadata_mode_) {
+        zb::rpc::ReplicaLocation anchor;
+        if (!SelectFileAnchor(inode_id, attr, &anchor, &error)) {
+            FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+            return;
+        }
+        if (!SaveFileAnchor(inode_id, anchor, &batch)) {
+            FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to encode file anchor");
+            return;
+        }
+    } else {
+        LayoutRootRecord root;
+        root.inode_id = inode_id;
+        root.layout_version = 1;
+        root.layout_root_id = "lr-" + std::to_string(inode_id) + "-1";
+        root.file_size = 0;
+        root.epoch = 0;
+        root.update_ts = NowMilliseconds();
+
+        LayoutNodeRecord node;
+        node.node_id = root.layout_root_id;
+        node.level = 0;
+        node.extents.clear();
+        node.child_layout_ids.clear();
+
+        batch.Put(LayoutRootKey(inode_id), MetaCodec::EncodeLayoutRoot(root));
+        if (!StoreLayoutNodeWithReplicas(root.layout_root_id, node, &batch, &error)) {
+            FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+            return;
+        }
+    }
     if (!store_->WriteBatch(&batch, &error)) {
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
@@ -363,7 +416,7 @@ void MdsServiceImpl::Mkdir(google::protobuf::RpcController* cntl_base,
     attr.set_mtime(now);
     attr.set_ctime(now);
     attr.set_nlink(2);
-    attr.set_chunk_size(default_chunk_size_);
+    attr.set_object_unit_size(default_object_unit_size_);
     attr.set_replica(1);
     attr.set_version(1);
 
@@ -662,16 +715,48 @@ void MdsServiceImpl::AllocateWrite(google::protobuf::RpcController* cntl_base,
         return;
     }
 
+    if (simplified_anchor_metadata_mode_) {
+        attr.set_atime(NowSeconds());
+        std::string put_error;
+        PutInode(attr.inode_id(), attr, &put_error);
+        error.clear();
+        if (!BuildReadPlanFromAnchor(request->inode_id(),
+                                     request->offset(),
+                                     request->size(),
+                                     response->mutable_layout(),
+                                     &error)) {
+            FillStatus(response->mutable_status(),
+                       error == "inode not found" ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
+                       error.empty() ? "failed to build anchor write plan" : error);
+            return;
+        }
+        FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+        return;
+    }
+
     LayoutRootRecord current_root;
-    bool from_legacy = false;
-    if (!LoadLayoutRoot(request->inode_id(), &current_root, &from_legacy, &error)) {
+    if (!LoadLayoutRoot(request->inode_id(), &current_root, &error)) {
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
     }
 
-    const uint64_t chunk_size = attr.chunk_size() ? attr.chunk_size() : default_chunk_size_;
-    if (chunk_size == 0) {
-        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "chunk size is zero");
+    const uint64_t object_unit_size = attr.object_unit_size() ? attr.object_unit_size() : default_object_unit_size_;
+    if (object_unit_size == 0) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "object unit size is zero");
+        return;
+    }
+
+    LayoutNodeRecord base_node;
+    bool recovered = false;
+    if (!LoadHealthyLayoutNode(attr.inode_id(),
+                               current_root.layout_root_id,
+                               current_root.layout_version,
+                               &base_node,
+                               &recovered,
+                               &error)) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "failed to load current layout object" : error);
         return;
     }
 
@@ -679,9 +764,25 @@ void MdsServiceImpl::AllocateWrite(google::protobuf::RpcController* cntl_base,
     error.clear();
     PutInode(attr.inode_id(), attr, &error);
 
-    const uint64_t start = request->offset() / chunk_size;
-    const uint64_t end = (request->offset() + request->size() - 1) / chunk_size;
+    const uint64_t start = request->offset() / object_unit_size;
+    const uint64_t end = (request->offset() + request->size() - 1) / object_unit_size;
     const uint32_t desired_replica = attr.replica() ? attr.replica() : 1;
+
+    std::unordered_map<uint32_t, LayoutExtentRecord> extent_by_index;
+    extent_by_index.reserve(base_node.extents.size() + static_cast<size_t>(end - start + 1));
+    for (const auto& extent : base_node.extents) {
+        if (extent.object_id.empty() || extent.length == 0) {
+            continue;
+        }
+        LayoutExtentRecord normalized = extent;
+        if (normalized.object_index == 0 && normalized.logical_offset > 0) {
+            normalized.object_index = static_cast<uint32_t>(normalized.logical_offset / object_unit_size);
+        }
+        if (normalized.length == 0) {
+            normalized.length = object_unit_size;
+        }
+        extent_by_index[normalized.object_index] = normalized;
+    }
 
     PendingWriteTransaction pending;
     pending.inode_id = attr.inode_id();
@@ -691,56 +792,82 @@ void MdsServiceImpl::AllocateWrite(google::protobuf::RpcController* cntl_base,
 
     zb::rpc::FileLayout* layout = response->mutable_layout();
     layout->set_inode_id(attr.inode_id());
-    layout->set_chunk_size(chunk_size);
+    layout->set_object_unit_size(object_unit_size);
 
     for (uint64_t index = start; index <= end; ++index) {
-        const uint32_t chunk_index = static_cast<uint32_t>(index);
-        const std::string chunk_key = ChunkKey(attr.inode_id(), chunk_index);
+        const uint32_t object_index = static_cast<uint32_t>(index);
+        const uint64_t object_start = static_cast<uint64_t>(object_index) * object_unit_size;
+        const uint64_t object_end = object_start + object_unit_size;
+        const uint64_t write_start = std::max<uint64_t>(object_start, request->offset());
+        const uint64_t write_end = std::min<uint64_t>(object_end, request->offset() + request->size());
+        const bool full_object_overwrite = (write_start <= object_start && write_end >= object_end);
 
-        std::string chunk_data;
-        std::string local_error;
-        zb::rpc::ChunkMeta old_meta;
-        const bool chunk_exists = store_->Get(chunk_key, &chunk_data, &local_error);
-        if (chunk_exists) {
-            if (!MetaCodec::DecodeChunkMeta(chunk_data, &old_meta)) {
-                FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "invalid chunk meta");
-                return;
-            }
-        } else if (!local_error.empty()) {
-            FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, local_error);
-            return;
-        }
-
+        const std::string object_id = GenerateObjectId();
         std::vector<zb::rpc::ReplicaLocation> new_replicas;
-        if (!allocator_->AllocateChunk(desired_replica, GenerateChunkId(), &new_replicas) ||
+        std::string local_error;
+        if (!ResolveObjectReplicas(desired_replica,
+                                   object_id,
+                                   current_root.epoch,
+                                   &new_replicas,
+                                   &local_error) ||
             new_replicas.size() < desired_replica) {
-            FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to allocate replicas");
+            FillStatus(response->mutable_status(),
+                       zb::rpc::MDS_INTERNAL_ERROR,
+                       local_error.empty() ? "failed to resolve object replicas from PG" : local_error);
             return;
         }
 
-        const uint64_t chunk_start = static_cast<uint64_t>(chunk_index) * chunk_size;
-        const uint64_t chunk_end = chunk_start + chunk_size;
-        const uint64_t write_start = std::max<uint64_t>(chunk_start, request->offset());
-        const uint64_t write_end = std::min<uint64_t>(chunk_end, request->offset() + request->size());
-        const bool full_chunk_overwrite = (write_start <= chunk_start && write_end >= chunk_end);
-        if (chunk_exists && !full_chunk_overwrite) {
-            if (!SeedChunkForCowWrite(old_meta, new_replicas, chunk_size, &local_error)) {
+        auto old_it = extent_by_index.find(object_index);
+        if (old_it != extent_by_index.end() && !full_object_overwrite) {
+            if (!SeedObjectForCowWrite(old_it->second, new_replicas, object_unit_size, &local_error)) {
                 FillStatus(response->mutable_status(),
                            zb::rpc::MDS_INTERNAL_ERROR,
-                           local_error.empty() ? "failed to seed old chunk data for cow write" : local_error);
+                           local_error.empty() ? "failed to seed old object for COW write" : local_error);
                 return;
             }
         }
 
-        zb::rpc::ChunkMeta staged_meta;
-        staged_meta.set_index(chunk_index);
+        zb::rpc::ObjectMeta staged_meta;
+        staged_meta.set_index(object_index);
         for (const auto& replica : new_replicas) {
             *staged_meta.add_replicas() = replica;
         }
+        *layout->add_objects() = staged_meta;
 
-        pending.chunk_updates[chunk_index] = staged_meta;
-        *layout->add_chunks() = staged_meta;
+        LayoutExtentRecord updated_extent;
+        updated_extent.logical_offset = object_start;
+        updated_extent.length = object_unit_size;
+        updated_extent.object_id = object_id;
+        updated_extent.object_offset = 0;
+        updated_extent.object_length = object_unit_size;
+        updated_extent.object_version = pending.pending_layout_version;
+        updated_extent.object_index = object_index;
+        updated_extent.pg_id = 0;
+        updated_extent.placement_epoch = !new_replicas.empty() ? new_replicas.front().epoch() : current_root.epoch;
+        updated_extent.storage_tier = static_cast<uint32_t>(zb::rpc::STORAGE_TIER_DISK);
+        extent_by_index[object_index] = std::move(updated_extent);
     }
+
+    pending.pending_layout_node.node_id =
+        "lr-" + std::to_string(attr.inode_id()) + "-" + std::to_string(pending.pending_layout_version);
+    pending.pending_layout_node.level = 0;
+    pending.pending_layout_node.extents.clear();
+    pending.pending_layout_node.extents.reserve(extent_by_index.size());
+    for (auto& [object_index, extent] : extent_by_index) {
+        extent.object_index = object_index;
+        if (extent.length == 0) {
+            extent.length = object_unit_size;
+        }
+        if (extent.object_length == 0) {
+            extent.object_length = extent.length;
+        }
+        pending.pending_layout_node.extents.push_back(std::move(extent));
+    }
+    std::sort(pending.pending_layout_node.extents.begin(),
+              pending.pending_layout_node.extents.end(),
+              [](const LayoutExtentRecord& lhs, const LayoutExtentRecord& rhs) {
+                  return lhs.logical_offset < rhs.logical_offset;
+              });
 
     {
         std::lock_guard<std::mutex> lock(pending_write_mu_);
@@ -785,16 +912,22 @@ void MdsServiceImpl::GetLayout(google::protobuf::RpcController* cntl_base,
     if (optical_only) {
         response->mutable_layout()->Clear();
         response->mutable_layout()->set_inode_id(request->inode_id());
+        response->set_plan_source(zb::rpc::READ_PLAN_SOURCE_OPTICAL);
         FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
         return;
     }
 
-    if (!BuildReadPlan(request->inode_id(), request->offset(), request->size(), response->mutable_layout(), &error)) {
+    if (!BuildReadPlanWithPolicy(request->inode_id(),
+                                 request->offset(),
+                                 request->size(),
+                                 response->mutable_layout(),
+                                 &error)) {
         FillStatus(response->mutable_status(),
                    error == "inode not found" ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
                    error.empty() ? "failed to build read plan" : error);
         return;
     }
+    response->set_plan_source(zb::rpc::READ_PLAN_SOURCE_LAYOUT);
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
@@ -816,43 +949,9 @@ void MdsServiceImpl::CommitWrite(google::protobuf::RpcController* cntl_base,
         FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, "inode_id is empty");
         return;
     }
-
-    std::string error;
-    LayoutRootRecord committed;
-    if (ConsumePendingWriteForCommit(request->inode_id(), 0, request->new_size(), &committed, &error)) {
-        FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
-        return;
-    }
-    if (!error.empty() && error != "pending write txn not found") {
-        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
-        return;
-    }
-
-    LayoutRootRecord root;
-    bool from_legacy = false;
-    error.clear();
-    if (!LoadLayoutRoot(request->inode_id(), &root, &from_legacy, &error)) {
-        FillStatus(response->mutable_status(),
-                   error == "inode not found" ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
-                   error.empty() ? "inode not found" : error);
-        return;
-    }
-
-    root.file_size = request->new_size();
-    root.layout_version = root.layout_version + 1;
-    root.update_ts = NowMilliseconds();
-    root.epoch = 0;
-    if (!StoreLayoutRootAtomic(request->inode_id(),
-                               root,
-                               root.layout_version - 1,
-                               true,
-                               request->new_size(),
-                               &committed,
-                               &error)) {
-        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
-        return;
-    }
-    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+    FillStatus(response->mutable_status(),
+               zb::rpc::MDS_INVALID_ARGUMENT,
+               "CommitWrite is deprecated in pure layout mode; use CommitLayoutRoot");
 }
 
 void MdsServiceImpl::GetLayoutRoot(google::protobuf::RpcController* cntl_base,
@@ -874,9 +973,8 @@ void MdsServiceImpl::GetLayoutRoot(google::protobuf::RpcController* cntl_base,
     }
 
     LayoutRootRecord root;
-    bool from_legacy = false;
     std::string error;
-    if (!LoadLayoutRoot(request->inode_id(), &root, &from_legacy, &error)) {
+    if (!LoadLayoutRoot(request->inode_id(), &root, &error)) {
         FillStatus(response->mutable_status(),
                    error == "inode not found" ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
                    error.empty() ? "failed to load layout root" : error);
@@ -890,8 +988,7 @@ void MdsServiceImpl::GetLayoutRoot(google::protobuf::RpcController* cntl_base,
         return;
     }
     FillLayoutRootMessage(root, response->mutable_root());
-    response->mutable_root()->set_chunk_size(attr.chunk_size() > 0 ? attr.chunk_size() : default_chunk_size_);
-    response->set_from_legacy(from_legacy);
+    response->mutable_root()->set_object_unit_size(attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_);
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
@@ -914,9 +1011,8 @@ void MdsServiceImpl::ResolveLayout(google::protobuf::RpcController* cntl_base,
     }
 
     LayoutRootRecord root;
-    bool from_legacy = false;
     std::string error;
-    if (!LoadLayoutRoot(request->inode_id(), &root, &from_legacy, &error)) {
+    if (!LoadLayoutRoot(request->inode_id(), &root, &error)) {
         FillStatus(response->mutable_status(),
                    error == "inode not found" ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
                    error.empty() ? "failed to load layout root" : error);
@@ -938,17 +1034,22 @@ void MdsServiceImpl::ResolveLayout(google::protobuf::RpcController* cntl_base,
     }
     if (optical_only) {
         FillLayoutRootMessage(root, response->mutable_root());
-        response->set_from_legacy(from_legacy);
+        response->set_plan_source(zb::rpc::READ_PLAN_SOURCE_OPTICAL);
         FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
         return;
     }
 
-    if (!BuildReadPlan(request->inode_id(), request->offset(), request->size(), read_plan, &error)) {
+    if (!BuildReadPlanWithPolicy(request->inode_id(),
+                                 request->offset(),
+                                 request->size(),
+                                 read_plan,
+                                 &error)) {
         FillStatus(response->mutable_status(),
                    error == "inode not found" ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
                    error.empty() ? "failed to resolve layout" : error);
         return;
     }
+    response->set_plan_source(zb::rpc::READ_PLAN_SOURCE_LAYOUT);
 
     std::vector<LayoutExtentRecord> extents;
     if (!ResolveExtents(*read_plan, request->offset(), request->size(), root.layout_version, &extents, &error)) {
@@ -966,13 +1067,14 @@ void MdsServiceImpl::ResolveLayout(google::protobuf::RpcController* cntl_base,
         out->set_object_offset(extent.object_offset);
         out->set_object_length(extent.object_length);
         out->set_object_version(extent.object_version);
-        const uint64_t chunk_size = read_plan->chunk_size() > 0 ? read_plan->chunk_size() : default_chunk_size_;
-        out->set_chunk_index(chunk_size > 0 ? static_cast<uint32_t>(extent.logical_offset / chunk_size) : 0);
+        out->set_object_index(extent.object_index);
+        out->set_pg_id(extent.pg_id);
+        out->set_placement_epoch(extent.placement_epoch);
+        out->set_storage_tier(static_cast<zb::rpc::StorageTier>(extent.storage_tier));
     }
 
     FillLayoutRootMessage(root, response->mutable_root());
-    response->mutable_root()->set_chunk_size(read_plan->chunk_size());
-    response->set_from_legacy(from_legacy);
+    response->mutable_root()->set_object_unit_size(read_plan->object_unit_size());
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
@@ -994,6 +1096,88 @@ void MdsServiceImpl::CommitLayoutRoot(google::protobuf::RpcController* cntl_base
         return;
     }
 
+    if (simplified_anchor_metadata_mode_) {
+        const std::string op_id = request->op_id();
+        std::string error;
+        if (!op_id.empty()) {
+            LayoutRootRecord already_committed;
+            error.clear();
+            if (LoadCommittedLayoutRootByOpId(request->inode_id(), op_id, &already_committed, &error)) {
+                FillLayoutRootMessage(already_committed, response->mutable_root());
+                zb::rpc::InodeAttr attr;
+                error.clear();
+                if (GetInode(request->inode_id(), &attr, &error)) {
+                    response->mutable_root()->set_object_unit_size(
+                        attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_);
+                }
+                FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+                return;
+            }
+            if (!error.empty() && error != "commit op result not found") {
+                FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+                return;
+            }
+        }
+
+        zb::rpc::InodeAttr attr;
+        error.clear();
+        if (!GetInode(request->inode_id(), &attr, &error)) {
+            FillStatus(response->mutable_status(), zb::rpc::MDS_NOT_FOUND, "inode not found");
+            return;
+        }
+
+        const uint64_t current_version = std::max<uint64_t>(attr.version(), 1);
+        if (request->expected_layout_version() > 0 &&
+            request->expected_layout_version() != current_version) {
+            layout_commit_conflict_total_.fetch_add(1, std::memory_order_relaxed);
+            FillStatus(response->mutable_status(), zb::rpc::MDS_STALE_EPOCH, "layout version mismatch");
+            return;
+        }
+
+        const uint64_t now_sec = NowSeconds();
+        attr.set_mtime(now_sec);
+        attr.set_ctime(now_sec);
+        if (request->update_inode_size()) {
+            attr.set_size(request->new_size());
+        } else if (request->root().file_size() > 0 || attr.size() == 0) {
+            attr.set_size(request->root().file_size());
+        }
+        attr.set_version(current_version + 1);
+
+        LayoutRootRecord committed;
+        committed.inode_id = request->inode_id();
+        committed.layout_root_id = "fa-" + std::to_string(request->inode_id());
+        committed.layout_version = attr.version();
+        committed.file_size = attr.size();
+        committed.epoch = 0;
+        committed.update_ts = NowMilliseconds();
+        zb::rpc::ReplicaLocation anchor;
+        std::string anchor_error;
+        if (LoadFileAnchor(request->inode_id(), &anchor, &anchor_error)) {
+            committed.epoch = anchor.epoch();
+        }
+
+        rocksdb::WriteBatch batch;
+        batch.Put(InodeKey(request->inode_id()), MetaCodec::EncodeInodeAttr(attr));
+        if (!op_id.empty()) {
+            batch.Put(LayoutCommitOpKey(request->inode_id(), op_id), MetaCodec::EncodeLayoutRoot(committed));
+        }
+        error.clear();
+        if (!store_->WriteBatch(&batch, &error)) {
+            FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(pending_write_mu_);
+            pending_writes_.erase(request->inode_id());
+        }
+        FillLayoutRootMessage(committed, response->mutable_root());
+        response->mutable_root()->set_object_unit_size(
+            attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_);
+        FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+        return;
+    }
+
     LayoutRootRecord root;
     root.inode_id = request->inode_id();
     root.layout_root_id = request->root().layout_root_id();
@@ -1001,10 +1185,32 @@ void MdsServiceImpl::CommitLayoutRoot(google::protobuf::RpcController* cntl_base
     root.file_size = request->root().file_size();
     root.epoch = request->root().epoch();
     root.update_ts = request->root().update_ts();
+    const std::string op_id = request->op_id();
+    std::string error;
+
+    if (!op_id.empty()) {
+        LayoutRootRecord already_committed;
+        error.clear();
+        if (LoadCommittedLayoutRootByOpId(request->inode_id(), op_id, &already_committed, &error)) {
+            layout_commit_retry_total_.fetch_add(1, std::memory_order_relaxed);
+            FillLayoutRootMessage(already_committed, response->mutable_root());
+            zb::rpc::InodeAttr attr;
+            error.clear();
+            if (GetInode(request->inode_id(), &attr, &error)) {
+                response->mutable_root()->set_object_unit_size(attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_);
+            }
+            FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+            return;
+        }
+        if (!error.empty() && error != "commit op result not found") {
+            FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+            return;
+        }
+    }
 
     LayoutRootRecord committed;
-    std::string error;
     if (ConsumePendingWriteForCommit(request->inode_id(),
+                                     op_id,
                                      request->expected_layout_version(),
                                      request->update_inode_size() ? request->new_size() : root.file_size,
                                      &committed,
@@ -1013,13 +1219,14 @@ void MdsServiceImpl::CommitLayoutRoot(google::protobuf::RpcController* cntl_base
         zb::rpc::InodeAttr attr;
         error.clear();
         if (GetInode(request->inode_id(), &attr, &error)) {
-            response->mutable_root()->set_chunk_size(attr.chunk_size() > 0 ? attr.chunk_size() : default_chunk_size_);
+            response->mutable_root()->set_object_unit_size(attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_);
         }
         FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
         return;
     }
     if (!error.empty() && error != "pending write txn not found") {
         if (error == "layout version mismatch") {
+            layout_commit_conflict_total_.fetch_add(1, std::memory_order_relaxed);
             FillStatus(response->mutable_status(), zb::rpc::MDS_STALE_EPOCH, error);
             return;
         }
@@ -1032,9 +1239,12 @@ void MdsServiceImpl::CommitLayoutRoot(google::protobuf::RpcController* cntl_base
                                request->expected_layout_version(),
                                request->update_inode_size(),
                                request->new_size(),
+                               op_id.empty() ? nullptr : &op_id,
+                               nullptr,
                                &committed,
                                &error)) {
         if (error == "layout version mismatch") {
+            layout_commit_conflict_total_.fetch_add(1, std::memory_order_relaxed);
             FillStatus(response->mutable_status(), zb::rpc::MDS_STALE_EPOCH, error);
             return;
         }
@@ -1047,7 +1257,7 @@ void MdsServiceImpl::CommitLayoutRoot(google::protobuf::RpcController* cntl_base
     zb::rpc::InodeAttr attr;
     error.clear();
     if (GetInode(request->inode_id(), &attr, &error)) {
-        response->mutable_root()->set_chunk_size(attr.chunk_size() > 0 ? attr.chunk_size() : default_chunk_size_);
+        response->mutable_root()->set_object_unit_size(attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_);
     }
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
@@ -1097,7 +1307,8 @@ void MdsServiceImpl::ReportArchiveCandidates(google::protobuf::RpcController* cn
         candidate.node_id = !item.node_id().empty() ? item.node_id() : request->node_id();
         candidate.node_address = !item.node_address().empty() ? item.node_address() : request->node_address();
         candidate.disk_id = item.disk_id();
-        candidate.chunk_id = item.chunk_id();
+        const std::string object_id = ArchiveObjectId(item);
+        candidate.SetArchiveObjectId(object_id);
         candidate.last_access_ts_ms = item.last_access_ts_ms();
         candidate.size_bytes = item.size_bytes();
         candidate.checksum = item.checksum();
@@ -1107,7 +1318,7 @@ void MdsServiceImpl::ReportArchiveCandidates(google::protobuf::RpcController* cn
         candidate.score = item.score();
         candidate.report_ts_ms = item.report_ts_ms() > 0 ? item.report_ts_ms() : fallback_report_ts;
 
-        if (candidate.disk_id.empty() || candidate.chunk_id.empty()) {
+        if (candidate.disk_id.empty() || candidate.ArchiveObjectId().empty()) {
             ++dropped;
             continue;
         }
@@ -1227,7 +1438,7 @@ bool MdsServiceImpl::EnsureRoot(std::string* error) {
     root.set_mtime(now);
     root.set_ctime(now);
     root.set_nlink(2);
-    root.set_chunk_size(default_chunk_size_);
+    root.set_object_unit_size(default_object_unit_size_);
     root.set_replica(1);
     root.set_version(1);
 
@@ -1339,49 +1550,54 @@ bool MdsServiceImpl::DentryExists(uint64_t parent_inode, const std::string& name
 }
 
 bool MdsServiceImpl::DeleteInodeData(uint64_t inode_id, std::string* error) {
-    std::string prefix = ChunkPrefix(inode_id);
+    std::string prefix = ObjectPrefix(inode_id);
     std::unique_ptr<rocksdb::Iterator> it(store_->db()->NewIterator(rocksdb::ReadOptions()));
     rocksdb::WriteBatch batch;
-    std::unordered_set<std::string> chunk_ids;
+    batch.Delete(FileAnchorKey(inode_id));
+    std::unordered_set<std::string> object_ids;
     std::unordered_set<std::string> image_index_keys;
     for (it->Seek(prefix); it->Valid(); it->Next()) {
         if (!it->key().starts_with(prefix)) {
             break;
         }
-        zb::rpc::ChunkMeta meta;
-        if (MetaCodec::DecodeChunkMeta(it->value().ToString(), &meta)) {
+        zb::rpc::ObjectMeta meta;
+        if (MetaCodec::DecodeObjectMeta(it->value().ToString(), &meta)) {
             for (const auto& replica : meta.replicas()) {
-                if (!replica.chunk_id().empty()) {
-                    chunk_ids.insert(replica.chunk_id());
+                const std::string object_id = ReplicaObjectId(replica);
+                if (!object_id.empty()) {
+                    object_ids.insert(object_id);
                 }
                 if (replica.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL &&
                     !replica.node_id().empty() &&
                     !replica.disk_id().empty() &&
                     !replica.image_id().empty() &&
-                    !replica.chunk_id().empty()) {
-                    image_index_keys.insert(ArchiveImageChunkKey(replica.node_id(),
-                                                                 replica.disk_id(),
-                                                                 replica.image_id(),
-                                                                 replica.chunk_id()));
+                    !object_id.empty()) {
+                    image_index_keys.insert(ArchiveImageObjectKey(replica.node_id(),
+                                                                  replica.disk_id(),
+                                                                  replica.image_id(),
+                                                                  object_id));
                 }
             }
         }
         batch.Delete(it->key());
     }
-    for (const auto& chunk_id : chunk_ids) {
-        batch.Delete(ReverseChunkKey(chunk_id));
-        batch.Delete(ArchiveStateKey(chunk_id));
-        batch.Delete(ArchiveReverseRepairKey(chunk_id));
-    }
-    for (const auto& image_key : image_index_keys) {
-        batch.Delete(image_key);
-    }
     std::string root_data;
     std::string local_error;
     if (store_->Get(LayoutRootKey(inode_id), &root_data, &local_error)) {
         LayoutRootRecord root;
-        if (MetaCodec::DecodeLayoutRoot(root_data, &root) && !root.layout_root_id.empty() &&
-            !IsLegacyLayoutObjectId(root.layout_root_id)) {
+        if (MetaCodec::DecodeLayoutRoot(root_data, &root) && !root.layout_root_id.empty()) {
+            std::string layout_data;
+            std::string layout_error;
+            if (store_->Get(LayoutObjectKey(root.layout_root_id), &layout_data, &layout_error)) {
+                LayoutNodeRecord node;
+                if (MetaCodec::DecodeLayoutNode(layout_data, &node)) {
+                    for (const auto& extent : node.extents) {
+                        if (!extent.object_id.empty()) {
+                            object_ids.insert(extent.object_id);
+                        }
+                    }
+                }
+            }
             batch.Delete(LayoutObjectKey(root.layout_root_id));
             const std::string replica_prefix = LayoutObjectReplicaPrefix(root.layout_root_id);
             std::unique_ptr<rocksdb::Iterator> replica_it(store_->db()->NewIterator(rocksdb::ReadOptions()));
@@ -1396,6 +1612,25 @@ bool MdsServiceImpl::DeleteInodeData(uint64_t inode_id, std::string* error) {
         }
         batch.Delete(LayoutRootKey(inode_id));
     }
+    const std::string commit_prefix = LayoutCommitOpPrefix(inode_id);
+    std::unique_ptr<rocksdb::Iterator> commit_it(store_->db()->NewIterator(rocksdb::ReadOptions()));
+    for (commit_it->Seek(commit_prefix); commit_it->Valid(); commit_it->Next()) {
+        const std::string key = commit_it->key().ToString();
+        if (key.rfind(commit_prefix, 0) != 0) {
+            break;
+        }
+        batch.Delete(key);
+    }
+    for (const auto& object_id : object_ids) {
+        batch.Delete(ReverseObjectKey(object_id));
+        batch.Delete(ObjectArchiveStateKey(object_id));
+        batch.Delete(ArchiveReverseObjectRepairKey(object_id));
+        batch.Delete(ArchiveObjectOpticalLocationKey(object_id));
+        batch.Delete(ObjectOwnerKey(object_id));
+    }
+    for (const auto& image_key : image_index_keys) {
+        batch.Delete(image_key);
+    }
     bool ok = true;
     if (batch.Count() > 0) {
         ok = store_->WriteBatch(&batch, error);
@@ -1409,7 +1644,6 @@ bool MdsServiceImpl::DeleteInodeData(uint64_t inode_id, std::string* error) {
 
 bool MdsServiceImpl::LoadLayoutRoot(uint64_t inode_id,
                                     LayoutRootRecord* root,
-                                    bool* from_legacy,
                                     std::string* error) {
     if (!root) {
         if (error) {
@@ -1425,6 +1659,21 @@ bool MdsServiceImpl::LoadLayoutRoot(uint64_t inode_id,
             *error = local_error.empty() ? "inode not found" : local_error;
         }
         return false;
+    }
+
+    if (simplified_anchor_metadata_mode_) {
+        root->inode_id = inode_id;
+        root->layout_root_id = "fa-" + std::to_string(inode_id);
+        root->layout_version = std::max<uint64_t>(1, inode_attr.version());
+        root->file_size = inode_attr.size();
+        root->epoch = 0;
+        root->update_ts = inode_attr.mtime() > 0 ? inode_attr.mtime() * 1000 : NowMilliseconds();
+        zb::rpc::ReplicaLocation anchor;
+        local_error.clear();
+        if (LoadFileAnchor(inode_id, &anchor, &local_error)) {
+            root->epoch = anchor.epoch();
+        }
+        return true;
     }
 
     std::string data;
@@ -1443,10 +1692,10 @@ bool MdsServiceImpl::LoadLayoutRoot(uint64_t inode_id,
             root->layout_version = std::max<uint64_t>(1, inode_attr.version());
         }
         if (root->layout_root_id.empty()) {
-            root->layout_root_id = "lr-" + std::to_string(inode_id) + "-" + std::to_string(root->layout_version);
-        }
-        if (from_legacy) {
-            *from_legacy = false;
+            if (error) {
+                *error = "layout root id is empty";
+            }
+            return false;
         }
         local_error.clear();
         if (!ValidateLayoutObjectOnLoad(inode_id, *root, &local_error)) {
@@ -1463,17 +1712,10 @@ bool MdsServiceImpl::LoadLayoutRoot(uint64_t inode_id,
         }
         return false;
     }
-
-    root->inode_id = inode_id;
-    root->layout_root_id = "legacy:" + std::to_string(inode_id);
-    root->layout_version = std::max<uint64_t>(1, inode_attr.version());
-    root->file_size = inode_attr.size();
-    root->epoch = 0;
-    root->update_ts = NowMilliseconds();
-    if (from_legacy) {
-        *from_legacy = true;
+    if (error) {
+        *error = "layout root not found";
     }
-    return true;
+    return false;
 }
 
 bool MdsServiceImpl::StoreLayoutRootAtomic(uint64_t inode_id,
@@ -1481,6 +1723,8 @@ bool MdsServiceImpl::StoreLayoutRootAtomic(uint64_t inode_id,
                                            uint64_t expected_layout_version,
                                            bool update_inode_size,
                                            uint64_t new_size,
+                                           const std::string* commit_op_id,
+                                           const LayoutNodeRecord* layout_node_override,
                                            LayoutRootRecord* committed,
                                            std::string* error) {
     if (!committed) {
@@ -1500,8 +1744,7 @@ bool MdsServiceImpl::StoreLayoutRootAtomic(uint64_t inode_id,
     }
 
     LayoutRootRecord existing;
-    bool from_legacy = false;
-    if (!LoadLayoutRoot(inode_id, &existing, &from_legacy, &local_error)) {
+    if (!LoadLayoutRoot(inode_id, &existing, &local_error)) {
         if (error) {
             *error = local_error.empty() ? "failed to load existing layout root" : local_error;
         }
@@ -1530,9 +1773,7 @@ bool MdsServiceImpl::StoreLayoutRootAtomic(uint64_t inode_id,
         next.update_ts = NowMilliseconds();
     }
 
-    if (next.layout_root_id.empty() ||
-        IsLegacyLayoutObjectId(next.layout_root_id) ||
-        next.layout_root_id.rfind("inline:", 0) == 0) {
+    if (next.layout_root_id.empty() || next.layout_root_id.rfind("inline:", 0) == 0) {
         next.layout_root_id = "lr-" + std::to_string(inode_id) + "-" + std::to_string(next.layout_version);
     }
 
@@ -1546,16 +1787,49 @@ bool MdsServiceImpl::StoreLayoutRootAtomic(uint64_t inode_id,
     if (inode_attr.version() < next.layout_version) {
         inode_attr.set_version(next.layout_version);
     }
+    const uint64_t inode_object_unit_size = inode_attr.object_unit_size() > 0 ? inode_attr.object_unit_size() : default_object_unit_size_;
 
     rocksdb::WriteBatch batch;
     batch.Put(LayoutRootKey(inode_id), MetaCodec::EncodeLayoutRoot(next));
     batch.Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(inode_attr));
+    if (commit_op_id && !commit_op_id->empty()) {
+        batch.Put(LayoutCommitOpKey(inode_id, *commit_op_id), MetaCodec::EncodeLayoutRoot(next));
+    }
+
     LayoutNodeRecord layout_node;
-    if (!BuildLayoutNodeFromChunks(inode_id, next.layout_root_id, next.layout_version, &layout_node, &local_error)) {
-        if (error) {
-            *error = local_error.empty() ? "failed to build layout object snapshot" : local_error;
+    if (layout_node_override) {
+        layout_node = *layout_node_override;
+    } else if (!existing.layout_root_id.empty()) {
+        bool recovered = false;
+        if (!LoadHealthyLayoutNode(inode_id,
+                                   existing.layout_root_id,
+                                   existing.layout_version,
+                                   &layout_node,
+                                   &recovered,
+                                   &local_error)) {
+            if (error) {
+                *error = local_error.empty() ? "failed to load previous layout object snapshot" : local_error;
+            }
+            return false;
         }
-        return false;
+    } else {
+        layout_node.node_id = next.layout_root_id;
+        layout_node.level = 0;
+        layout_node.extents.clear();
+        layout_node.child_layout_ids.clear();
+    }
+    layout_node.node_id = next.layout_root_id;
+    std::sort(layout_node.extents.begin(),
+              layout_node.extents.end(),
+              [](const LayoutExtentRecord& lhs, const LayoutExtentRecord& rhs) {
+                  return lhs.logical_offset < rhs.logical_offset;
+              });
+    for (const auto& extent : layout_node.extents) {
+        if (extent.object_id.empty()) {
+            continue;
+        }
+        const uint32_t object_index = ResolveExtentObjectIndex(extent, inode_object_unit_size);
+        batch.Put(ObjectOwnerKey(extent.object_id), EncodeObjectOwnerValue(inode_id, object_index));
     }
     if (!StoreLayoutNodeWithReplicas(next.layout_root_id, layout_node, &batch, &local_error)) {
         if (error) {
@@ -1574,7 +1848,34 @@ bool MdsServiceImpl::StoreLayoutRootAtomic(uint64_t inode_id,
     return true;
 }
 
-bool MdsServiceImpl::BuildLayoutNodeFromChunks(uint64_t inode_id,
+bool MdsServiceImpl::LoadCommittedLayoutRootByOpId(uint64_t inode_id,
+                                                   const std::string& op_id,
+                                                   LayoutRootRecord* committed,
+                                                   std::string* error) {
+    if (inode_id == 0 || op_id.empty() || !committed) {
+        if (error) {
+            *error = "invalid commit op lookup args";
+        }
+        return false;
+    }
+    std::string data;
+    std::string local_error;
+    if (!store_->Get(LayoutCommitOpKey(inode_id, op_id), &data, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "commit op result not found" : local_error;
+        }
+        return false;
+    }
+    if (!MetaCodec::DecodeLayoutRoot(data, committed)) {
+        if (error) {
+            *error = "invalid commit op layout root record";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool MdsServiceImpl::BuildLayoutNodeFromObjects(uint64_t inode_id,
                                                const std::string& layout_obj_id,
                                                uint64_t object_version,
                                                LayoutNodeRecord* node,
@@ -1593,10 +1894,10 @@ bool MdsServiceImpl::BuildLayoutNodeFromChunks(uint64_t inode_id,
         }
         return false;
     }
-    const uint64_t chunk_size = attr.chunk_size() > 0 ? attr.chunk_size() : default_chunk_size_;
-    if (chunk_size == 0) {
+    const uint64_t object_unit_size = attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_;
+    if (object_unit_size == 0) {
         if (error) {
-            *error = "chunk size is zero";
+            *error = "object unit size is zero";
         }
         return false;
     }
@@ -1606,29 +1907,29 @@ bool MdsServiceImpl::BuildLayoutNodeFromChunks(uint64_t inode_id,
     node->extents.clear();
     node->child_layout_ids.clear();
 
-    const std::string prefix = ChunkPrefix(inode_id);
+    const std::string prefix = ObjectPrefix(inode_id);
     std::unique_ptr<rocksdb::Iterator> it(store_->db()->NewIterator(rocksdb::ReadOptions()));
     for (it->Seek(prefix); it->Valid(); it->Next()) {
         const std::string key = it->key().ToString();
         if (key.rfind(prefix, 0) != 0) {
             break;
         }
-        zb::rpc::ChunkMeta chunk_meta;
-        if (!MetaCodec::DecodeChunkMeta(it->value().ToString(), &chunk_meta)) {
+        zb::rpc::ObjectMeta object_meta;
+        if (!MetaCodec::DecodeObjectMeta(it->value().ToString(), &object_meta)) {
             continue;
         }
         const zb::rpc::ReplicaLocation* source = nullptr;
-        for (const auto& replica : chunk_meta.replicas()) {
+        for (const auto& replica : object_meta.replicas()) {
             if (replica.storage_tier() == zb::rpc::STORAGE_TIER_DISK &&
                 replica.replica_state() == zb::rpc::REPLICA_READY &&
-                !replica.chunk_id().empty()) {
+                !ReplicaObjectId(replica).empty()) {
                 source = &replica;
                 break;
             }
         }
         if (!source) {
-            for (const auto& replica : chunk_meta.replicas()) {
-                if (!replica.chunk_id().empty()) {
+            for (const auto& replica : object_meta.replicas()) {
+                if (!ReplicaObjectId(replica).empty()) {
                     source = &replica;
                     break;
                 }
@@ -1638,12 +1939,16 @@ bool MdsServiceImpl::BuildLayoutNodeFromChunks(uint64_t inode_id,
             continue;
         }
         LayoutExtentRecord extent;
-        extent.logical_offset = static_cast<uint64_t>(chunk_meta.index()) * chunk_size;
-        extent.length = chunk_size;
-        extent.object_id = source->chunk_id();
+        extent.logical_offset = static_cast<uint64_t>(object_meta.index()) * object_unit_size;
+        extent.length = object_unit_size;
+        extent.object_id = ReplicaObjectId(*source);
         extent.object_offset = 0;
-        extent.object_length = chunk_size;
+        extent.object_length = object_unit_size;
         extent.object_version = object_version;
+        extent.object_index = object_meta.index();
+        extent.pg_id = 0;
+        extent.placement_epoch = source->epoch();
+        extent.storage_tier = static_cast<uint32_t>(source->storage_tier());
         node->extents.push_back(std::move(extent));
     }
 
@@ -1683,6 +1988,8 @@ bool MdsServiceImpl::LoadHealthyLayoutNode(uint64_t inode_id,
                                            LayoutNodeRecord* node,
                                            bool* recovered,
                                            std::string* error) {
+    (void)inode_id;
+    (void)object_version;
     if (!node || layout_obj_id.empty()) {
         if (error) {
             *error = "invalid layout object load arguments";
@@ -1717,17 +2024,8 @@ bool MdsServiceImpl::LoadHealthyLayoutNode(uint64_t inode_id,
         }
     }
     if (!found_replica) {
-        if (!BuildLayoutNodeFromChunks(inode_id, layout_obj_id, object_version, node, &local_error)) {
-            if (error) {
-                *error = local_error.empty() ? "failed to rebuild layout object" : local_error;
-            }
-            return false;
-        }
-        found_replica = true;
-    }
-    if (!found_replica) {
         if (error) {
-            *error = "layout object cannot be recovered";
+            *error = "layout object cannot be loaded";
         }
         return false;
     }
@@ -1752,8 +2050,11 @@ bool MdsServiceImpl::LoadHealthyLayoutNode(uint64_t inode_id,
 }
 
 bool MdsServiceImpl::ValidateLayoutObjectOnLoad(uint64_t inode_id, const LayoutRootRecord& root, std::string* error) {
-    if (root.layout_root_id.empty() || IsLegacyLayoutObjectId(root.layout_root_id)) {
-        return true;
+    if (root.layout_root_id.empty()) {
+        if (error) {
+            *error = "layout root id is empty";
+        }
+        return false;
     }
     bool scrub_on_load = true;
     {
@@ -1794,6 +2095,9 @@ bool MdsServiceImpl::BuildOpticalReadPlan(uint64_t inode_id,
         }
         return false;
     }
+    if (simplified_anchor_metadata_mode_) {
+        return true;
+    }
 
     zb::rpc::InodeAttr attr;
     std::string local_error;
@@ -1803,77 +2107,109 @@ bool MdsServiceImpl::BuildOpticalReadPlan(uint64_t inode_id,
         }
         return false;
     }
-    const uint64_t chunk_size = attr.chunk_size() > 0 ? attr.chunk_size() : default_chunk_size_;
-    if (chunk_size == 0) {
+    LayoutRootRecord root;
+    if (!LoadLayoutRoot(inode_id, &root, &local_error)) {
         if (error) {
-            *error = "chunk_size is zero";
+            *error = local_error.empty() ? "failed to load layout root" : local_error;
+        }
+        return false;
+    }
+    if (root.layout_root_id.empty()) {
+        if (error) {
+            *error = "layout root id is empty";
         }
         return false;
     }
 
-    const uint64_t start = offset / chunk_size;
-    const uint64_t end = (offset + size - 1) / chunk_size;
+    LayoutNodeRecord node;
+    bool recovered = false;
+    if (!LoadHealthyLayoutNode(inode_id, root.layout_root_id, root.layout_version, &node, &recovered, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "failed to load layout object" : local_error;
+        }
+        return false;
+    }
 
+    const uint64_t request_end = offset + size;
     bool need_optical = false;
-    bool all_chunks_optical_only = true;
+    bool all_objects_archived = true;
     zb::rpc::ReplicaLocation anchor;
 
-    for (uint64_t index = start; index <= end; ++index) {
-        const std::string chunk_key = ChunkKey(inode_id, static_cast<uint32_t>(index));
-        std::string chunk_data;
+    for (const auto& extent : node.extents) {
+        const uint64_t extent_start = extent.logical_offset;
+        const uint64_t extent_end = extent.logical_offset + extent.length;
+        if (extent_end <= offset || extent_start >= request_end) {
+            continue;
+        }
+        if (extent.object_id.empty()) {
+            if (error) {
+                *error = "layout extent object_id is empty";
+            }
+            return false;
+        }
+
+        std::string state_data;
         local_error.clear();
-        if (!store_->Get(chunk_key, &chunk_data, &local_error)) {
+        if (!store_->Get(ObjectArchiveStateKey(extent.object_id), &state_data, &local_error)) {
             if (!local_error.empty()) {
                 if (error) {
                     *error = local_error;
                 }
                 return false;
             }
+            all_objects_archived = false;
             continue;
         }
 
-        zb::rpc::ChunkMeta meta;
-        if (!MetaCodec::DecodeChunkMeta(chunk_data, &meta)) {
+        zb::rpc::ArchiveLeaseRecord record;
+        if (!record.ParseFromString(state_data)) {
             if (error) {
-                *error = "invalid chunk meta";
+                *error = "invalid archive state record for object " + extent.object_id;
             }
             return false;
         }
-
-        bool has_disk = false;
-        for (const auto& replica : meta.replicas()) {
-            if (replica.storage_tier() == zb::rpc::STORAGE_TIER_DISK &&
-                replica.replica_state() == zb::rpc::REPLICA_READY) {
-                has_disk = true;
-                break;
-            }
-        }
-        if (has_disk) {
-            all_chunks_optical_only = false;
+        if (record.state() != zb::rpc::ARCHIVE_STATE_ARCHIVED) {
+            all_objects_archived = false;
             continue;
         }
 
-        const zb::rpc::ReplicaLocation* optical = nullptr;
-        for (const auto& replica : meta.replicas()) {
-            if (replica.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL &&
-                replica.replica_state() == zb::rpc::REPLICA_READY) {
-                optical = &replica;
-                break;
+        std::string location_data;
+        local_error.clear();
+        if (!store_->Get(ArchiveObjectOpticalLocationKey(extent.object_id), &location_data, &local_error)) {
+            if (!local_error.empty()) {
+                if (error) {
+                    *error = local_error;
+                }
+                return false;
             }
+            all_objects_archived = false;
+            continue;
         }
-        if (!optical) {
+
+        zb::rpc::ReplicaLocation optical;
+        if (!optical.ParseFromString(location_data)) {
             if (error) {
-                *error = "layout contains no readable replica";
+                *error = "invalid optical location index for object " + extent.object_id;
+            }
+            return false;
+        }
+        if (optical.storage_tier() != zb::rpc::STORAGE_TIER_OPTICAL ||
+            optical.replica_state() != zb::rpc::REPLICA_READY ||
+            optical.node_address().empty() ||
+            optical.disk_id().empty()) {
+            if (error) {
+                *error = "optical location is not ready for object " + extent.object_id;
             }
             return false;
         }
         need_optical = true;
         if (anchor.node_address().empty()) {
-            anchor = *optical;
+            anchor = optical;
             continue;
         }
-        if (anchor.node_address() != optical->node_address() ||
-            anchor.disk_id() != optical->disk_id()) {
+        if (anchor.node_address() != optical.node_address() ||
+            anchor.disk_id() != optical.disk_id() ||
+            anchor.image_id() != optical.image_id()) {
             if (error) {
                 *error = "requested range spans multiple optical discs";
             }
@@ -1881,7 +2217,7 @@ bool MdsServiceImpl::BuildOpticalReadPlan(uint64_t inode_id,
         }
     }
 
-    if (!need_optical || !all_chunks_optical_only) {
+    if (!need_optical || !all_objects_archived) {
         return true;
     }
     if (anchor.node_address().empty() || anchor.disk_id().empty()) {
@@ -1903,11 +2239,29 @@ bool MdsServiceImpl::BuildOpticalReadPlan(uint64_t inode_id,
     return true;
 }
 
-bool MdsServiceImpl::BuildReadPlan(uint64_t inode_id,
-                                   uint64_t offset,
-                                   uint64_t size,
-                                   zb::rpc::FileLayout* layout,
-                                   std::string* error) {
+bool MdsServiceImpl::BuildReadPlanWithPolicy(uint64_t inode_id,
+                                             uint64_t offset,
+                                             uint64_t size,
+                                             zb::rpc::FileLayout* layout,
+                                             std::string* error) {
+    std::string layout_error;
+    if (BuildReadPlanFromLayout(inode_id, offset, size, layout, &layout_error)) {
+        layout_read_hit_total_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    pg_resolve_fail_total_.fetch_add(1, std::memory_order_relaxed);
+
+    if (error) {
+        *error = layout_error.empty() ? "layout read plan unavailable in pure layout mode" : layout_error;
+    }
+    return false;
+}
+
+bool MdsServiceImpl::BuildReadPlanFromLayout(uint64_t inode_id,
+                                             uint64_t offset,
+                                             uint64_t size,
+                                             zb::rpc::FileLayout* layout,
+                                             std::string* error) {
     if (!layout) {
         if (error) {
             *error = "layout output is null";
@@ -1926,6 +2280,9 @@ bool MdsServiceImpl::BuildReadPlan(uint64_t inode_id,
         }
         return false;
     }
+    if (simplified_anchor_metadata_mode_) {
+        return BuildReadPlanFromAnchor(inode_id, offset, size, layout, error);
+    }
 
     zb::rpc::InodeAttr attr;
     std::string local_error;
@@ -1935,112 +2292,116 @@ bool MdsServiceImpl::BuildReadPlan(uint64_t inode_id,
         }
         return false;
     }
-
-    const uint64_t chunk_size = attr.chunk_size() ? attr.chunk_size() : default_chunk_size_;
-    if (chunk_size == 0) {
+    const uint64_t object_unit_size = attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_;
+    if (object_unit_size == 0) {
         if (error) {
-            *error = "chunk_size is zero";
+            *error = "object_unit_size is zero";
         }
         return false;
     }
-    attr.set_atime(NowSeconds());
-    local_error.clear();
-    PutInode(attr.inode_id(), attr, &local_error);
 
-    const uint64_t start = offset / chunk_size;
-    const uint64_t end = (offset + size - 1) / chunk_size;
-    std::unordered_set<std::string> recalled_images;
-    bool recalled_from_optical = false;
-    std::vector<std::string> requested_chunk_keys;
-    requested_chunk_keys.reserve(static_cast<size_t>(end - start + 1));
+    LayoutRootRecord root;
+    if (!LoadLayoutRoot(inode_id, &root, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "failed to load layout root" : local_error;
+        }
+        return false;
+    }
+    if (root.layout_root_id.empty()) {
+        if (error) {
+            *error = "layout root id is empty";
+        }
+        return false;
+    }
+
+    LayoutNodeRecord node;
+    bool recovered = false;
+    if (!LoadHealthyLayoutNode(inode_id, root.layout_root_id, root.layout_version, &node, &recovered, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "failed to load layout object" : local_error;
+        }
+        return false;
+    }
 
     layout->Clear();
-    layout->set_inode_id(attr.inode_id());
-    layout->set_chunk_size(chunk_size);
+    layout->set_inode_id(inode_id);
+    layout->set_object_unit_size(object_unit_size);
+    const uint64_t request_end = offset + size;
 
-    for (uint64_t index = start; index <= end; ++index) {
-        local_error.clear();
-        const std::string chunk_key = ChunkKey(attr.inode_id(), static_cast<uint32_t>(index));
-        requested_chunk_keys.push_back(chunk_key);
-
-        std::string chunk_data;
-        zb::rpc::ChunkMeta chunk_meta;
-        if (store_->Get(chunk_key, &chunk_data, &local_error)) {
-            if (!MetaCodec::DecodeChunkMeta(chunk_data, &chunk_meta)) {
-                if (error) {
-                    *error = "invalid chunk meta";
-                }
-                return false;
-            }
-            bool recalled_this_chunk = false;
-            if (!EnsureChunkReadableFromDisk(chunk_key,
-                                             &chunk_meta,
-                                             &recalled_images,
-                                             &recalled_this_chunk,
-                                             &local_error)) {
-                if (error) {
-                    *error = local_error.empty() ? "failed to recall optical chunk data" : local_error;
-                }
-                return false;
-            }
-            if (recalled_this_chunk) {
-                recalled_from_optical = true;
-            }
-        } else if (!local_error.empty()) {
-            if (error) {
-                *error = local_error;
-            }
-            return false;
-        }
-    }
-
-    if (recalled_from_optical) {
-        if (!CacheWholeFileToDisk(attr.inode_id(), &local_error)) {
-            if (error) {
-                *error = local_error.empty() ? "failed to cache file on disk node" : local_error;
-            }
-            return false;
-        }
-    }
-
-    for (const auto& chunk_key : requested_chunk_keys) {
-        local_error.clear();
-        std::string chunk_data;
-        zb::rpc::ChunkMeta chunk_meta;
-        if (!store_->Get(chunk_key, &chunk_data, &local_error)) {
-            if (!local_error.empty()) {
-                if (error) {
-                    *error = local_error;
-                }
-                return false;
-            }
+    std::unordered_map<uint32_t, zb::rpc::ObjectMeta> object_map;
+    const uint32_t replica_count = attr.replica() > 0 ? attr.replica() : 1;
+    for (const auto& extent : node.extents) {
+        const uint64_t extent_start = extent.logical_offset;
+        const uint64_t extent_end = extent.logical_offset + extent.length;
+        if (extent_end <= offset || extent_start >= request_end) {
             continue;
         }
-        if (!MetaCodec::DecodeChunkMeta(chunk_data, &chunk_meta)) {
+        const uint32_t object_index = extent.object_index > 0
+                                          ? extent.object_index
+                                          : static_cast<uint32_t>(extent.logical_offset / object_unit_size);
+        if (object_map.find(object_index) != object_map.end()) {
+            continue;
+        }
+        if (extent.object_id.empty()) {
             if (error) {
-                *error = "invalid chunk meta";
+                *error = "layout extent object_id is empty";
             }
             return false;
         }
 
-        zb::rpc::ChunkMeta read_meta;
-        read_meta.set_index(chunk_meta.index());
-        for (const auto& replica : chunk_meta.replicas()) {
+        zb::rpc::ObjectMeta object_meta;
+        object_meta.set_index(object_index);
+        std::vector<zb::rpc::ReplicaLocation> replicas;
+        local_error.clear();
+        if (!ResolveObjectReplicas(replica_count,
+                                   extent.object_id,
+                                   extent.placement_epoch,
+                                   &replicas,
+                                   &local_error)) {
+            if (error) {
+                *error = local_error.empty() ? "failed to resolve object placement from PG" : local_error;
+            }
+            return false;
+        }
+        for (const auto& replica : replicas) {
             if (replica.storage_tier() == zb::rpc::STORAGE_TIER_DISK &&
                 replica.replica_state() == zb::rpc::REPLICA_READY) {
-                *read_meta.add_replicas() = replica;
+                *object_meta.add_replicas() = replica;
             }
         }
-        if (read_meta.replicas_size() == 0) {
+        if (object_meta.replicas_size() == 0) {
             if (error) {
-                *error = "layout contains no readable disk replica";
+                *error = "layout object has no readable disk replica from PG";
             }
             return false;
         }
-        *layout->add_chunks() = read_meta;
+        object_map.emplace(object_index, std::move(object_meta));
     }
 
+    std::vector<uint32_t> indices;
+    indices.reserve(object_map.size());
+    for (const auto& item : object_map) {
+        indices.push_back(item.first);
+    }
+    if (indices.empty()) {
+        if (error) {
+            *error = "layout plan contains no readable extents";
+        }
+        return false;
+    }
+    std::sort(indices.begin(), indices.end());
+    for (uint32_t index : indices) {
+        *layout->add_objects() = object_map[index];
+    }
     return true;
+}
+
+bool MdsServiceImpl::BuildReadPlan(uint64_t inode_id,
+                                   uint64_t offset,
+                                   uint64_t size,
+                                   zb::rpc::FileLayout* layout,
+                                   std::string* error) {
+    return BuildReadPlanFromLayout(inode_id, offset, size, layout, error);
 }
 
 bool MdsServiceImpl::ResolveExtents(const zb::rpc::FileLayout& read_plan,
@@ -2069,35 +2430,35 @@ bool MdsServiceImpl::ResolveExtents(const zb::rpc::FileLayout& read_plan,
     }
 
     extents->clear();
-    const uint64_t chunk_size = read_plan.chunk_size() > 0 ? read_plan.chunk_size() : default_chunk_size_;
-    if (chunk_size == 0) {
+    const uint64_t object_unit_size = read_plan.object_unit_size() > 0 ? read_plan.object_unit_size() : default_object_unit_size_;
+    if (object_unit_size == 0) {
         if (error) {
-            *error = "chunk_size is zero";
+            *error = "object_unit_size is zero";
         }
         return false;
     }
     const uint64_t request_end = request_offset + request_size;
-    for (const auto& chunk : read_plan.chunks()) {
-        const uint64_t chunk_start = static_cast<uint64_t>(chunk.index()) * chunk_size;
-        const uint64_t chunk_end = chunk_start + chunk_size;
-        const uint64_t overlap_start = std::max<uint64_t>(chunk_start, request_offset);
-        const uint64_t overlap_end = std::min<uint64_t>(chunk_end, request_end);
+    for (const auto& object_meta : read_plan.objects()) {
+        const uint64_t object_start = static_cast<uint64_t>(object_meta.index()) * object_unit_size;
+        const uint64_t object_end = object_start + object_unit_size;
+        const uint64_t overlap_start = std::max<uint64_t>(object_start, request_offset);
+        const uint64_t overlap_end = std::min<uint64_t>(object_end, request_end);
         if (overlap_start >= overlap_end) {
             continue;
         }
 
         const zb::rpc::ReplicaLocation* source = nullptr;
-        for (const auto& replica : chunk.replicas()) {
+        for (const auto& replica : object_meta.replicas()) {
             if (replica.storage_tier() == zb::rpc::STORAGE_TIER_DISK &&
                 replica.replica_state() == zb::rpc::REPLICA_READY &&
-                !replica.chunk_id().empty()) {
+                !ReplicaObjectId(replica).empty()) {
                 source = &replica;
                 break;
             }
         }
         if (!source) {
             if (error) {
-                *error = "chunk has no ready disk source";
+                *error = "object segment has no ready disk source";
             }
             return false;
         }
@@ -2105,24 +2466,28 @@ bool MdsServiceImpl::ResolveExtents(const zb::rpc::FileLayout& read_plan,
         LayoutExtentRecord extent;
         extent.logical_offset = overlap_start;
         extent.length = overlap_end - overlap_start;
-        extent.object_id = source->chunk_id();
-        extent.object_offset = overlap_start - chunk_start;
+        extent.object_id = ReplicaObjectId(*source);
+        extent.object_offset = overlap_start - object_start;
         extent.object_length = extent.length;
         extent.object_version = object_version;
+        extent.object_index = object_meta.index();
+        extent.pg_id = 0;
+        extent.placement_epoch = source->epoch();
+        extent.storage_tier = static_cast<uint32_t>(source->storage_tier());
         extents->push_back(std::move(extent));
     }
     return true;
 }
 
-bool MdsServiceImpl::SelectReadableDiskReplica(const zb::rpc::ChunkMeta& chunk_meta,
-                                               zb::rpc::ReplicaLocation* source) const {
+bool MdsServiceImpl::SelectReadableDiskObjectReplica(const zb::rpc::ObjectMeta& object_meta,
+                                                     zb::rpc::ReplicaLocation* source) const {
     if (!source) {
         return false;
     }
-    for (const auto& replica : chunk_meta.replicas()) {
+    for (const auto& replica : object_meta.replicas()) {
         if (replica.storage_tier() != zb::rpc::STORAGE_TIER_DISK ||
             replica.replica_state() != zb::rpc::REPLICA_READY ||
-            replica.chunk_id().empty()) {
+            ReplicaObjectId(replica).empty()) {
             continue;
         }
         *source = replica;
@@ -2131,40 +2496,310 @@ bool MdsServiceImpl::SelectReadableDiskReplica(const zb::rpc::ChunkMeta& chunk_m
     return false;
 }
 
-bool MdsServiceImpl::SeedChunkForCowWrite(const zb::rpc::ChunkMeta& old_meta,
-                                          const std::vector<zb::rpc::ReplicaLocation>& new_replicas,
-                                          uint64_t chunk_size,
-                                          std::string* error) {
+bool MdsServiceImpl::ResolveObjectReplicas(uint32_t replica_count,
+                                           const std::string& object_id,
+                                           uint64_t placement_epoch,
+                                           std::vector<zb::rpc::ReplicaLocation>* replicas,
+                                           std::string* error) const {
+    if (!replicas || replica_count == 0 || object_id.empty()) {
+        if (error) {
+            *error = "invalid object replica resolve args";
+        }
+        return false;
+    }
+    if (!allocator_) {
+        if (error) {
+            *error = "allocator is unavailable";
+        }
+        return false;
+    }
+    std::string local_error;
+    if (!allocator_->AllocateObjectByPg(replica_count, object_id, placement_epoch, replicas, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "AllocateObjectByPg failed" : local_error;
+        }
+        return false;
+    }
+    if (replicas->size() < replica_count) {
+        if (error) {
+            *error = "insufficient replicas from PG resolve";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool MdsServiceImpl::SelectFileAnchor(uint64_t inode_id,
+                                      const zb::rpc::InodeAttr& attr,
+                                      zb::rpc::ReplicaLocation* anchor,
+                                      std::string* error) const {
+    if (!anchor || inode_id == 0) {
+        if (error) {
+            *error = "invalid file anchor args";
+        }
+        return false;
+    }
+    if (!allocator_) {
+        if (error) {
+            *error = "allocator is unavailable";
+        }
+        return false;
+    }
+
+    const std::string object_id = BuildStableObjectId(inode_id, 0);
+    std::vector<zb::rpc::ReplicaLocation> replicas;
+    std::string local_error;
+    if (!ResolveObjectReplicas(1, object_id, 0, &replicas, &local_error) || replicas.empty()) {
+        replicas.clear();
+        if (!allocator_->AllocateObject(1, object_id, &replicas) || replicas.empty()) {
+            if (error) {
+                *error = local_error.empty() ? "failed to allocate anchor replica" : local_error;
+            }
+            return false;
+        }
+    }
+
+    for (const auto& replica : replicas) {
+        if (replica.node_address().empty() || replica.disk_id().empty()) {
+            continue;
+        }
+        *anchor = replica;
+        if (anchor->storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
+            anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+        }
+        anchor->set_replica_state(zb::rpc::REPLICA_READY);
+        EnsureReplicaObjectId(anchor, object_id);
+        return true;
+    }
+
+    (void)attr;
+    if (error) {
+        *error = "no usable disk replica for file anchor";
+    }
+    return false;
+}
+
+bool MdsServiceImpl::LoadFileAnchor(uint64_t inode_id,
+                                    zb::rpc::ReplicaLocation* anchor,
+                                    std::string* error) const {
+    if (!anchor || inode_id == 0) {
+        if (error) {
+            *error = "invalid file anchor output";
+        }
+        return false;
+    }
+    std::string data;
+    std::string local_error;
+    if (!store_->Get(FileAnchorKey(inode_id), &data, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "file anchor not found" : local_error;
+        }
+        return false;
+    }
+    if (!anchor->ParseFromString(data)) {
+        if (error) {
+            *error = "invalid file anchor payload";
+        }
+        return false;
+    }
+    if (anchor->storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
+        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+    }
+    anchor->set_replica_state(zb::rpc::REPLICA_READY);
+    return true;
+}
+
+bool MdsServiceImpl::SaveFileAnchor(uint64_t inode_id,
+                                    const zb::rpc::ReplicaLocation& anchor,
+                                    rocksdb::WriteBatch* batch) const {
+    if (!batch || inode_id == 0) {
+        return false;
+    }
+    zb::rpc::ReplicaLocation normalized = anchor;
+    if (normalized.storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
+        normalized.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+    }
+    normalized.set_replica_state(zb::rpc::REPLICA_READY);
+    if (normalized.object_id().empty()) {
+        normalized.set_object_id(BuildStableObjectId(inode_id, 0));
+    }
+    std::string payload;
+    if (!normalized.SerializeToString(&payload)) {
+        return false;
+    }
+    batch->Put(FileAnchorKey(inode_id), payload);
+    return true;
+}
+
+bool MdsServiceImpl::BuildReadPlanFromAnchor(uint64_t inode_id,
+                                             uint64_t offset,
+                                             uint64_t size,
+                                             zb::rpc::FileLayout* layout,
+                                             std::string* error) {
+    if (!layout) {
+        if (error) {
+            *error = "layout output is null";
+        }
+        return false;
+    }
+    if (inode_id == 0 || size == 0) {
+        if (error) {
+            *error = "invalid inode or size";
+        }
+        return false;
+    }
+    if (size > std::numeric_limits<uint64_t>::max() - offset) {
+        if (error) {
+            *error = "offset + size overflow";
+        }
+        return false;
+    }
+
+    zb::rpc::InodeAttr attr;
+    std::string local_error;
+    if (!GetInode(inode_id, &attr, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "inode not found" : local_error;
+        }
+        return false;
+    }
+    const uint64_t object_unit_size = attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_;
+    if (object_unit_size == 0) {
+        if (error) {
+            *error = "object_unit_size is zero";
+        }
+        return false;
+    }
+
+    zb::rpc::ReplicaLocation anchor;
+    if (!LoadFileAnchor(inode_id, &anchor, &local_error)) {
+        local_error.clear();
+        if (!SelectFileAnchor(inode_id, attr, &anchor, &local_error)) {
+            if (error) {
+                *error = local_error.empty() ? "failed to load file anchor" : local_error;
+            }
+            return false;
+        }
+        rocksdb::WriteBatch batch;
+        if (!SaveFileAnchor(inode_id, anchor, &batch)) {
+            if (error) {
+                *error = "failed to encode generated file anchor";
+            }
+            return false;
+        }
+        std::string put_error;
+        if (!store_->WriteBatch(&batch, &put_error)) {
+            if (error) {
+                *error = put_error.empty() ? "failed to persist generated file anchor" : put_error;
+            }
+            return false;
+        }
+    }
+    if (anchor.node_address().empty() || anchor.disk_id().empty()) {
+        if (error) {
+            *error = "file anchor is incomplete";
+        }
+        return false;
+    }
+
+    layout->Clear();
+    layout->set_inode_id(inode_id);
+    layout->set_object_unit_size(object_unit_size);
+
+    const uint64_t start = offset / object_unit_size;
+    const uint64_t end = (offset + size - 1) / object_unit_size;
+    for (uint64_t i = start; i <= end; ++i) {
+        const uint32_t object_index = static_cast<uint32_t>(i);
+        const std::string object_id = BuildStableObjectId(inode_id, object_index);
+        zb::rpc::ObjectMeta* object_meta = layout->add_objects();
+        object_meta->set_index(object_index);
+        zb::rpc::ReplicaLocation* replica = object_meta->add_replicas();
+        FillAnchorReplica(replica, anchor, object_id);
+    }
+    return true;
+}
+
+std::string MdsServiceImpl::BuildStableObjectId(uint64_t inode_id, uint32_t object_index) {
+    return "obj-" + std::to_string(inode_id) + "-" + std::to_string(object_index);
+}
+
+void MdsServiceImpl::FillAnchorReplica(zb::rpc::ReplicaLocation* replica,
+                                       const zb::rpc::ReplicaLocation& anchor,
+                                       const std::string& object_id) {
+    if (!replica) {
+        return;
+    }
+    *replica = anchor;
+    EnsureReplicaObjectId(replica, object_id);
+    if (replica->storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
+        replica->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+    }
+    replica->set_replica_state(zb::rpc::REPLICA_READY);
+}
+
+bool MdsServiceImpl::SeedObjectForCowWrite(const LayoutExtentRecord& old_extent,
+                                           const std::vector<zb::rpc::ReplicaLocation>& new_replicas,
+                                           uint64_t object_size,
+                                           std::string* error) {
     if (new_replicas.empty()) {
         if (error) {
             *error = "new replicas are empty";
         }
         return false;
     }
-    if (chunk_size == 0) {
+    if (old_extent.object_id.empty()) {
+        return true;
+    }
+    if (object_size == 0) {
         if (error) {
-            *error = "chunk size is zero";
+            *error = "object size is zero";
         }
         return false;
     }
 
-    zb::rpc::ReplicaLocation source;
-    if (!SelectReadableDiskReplica(old_meta, &source)) {
+    std::vector<zb::rpc::ReplicaLocation> old_replicas;
+    std::string local_error;
+    if (!ResolveObjectReplicas(static_cast<uint32_t>(new_replicas.size()),
+                               old_extent.object_id,
+                               old_extent.placement_epoch,
+                               &old_replicas,
+                               &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "failed to resolve old object replicas" : local_error;
+        }
+        return false;
+    }
+    if (old_replicas.empty()) {
         return true;
     }
 
+    zb::rpc::ReplicaLocation source;
+    bool found_source = false;
+    for (const auto& replica : old_replicas) {
+        if (replica.storage_tier() != zb::rpc::STORAGE_TIER_DISK ||
+            replica.replica_state() != zb::rpc::REPLICA_READY) {
+            continue;
+        }
+        source = replica;
+        found_source = true;
+        break;
+    }
+    if (!found_source) {
+        source = old_replicas.front();
+    }
+
     std::string data;
-    std::string local_error;
-    if (!ReadChunkFromReplica(source, chunk_size, &data, &local_error)) {
+    if (!ReadObjectFromReplica(source, object_size, &data, &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "failed to read source chunk for cow seed" : local_error;
+            *error = local_error.empty() ? "failed to read source object for cow seed" : local_error;
         }
         return false;
     }
     for (const auto& target : new_replicas) {
-        if (!WriteChunkToReplica(target, target.chunk_id(), data, &local_error)) {
+        const std::string target_object_id = ReplicaObjectId(target);
+        if (target_object_id.empty() || !WriteObjectToReplica(target, target_object_id, data, &local_error)) {
             if (error) {
-                *error = local_error.empty() ? "failed to write seeded chunk replica" : local_error;
+                *error = local_error.empty() ? "failed to write seeded object replica" : local_error;
             }
             return false;
         }
@@ -2173,6 +2808,7 @@ bool MdsServiceImpl::SeedChunkForCowWrite(const zb::rpc::ChunkMeta& old_meta,
 }
 
 bool MdsServiceImpl::ConsumePendingWriteForCommit(uint64_t inode_id,
+                                                  const std::string& op_id,
                                                   uint64_t expected_base_layout_version,
                                                   uint64_t new_file_size,
                                                   LayoutRootRecord* committed_root,
@@ -2201,57 +2837,35 @@ bool MdsServiceImpl::ConsumePendingWriteForCommit(uint64_t inode_id,
         if (error) {
             *error = "layout version mismatch";
         }
+        layout_commit_conflict_total_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
-    rocksdb::WriteBatch batch;
-    for (const auto& [chunk_index, chunk_meta] : txn.chunk_updates) {
-        const std::string chunk_key = ChunkKey(inode_id, chunk_index);
-
-        std::string old_data;
-        std::string local_error;
-        if (store_->Get(chunk_key, &old_data, &local_error)) {
-            zb::rpc::ChunkMeta old_meta;
-            if (MetaCodec::DecodeChunkMeta(old_data, &old_meta)) {
-                for (const auto& old_replica : old_meta.replicas()) {
-                    if (!old_replica.chunk_id().empty()) {
-                        batch.Delete(ReverseChunkKey(old_replica.chunk_id()));
-                    }
-                }
-            }
-        }
-
-        batch.Put(chunk_key, MetaCodec::EncodeChunkMeta(chunk_meta));
-        for (const auto& replica : chunk_meta.replicas()) {
-            if (!replica.chunk_id().empty()) {
-                batch.Put(ReverseChunkKey(replica.chunk_id()), chunk_key);
-            }
-        }
-    }
     std::string local_error;
-    if (batch.Count() > 0 && !store_->WriteBatch(&batch, &local_error)) {
-        if (error) {
-            *error = local_error.empty() ? "failed to publish pending chunks" : local_error;
-        }
-        return false;
-    }
-
     LayoutRootRecord root;
     root.inode_id = inode_id;
     root.layout_root_id = "lr-" + std::to_string(inode_id) + "-" + std::to_string(txn.pending_layout_version);
     root.layout_version = txn.pending_layout_version;
     root.file_size = new_file_size;
     root.epoch = 0;
+    for (const auto& extent : txn.pending_layout_node.extents) {
+        root.epoch = std::max<uint64_t>(root.epoch, extent.placement_epoch);
+    }
     root.update_ts = NowMilliseconds();
+
+    LayoutNodeRecord pending_layout_node = txn.pending_layout_node;
+    pending_layout_node.node_id = root.layout_root_id;
     if (!StoreLayoutRootAtomic(inode_id,
                                root,
                                txn.base_layout_version,
                                true,
                                new_file_size,
+                               op_id.empty() ? nullptr : &op_id,
+                               &pending_layout_node,
                                committed_root,
                                &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "failed to commit layout root after publishing chunks" : local_error;
+            *error = local_error.empty() ? "failed to commit pending layout root" : local_error;
         }
         return false;
     }
@@ -2266,8 +2880,8 @@ bool MdsServiceImpl::ConsumePendingWriteForCommit(uint64_t inode_id,
     return true;
 }
 
-bool MdsServiceImpl::HasReadyDiskReplica(const zb::rpc::ChunkMeta& chunk_meta) const {
-    for (const auto& replica : chunk_meta.replicas()) {
+bool MdsServiceImpl::HasReadyDiskObjectReplica(const zb::rpc::ObjectMeta& object_meta) const {
+    for (const auto& replica : object_meta.replicas()) {
         if (replica.storage_tier() == zb::rpc::STORAGE_TIER_DISK &&
             replica.replica_state() == zb::rpc::REPLICA_READY) {
             return true;
@@ -2276,12 +2890,12 @@ bool MdsServiceImpl::HasReadyDiskReplica(const zb::rpc::ChunkMeta& chunk_meta) c
     return false;
 }
 
-bool MdsServiceImpl::FindReadyOpticalReplica(const zb::rpc::ChunkMeta& chunk_meta,
-                                             zb::rpc::ReplicaLocation* optical) const {
+bool MdsServiceImpl::FindReadyOpticalObjectReplica(const zb::rpc::ObjectMeta& object_meta,
+                                                   zb::rpc::ReplicaLocation* optical) const {
     if (!optical) {
         return false;
     }
-    for (const auto& replica : chunk_meta.replicas()) {
+    for (const auto& replica : object_meta.replicas()) {
         if (replica.storage_tier() != zb::rpc::STORAGE_TIER_OPTICAL ||
             replica.replica_state() != zb::rpc::REPLICA_READY) {
             continue;
@@ -2292,12 +2906,12 @@ bool MdsServiceImpl::FindReadyOpticalReplica(const zb::rpc::ChunkMeta& chunk_met
     return false;
 }
 
-bool MdsServiceImpl::CollectRecallTasksByImage(const std::string& seed_chunk_key,
-                                               const zb::rpc::ChunkMeta& seed_meta,
+bool MdsServiceImpl::CollectRecallTasksByImage(const std::string& seed_object_key,
+                                               const zb::rpc::ObjectMeta& seed_meta,
                                                const zb::rpc::ReplicaLocation& optical_seed,
                                                std::vector<RecallTask>* tasks,
                                                std::string* error) {
-    if (!tasks || seed_chunk_key.empty()) {
+    if (!tasks || seed_object_key.empty()) {
         if (error) {
             *error = "invalid recall task arguments";
         }
@@ -2305,7 +2919,7 @@ bool MdsServiceImpl::CollectRecallTasksByImage(const std::string& seed_chunk_key
     }
     tasks->clear();
 
-    auto find_matching_optical = [&](const zb::rpc::ChunkMeta& meta, zb::rpc::ReplicaLocation* matched) -> bool {
+    auto find_matching_optical = [&](const zb::rpc::ObjectMeta& meta, zb::rpc::ReplicaLocation* matched) -> bool {
         if (!matched) {
             return false;
         }
@@ -2329,14 +2943,14 @@ bool MdsServiceImpl::CollectRecallTasksByImage(const std::string& seed_chunk_key
         return false;
     };
 
-    std::unordered_set<std::string> seen_chunk_keys;
+    std::unordered_set<std::string> seen_object_keys;
     zb::rpc::ReplicaLocation seed_optical;
     if (find_matching_optical(seed_meta, &seed_optical)) {
         RecallTask task;
-        task.chunk_key = seed_chunk_key;
+        task.object_key = seed_object_key;
         task.optical_replica = seed_optical;
         tasks->push_back(std::move(task));
-        seen_chunk_keys.insert(seed_chunk_key);
+        seen_object_keys.insert(seed_object_key);
     }
 
     if (optical_seed.node_id().empty() ||
@@ -2352,25 +2966,25 @@ bool MdsServiceImpl::CollectRecallTasksByImage(const std::string& seed_chunk_key
     }
 
     const std::string prefix =
-        ArchiveImageChunkPrefix(optical_seed.node_id(), optical_seed.disk_id(), optical_seed.image_id());
+        ArchiveImageObjectPrefix(optical_seed.node_id(), optical_seed.disk_id(), optical_seed.image_id());
     std::unique_ptr<rocksdb::Iterator> it(store_->db()->NewIterator(rocksdb::ReadOptions()));
     for (it->Seek(prefix); it->Valid(); it->Next()) {
         const std::string index_key = it->key().ToString();
         if (index_key.rfind(prefix, 0) != 0) {
             break;
         }
-        const std::string chunk_key = it->value().ToString();
-        if (chunk_key.empty() || !seen_chunk_keys.insert(chunk_key).second) {
+        const std::string object_key = it->value().ToString();
+        if (object_key.empty() || !seen_object_keys.insert(object_key).second) {
             continue;
         }
 
-        std::string chunk_data;
+        std::string object_data;
         std::string local_error;
-        if (!store_->Get(chunk_key, &chunk_data, &local_error)) {
+        if (!store_->Get(object_key, &object_data, &local_error)) {
             continue;
         }
-        zb::rpc::ChunkMeta meta;
-        if (!MetaCodec::DecodeChunkMeta(chunk_data, &meta)) {
+        zb::rpc::ObjectMeta meta;
+        if (!MetaCodec::DecodeObjectMeta(object_data, &meta)) {
             continue;
         }
         zb::rpc::ReplicaLocation matched;
@@ -2378,14 +2992,14 @@ bool MdsServiceImpl::CollectRecallTasksByImage(const std::string& seed_chunk_key
             continue;
         }
         RecallTask task;
-        task.chunk_key = chunk_key;
+        task.object_key = object_key;
         task.optical_replica = matched;
         tasks->push_back(std::move(task));
     }
 
     if (tasks->empty()) {
         if (error) {
-            *error = "no chunks found for optical image recall";
+            *error = "no objects found for optical image recall";
         }
         return false;
     }
@@ -2417,23 +3031,23 @@ bool MdsServiceImpl::RecallTasksToDisk(const std::vector<RecallTask>& tasks, std
 
     rocksdb::WriteBatch batch;
     for (const auto& task : tasks) {
-        std::string chunk_data;
+        std::string object_data;
         std::string local_error;
-        if (!store_->Get(task.chunk_key, &chunk_data, &local_error)) {
+        if (!store_->Get(task.object_key, &object_data, &local_error)) {
             if (error) {
-                *error = local_error.empty() ? ("missing chunk meta: " + task.chunk_key) : local_error;
+                *error = local_error.empty() ? ("missing object meta: " + task.object_key) : local_error;
             }
             return false;
         }
 
-        zb::rpc::ChunkMeta meta;
-        if (!MetaCodec::DecodeChunkMeta(chunk_data, &meta)) {
+        zb::rpc::ObjectMeta meta;
+        if (!MetaCodec::DecodeObjectMeta(object_data, &meta)) {
             if (error) {
-                *error = "invalid chunk meta: " + task.chunk_key;
+                *error = "invalid object meta: " + task.object_key;
             }
             return false;
         }
-        if (HasReadyDiskReplica(meta)) {
+        if (HasReadyDiskObjectReplica(meta)) {
             continue;
         }
 
@@ -2464,31 +3078,31 @@ bool MdsServiceImpl::RecallTasksToDisk(const std::vector<RecallTask>& tasks, std
         uint64_t read_size = source.size();
         if (read_size == 0) {
             uint64_t inode_id = 0;
-            uint32_t chunk_index = 0;
-            if (ParseChunkKey(task.chunk_key, &inode_id, &chunk_index)) {
+            uint32_t object_index = 0;
+            if (ParseObjectKey(task.object_key, &inode_id, &object_index)) {
                 zb::rpc::InodeAttr attr;
                 if (GetInode(inode_id, &attr, &local_error)) {
-                    read_size = attr.chunk_size() > 0 ? attr.chunk_size() : default_chunk_size_;
+                    read_size = attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_;
                 }
             }
         }
         if (read_size == 0) {
-            read_size = default_chunk_size_;
+            read_size = default_object_unit_size_;
         }
 
         std::string data;
-        if (!ReadChunkFromReplica(source, read_size, &data, &local_error)) {
+        if (!ReadObjectFromReplica(source, read_size, &data, &local_error)) {
             if (error) {
-                *error = local_error.empty() ? ("failed to read recalled chunk from optical: " + source.chunk_id())
+                *error = local_error.empty() ? ("failed to read recalled object from optical: " + ReplicaObjectId(source))
                                              : local_error;
             }
             return false;
         }
 
-        const std::string recalled_chunk_id = GenerateChunkId();
-        if (!WriteChunkToReplica(target_base, recalled_chunk_id, data, &local_error)) {
+        const std::string recalled_object_id = GenerateObjectId();
+        if (!WriteObjectToReplica(target_base, recalled_object_id, data, &local_error)) {
             if (error) {
-                *error = local_error.empty() ? ("failed to write recalled chunk to disk: " + recalled_chunk_id)
+                *error = local_error.empty() ? ("failed to write recalled object to disk: " + recalled_object_id)
                                              : local_error;
             }
             return false;
@@ -2498,7 +3112,7 @@ bool MdsServiceImpl::RecallTasksToDisk(const std::vector<RecallTask>& tasks, std
         disk_replica->set_node_id(target_base.node_id());
         disk_replica->set_node_address(target_base.node_address());
         disk_replica->set_disk_id(target_base.disk_id());
-        disk_replica->set_chunk_id(recalled_chunk_id);
+        EnsureReplicaObjectId(disk_replica, recalled_object_id);
         disk_replica->set_size(static_cast<uint64_t>(data.size()));
         disk_replica->set_group_id(target_base.group_id());
         disk_replica->set_epoch(target_base.epoch());
@@ -2510,8 +3124,13 @@ bool MdsServiceImpl::RecallTasksToDisk(const std::vector<RecallTask>& tasks, std
         disk_replica->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
         disk_replica->set_replica_state(zb::rpc::REPLICA_READY);
 
-        batch.Put(task.chunk_key, MetaCodec::EncodeChunkMeta(meta));
-        batch.Put(ReverseChunkKey(recalled_chunk_id), task.chunk_key);
+        batch.Put(task.object_key, MetaCodec::EncodeObjectMeta(meta));
+        batch.Put(ReverseObjectKey(recalled_object_id), task.object_key);
+        uint64_t inode_id = 0;
+        uint32_t object_index = 0;
+        if (ParseObjectKey(task.object_key, &inode_id, &object_index)) {
+            batch.Put(ObjectOwnerKey(recalled_object_id), EncodeObjectOwnerValue(inode_id, object_index));
+        }
     }
 
     if (batch.Count() == 0) {
@@ -2520,7 +3139,7 @@ bool MdsServiceImpl::RecallTasksToDisk(const std::vector<RecallTask>& tasks, std
     std::string write_error;
     if (!store_->WriteBatch(&batch, &write_error)) {
         if (error) {
-            *error = write_error.empty() ? "failed to persist recalled chunk metadata" : write_error;
+            *error = write_error.empty() ? "failed to persist recalled object metadata" : write_error;
         }
         return false;
     }
@@ -2536,7 +3155,7 @@ bool MdsServiceImpl::CacheWholeFileToDisk(uint64_t inode_id, std::string* error)
     }
     if (!allocator_) {
         if (error) {
-            *error = "chunk allocator is unavailable";
+            *error = "object allocator is unavailable";
         }
         return false;
     }
@@ -2549,10 +3168,10 @@ bool MdsServiceImpl::CacheWholeFileToDisk(uint64_t inode_id, std::string* error)
         }
         return false;
     }
-    const uint64_t inode_chunk_size = attr.chunk_size() > 0 ? attr.chunk_size() : default_chunk_size_;
+    const uint64_t inode_object_unit_size = attr.object_unit_size() > 0 ? attr.object_unit_size() : default_object_unit_size_;
 
     std::vector<zb::rpc::ReplicaLocation> allocated;
-    if (!allocator_->AllocateChunk(1, GenerateChunkId(), &allocated) || allocated.empty()) {
+    if (!allocator_->AllocateObject(1, GenerateObjectId(), &allocated) || allocated.empty()) {
         if (error) {
             *error = "failed to allocate file cache target node";
         }
@@ -2562,23 +3181,23 @@ bool MdsServiceImpl::CacheWholeFileToDisk(uint64_t inode_id, std::string* error)
 
     rocksdb::WriteBatch batch;
     std::unique_ptr<rocksdb::Iterator> it(store_->db()->NewIterator(rocksdb::ReadOptions()));
-    const std::string prefix = ChunkPrefix(inode_id);
+    const std::string prefix = ObjectPrefix(inode_id);
     for (it->Seek(prefix); it->Valid(); it->Next()) {
-        const std::string chunk_key = it->key().ToString();
-        if (chunk_key.rfind(prefix, 0) != 0) {
+        const std::string object_key = it->key().ToString();
+        if (object_key.rfind(prefix, 0) != 0) {
             break;
         }
 
-        zb::rpc::ChunkMeta meta;
-        if (!MetaCodec::DecodeChunkMeta(it->value().ToString(), &meta)) {
+        zb::rpc::ObjectMeta object_meta;
+        if (!MetaCodec::DecodeObjectMeta(it->value().ToString(), &object_meta)) {
             if (error) {
-                *error = "invalid chunk meta while caching file";
+                *error = "invalid object meta while caching file";
             }
             return false;
         }
 
         bool has_target_disk = false;
-        for (const auto& replica : meta.replicas()) {
+        for (const auto& replica : object_meta.replicas()) {
             if (replica.storage_tier() == zb::rpc::STORAGE_TIER_DISK &&
                 replica.replica_state() == zb::rpc::REPLICA_READY &&
                 replica.node_id() == target_base.node_id() &&
@@ -2592,7 +3211,7 @@ bool MdsServiceImpl::CacheWholeFileToDisk(uint64_t inode_id, std::string* error)
         }
 
         const zb::rpc::ReplicaLocation* source = nullptr;
-        for (const auto& replica : meta.replicas()) {
+        for (const auto& replica : object_meta.replicas()) {
             if (replica.storage_tier() == zb::rpc::STORAGE_TIER_DISK &&
                 replica.replica_state() == zb::rpc::REPLICA_READY) {
                 source = &replica;
@@ -2600,7 +3219,7 @@ bool MdsServiceImpl::CacheWholeFileToDisk(uint64_t inode_id, std::string* error)
             }
         }
         if (!source) {
-            for (const auto& replica : meta.replicas()) {
+            for (const auto& replica : object_meta.replicas()) {
                 if (replica.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL &&
                     replica.replica_state() == zb::rpc::REPLICA_READY) {
                     source = &replica;
@@ -2615,32 +3234,32 @@ bool MdsServiceImpl::CacheWholeFileToDisk(uint64_t inode_id, std::string* error)
             return false;
         }
 
-        uint64_t read_size = source->size() > 0 ? source->size() : inode_chunk_size;
+        uint64_t read_size = source->size() > 0 ? source->size() : inode_object_unit_size;
         if (read_size == 0) {
-            read_size = default_chunk_size_;
+            read_size = default_object_unit_size_;
         }
 
         std::string data;
-        if (!ReadChunkFromReplica(*source, read_size, &data, &local_error)) {
+        if (!ReadObjectFromReplica(*source, read_size, &data, &local_error)) {
             if (error) {
-                *error = local_error.empty() ? "failed to read source chunk while caching file" : local_error;
+                *error = local_error.empty() ? "failed to read source object while caching file" : local_error;
             }
             return false;
         }
 
-        const std::string cached_chunk_id = GenerateChunkId();
-        if (!WriteChunkToReplica(target_base, cached_chunk_id, data, &local_error)) {
+        const std::string cached_object_id = GenerateObjectId();
+        if (!WriteObjectToReplica(target_base, cached_object_id, data, &local_error)) {
             if (error) {
-                *error = local_error.empty() ? "failed to write file cache chunk to disk node" : local_error;
+                *error = local_error.empty() ? "failed to write file cache object to disk node" : local_error;
             }
             return false;
         }
 
-        zb::rpc::ReplicaLocation* disk_replica = meta.add_replicas();
+        zb::rpc::ReplicaLocation* disk_replica = object_meta.add_replicas();
         disk_replica->set_node_id(target_base.node_id());
         disk_replica->set_node_address(target_base.node_address());
         disk_replica->set_disk_id(target_base.disk_id());
-        disk_replica->set_chunk_id(cached_chunk_id);
+        EnsureReplicaObjectId(disk_replica, cached_object_id);
         disk_replica->set_size(static_cast<uint64_t>(data.size()));
         disk_replica->set_group_id(target_base.group_id());
         disk_replica->set_epoch(target_base.epoch());
@@ -2652,8 +3271,14 @@ bool MdsServiceImpl::CacheWholeFileToDisk(uint64_t inode_id, std::string* error)
         disk_replica->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
         disk_replica->set_replica_state(zb::rpc::REPLICA_READY);
 
-        batch.Put(chunk_key, MetaCodec::EncodeChunkMeta(meta));
-        batch.Put(ReverseChunkKey(cached_chunk_id), chunk_key);
+        batch.Put(object_key, MetaCodec::EncodeObjectMeta(object_meta));
+        batch.Put(ReverseObjectKey(cached_object_id), object_key);
+        uint64_t parsed_inode_id = 0;
+        uint32_t parsed_object_index = 0;
+        if (ParseObjectKey(object_key, &parsed_inode_id, &parsed_object_index)) {
+            batch.Put(ObjectOwnerKey(cached_object_id),
+                      EncodeObjectOwnerValue(parsed_inode_id, parsed_object_index));
+        }
     }
 
     if (batch.Count() == 0) {
@@ -2668,26 +3293,26 @@ bool MdsServiceImpl::CacheWholeFileToDisk(uint64_t inode_id, std::string* error)
     return true;
 }
 
-bool MdsServiceImpl::EnsureChunkReadableFromDisk(const std::string& chunk_key,
-                                                 zb::rpc::ChunkMeta* chunk_meta,
-                                                 std::unordered_set<std::string>* recalled_images,
-                                                 bool* recalled_from_optical,
-                                                 std::string* error) {
+bool MdsServiceImpl::EnsureObjectReadableFromDisk(const std::string& object_key,
+                                                  zb::rpc::ObjectMeta* object_meta,
+                                                  std::unordered_set<std::string>* recalled_images,
+                                                  bool* recalled_from_optical,
+                                                  std::string* error) {
     if (recalled_from_optical) {
         *recalled_from_optical = false;
     }
-    if (!chunk_meta) {
+    if (!object_meta) {
         if (error) {
-            *error = "chunk meta pointer is null";
+            *error = "object meta pointer is null";
         }
         return false;
     }
-    if (HasReadyDiskReplica(*chunk_meta)) {
+    if (HasReadyDiskObjectReplica(*object_meta)) {
         return true;
     }
 
     zb::rpc::ReplicaLocation optical;
-    if (!FindReadyOpticalReplica(*chunk_meta, &optical)) {
+    if (!FindReadyOpticalObjectReplica(*object_meta, &optical)) {
         return true;
     }
 
@@ -2698,7 +3323,7 @@ bool MdsServiceImpl::EnsureChunkReadableFromDisk(const std::string& chunk_key,
 
     if (image_key.empty() || !recalled_images || recalled_images->find(image_key) == recalled_images->end()) {
         std::vector<RecallTask> tasks;
-        if (!CollectRecallTasksByImage(chunk_key, *chunk_meta, optical, &tasks, error)) {
+        if (!CollectRecallTasksByImage(object_key, *object_meta, optical, &tasks, error)) {
             return false;
         }
         if (!RecallTasksToDisk(tasks, error)) {
@@ -2714,19 +3339,19 @@ bool MdsServiceImpl::EnsureChunkReadableFromDisk(const std::string& chunk_key,
 
     std::string updated_data;
     std::string local_error;
-    if (!store_->Get(chunk_key, &updated_data, &local_error)) {
+    if (!store_->Get(object_key, &updated_data, &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "failed to reload chunk metadata after recall" : local_error;
+            *error = local_error.empty() ? "failed to reload object metadata after recall" : local_error;
         }
         return false;
     }
-    if (!MetaCodec::DecodeChunkMeta(updated_data, chunk_meta)) {
+    if (!MetaCodec::DecodeObjectMeta(updated_data, object_meta)) {
         if (error) {
-            *error = "invalid chunk metadata after recall";
+            *error = "invalid object metadata after recall";
         }
         return false;
     }
-    if (!HasReadyDiskReplica(*chunk_meta)) {
+    if (!HasReadyDiskObjectReplica(*object_meta)) {
         if (error) {
             *error = "optical recall completed but no disk replica available";
         }
@@ -2735,7 +3360,7 @@ bool MdsServiceImpl::EnsureChunkReadableFromDisk(const std::string& chunk_key,
     return true;
 }
 
-bool MdsServiceImpl::ReadChunkFromReplica(const zb::rpc::ReplicaLocation& source,
+bool MdsServiceImpl::ReadObjectFromReplica(const zb::rpc::ReplicaLocation& source,
                                           uint64_t read_size,
                                           std::string* data,
                                           std::string* error) {
@@ -2751,9 +3376,11 @@ bool MdsServiceImpl::ReadChunkFromReplica(const zb::rpc::ReplicaLocation& source
     }
 
     zb::rpc::RealNodeService_Stub stub(channel);
-    zb::rpc::ReadChunkRequest req;
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(5000);
+    zb::rpc::ReadObjectRequest req;
     req.set_disk_id(source.disk_id());
-    req.set_chunk_id(source.chunk_id());
+    req.set_object_id(ReplicaObjectId(source));
     req.set_offset(0);
     req.set_size(read_size);
     if (!source.image_id().empty()) {
@@ -2762,10 +3389,8 @@ bool MdsServiceImpl::ReadChunkFromReplica(const zb::rpc::ReplicaLocation& source
         req.set_image_length(source.image_length());
     }
 
-    zb::rpc::ReadChunkReply resp;
-    brpc::Controller cntl;
-    cntl.set_timeout_ms(5000);
-    stub.ReadChunk(&cntl, &req, &resp, nullptr);
+    zb::rpc::ReadObjectReply resp;
+    stub.ReadObject(&cntl, &req, &resp, nullptr);
     if (cntl.Failed()) {
         if (error) {
             *error = cntl.ErrorText();
@@ -2782,27 +3407,27 @@ bool MdsServiceImpl::ReadChunkFromReplica(const zb::rpc::ReplicaLocation& source
     return true;
 }
 
-bool MdsServiceImpl::WriteChunkToReplica(const zb::rpc::ReplicaLocation& target,
-                                         const std::string& chunk_id,
-                                         const std::string& data,
-                                         std::string* error) {
+bool MdsServiceImpl::WriteObjectToReplica(const zb::rpc::ReplicaLocation& target,
+                                          const std::string& object_id,
+                                          const std::string& data,
+                                          std::string* error) {
     brpc::Channel* channel = GetDataChannel(target.node_address(), error);
     if (!channel) {
         return false;
     }
 
     zb::rpc::RealNodeService_Stub stub(channel);
-    zb::rpc::WriteChunkRequest req;
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(5000);
+    zb::rpc::WriteObjectRequest req;
     req.set_disk_id(target.disk_id());
-    req.set_chunk_id(chunk_id);
+    req.set_object_id(object_id);
     req.set_offset(0);
     req.set_data(data);
     req.set_epoch(target.epoch());
 
-    zb::rpc::WriteChunkReply resp;
-    brpc::Controller cntl;
-    cntl.set_timeout_ms(5000);
-    stub.WriteChunk(&cntl, &req, &resp, nullptr);
+    zb::rpc::WriteObjectReply resp;
+    stub.WriteObject(&cntl, &req, &resp, nullptr);
     if (cntl.Failed()) {
         if (error) {
             *error = cntl.ErrorText();
@@ -2892,7 +3517,7 @@ uint64_t MdsServiceImpl::AllocateHandleId(std::string* error) {
     return allocated;
 }
 
-std::string MdsServiceImpl::GenerateChunkId() {
+std::string MdsServiceImpl::GenerateObjectId() {
     static thread_local std::mt19937_64 rng(std::random_device{}());
     static const char kHex[] = "0123456789abcdef";
     std::string out(32, '0');

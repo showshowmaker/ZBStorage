@@ -27,7 +27,7 @@
 
 DEFINE_string(mds, "127.0.0.1:9000", "MDS endpoint");
 DEFINE_uint32(default_replica, 1, "Default replica for create");
-DEFINE_uint64(default_chunk_size, 4194304, "Default chunk size for create");
+DEFINE_uint64(default_object_unit_size, 4194304, "Default object unit size for create");
 DEFINE_int32(timeout_ms, 3000, "RPC timeout in ms");
 DEFINE_int32(max_retry, 0, "RPC max retry");
 DEFINE_int32(repair_max_retry, 8, "Max retry count for asynchronous replica repair");
@@ -37,6 +37,22 @@ DEFINE_int32(repair_max_queue, 10000, "Max in-memory queue size for asynchronous
 namespace zb::client::fuse_client {
 
 namespace {
+
+std::atomic<uint64_t> g_layout_plan_source_layout{0};
+std::atomic<uint64_t> g_layout_plan_source_optical{0};
+
+void RecordPlanSource(zb::rpc::ReadPlanSource source) {
+    switch (source) {
+        case zb::rpc::READ_PLAN_SOURCE_LAYOUT:
+            g_layout_plan_source_layout.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case zb::rpc::READ_PLAN_SOURCE_OPTICAL:
+            g_layout_plan_source_optical.fetch_add(1, std::memory_order_relaxed);
+            break;
+        default:
+            break;
+    }
+}
 
 int StatusToErrno(const zb::rpc::MdsStatus& status) {
     switch (status.code()) {
@@ -57,6 +73,29 @@ int StatusToErrno(const zb::rpc::MdsStatus& status) {
     }
 }
 
+std::string BuildWriteOpId(uint64_t inode_id, uint64_t offset, uint64_t size, const char* tag) {
+    static std::atomic<uint64_t> seq{0};
+    const uint64_t now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    const uint64_t id = seq.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::string op_id = "op";
+    op_id.append("-");
+    op_id.append(tag ? tag : "write");
+    op_id.append("-");
+    op_id.append(std::to_string(inode_id));
+    op_id.append("-");
+    op_id.append(std::to_string(offset));
+    op_id.append("-");
+    op_id.append(std::to_string(size));
+    op_id.append("-");
+    op_id.append(std::to_string(now_ms));
+    op_id.append("-");
+    op_id.append(std::to_string(id));
+    return op_id;
+}
+
 void FillStat(const zb::rpc::InodeAttr& attr, struct stat* st) {
     std::memset(st, 0, sizeof(*st));
     st->st_ino = static_cast<ino_t>(attr.inode_id());
@@ -73,6 +112,10 @@ void FillStat(const zb::rpc::InodeAttr& attr, struct stat* st) {
     st->st_atim.tv_sec = static_cast<time_t>(attr.atime());
     st->st_mtim.tv_sec = static_cast<time_t>(attr.mtime());
     st->st_ctim.tv_sec = static_cast<time_t>(attr.ctime());
+}
+
+std::string ReplicaObjectId(const zb::rpc::ReplicaLocation& replica) {
+    return replica.object_id();
 }
 
 class MdsClient {
@@ -191,7 +234,7 @@ public:
         request.set_uid(uid);
         request.set_gid(gid);
         request.set_replica(FLAGS_default_replica);
-        request.set_chunk_size(FLAGS_default_chunk_size);
+        request.set_object_unit_size(FLAGS_default_object_unit_size);
         zb::rpc::CreateReply reply;
         brpc::Controller cntl;
         stub_.Create(&cntl, &request, &reply, nullptr);
@@ -359,6 +402,7 @@ public:
                    uint64_t size,
                    zb::rpc::FileLayout* layout,
                    zb::rpc::OpticalReadPlan* optical_plan,
+                   zb::rpc::ReadPlanSource* plan_source,
                    zb::rpc::MdsStatus* status) {
         zb::rpc::GetLayoutRequest request;
         request.set_inode_id(inode_id);
@@ -386,12 +430,14 @@ public:
         if (optical_plan) {
             *optical_plan = reply.optical_plan();
         }
+        if (plan_source) {
+            *plan_source = reply.plan_source();
+        }
         return true;
     }
 
     bool GetLayoutRoot(uint64_t inode_id,
                        zb::rpc::LayoutRoot* root,
-                       bool* from_legacy,
                        zb::rpc::MdsStatus* status) {
         zb::rpc::GetLayoutRootRequest request;
         request.set_inode_id(inode_id);
@@ -410,9 +456,6 @@ public:
         }
         if (root) {
             *root = reply.root();
-        }
-        if (from_legacy) {
-            *from_legacy = reply.from_legacy();
         }
         if (reply.root().inode_id() != 0) {
             UpdateCachedEpoch(reply.root().inode_id(), reply.root().epoch());
@@ -460,8 +503,7 @@ public:
             InvalidateCachedEpoch(inode_id);
             zb::rpc::LayoutRoot refreshed_root;
             zb::rpc::MdsStatus refresh_status;
-            bool from_legacy = false;
-            if (GetLayoutRoot(inode_id, &refreshed_root, &from_legacy, &refresh_status)) {
+            if (GetLayoutRoot(inode_id, &refreshed_root, &refresh_status)) {
                 zb::rpc::ResolveLayoutReply retry_reply;
                 brpc::Controller retry_cntl;
                 stub_.ResolveLayout(&retry_cntl, &request, &retry_reply, nullptr);
@@ -490,6 +532,7 @@ public:
     bool CommitLayoutRoot(uint64_t inode_id,
                           uint64_t expected_layout_version,
                           uint64_t new_size,
+                          const std::string& op_id,
                           const zb::rpc::LayoutRoot* base_root,
                           zb::rpc::LayoutRoot* committed_root,
                           zb::rpc::MdsStatus* status) {
@@ -498,6 +541,7 @@ public:
         request.set_expected_layout_version(expected_layout_version);
         request.set_update_inode_size(true);
         request.set_new_size(new_size);
+        request.set_op_id(op_id);
 
         zb::rpc::LayoutRoot* root = request.mutable_root();
         root->set_inode_id(inode_id);
@@ -641,15 +685,15 @@ public:
                 continue;
             }
             zb::rpc::RealNodeService_Stub stub(channel);
-            zb::rpc::WriteChunkRequest request;
+            zb::rpc::WriteObjectRequest request;
             request.set_disk_id(replica.disk_id());
-            request.set_chunk_id(replica.chunk_id());
+            request.set_object_id(ReplicaObjectId(replica));
             request.set_offset(offset);
             request.set_data(data);
             request.set_epoch(replica.epoch());
-            zb::rpc::WriteChunkReply reply;
+            zb::rpc::WriteObjectReply reply;
             brpc::Controller cntl;
-            stub.WriteChunk(&cntl, &request, &reply, nullptr);
+            stub.WriteObject(&cntl, &request, &reply, nullptr);
             if (cntl.Failed()) {
                 last_error = cntl.ErrorText();
                 continue;
@@ -694,14 +738,14 @@ public:
                 continue;
             }
             zb::rpc::RealNodeService_Stub stub(channel);
-            zb::rpc::ReadChunkRequest request;
+            zb::rpc::ReadObjectRequest request;
             request.set_disk_id(replica.disk_id());
-            request.set_chunk_id(replica.chunk_id());
+            request.set_object_id(ReplicaObjectId(replica));
             request.set_offset(offset);
             request.set_size(size);
-            zb::rpc::ReadChunkReply reply;
+            zb::rpc::ReadObjectReply reply;
             brpc::Controller cntl;
-            stub.ReadChunk(&cntl, &request, &reply, nullptr);
+            stub.ReadObject(&cntl, &request, &reply, nullptr);
             if (cntl.Failed()) {
                 last_error = cntl.ErrorText();
                 continue;
@@ -826,19 +870,6 @@ FuseState* GetState() {
     return static_cast<FuseState*>(fuse_get_context()->private_data);
 }
 
-bool IsLegacyFallbackStatus(const zb::rpc::MdsStatus& status) {
-    if (status.code() != zb::rpc::MDS_INTERNAL_ERROR) {
-        return false;
-    }
-    std::string lower = status.message();
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return lower.find("method") != std::string::npos &&
-           lower.find("not") != std::string::npos &&
-           lower.find("found") != std::string::npos;
-}
-
 void InvalidateLayoutCache(FuseState* state, uint64_t inode_id) {
     if (!state || inode_id == 0) {
         return;
@@ -883,8 +914,8 @@ bool TryGetLayoutCache(FuseState* state,
         *out_layout = entry.layout;
         return true;
     }
-    uint64_t chunk_size = entry.layout.chunk_size();
-    if (chunk_size == 0) {
+    uint64_t object_unit_size = entry.layout.object_unit_size();
+    if (object_unit_size == 0) {
         return false;
     }
     uint64_t end = std::min(entry.file_size, offset + requested_size);
@@ -893,12 +924,12 @@ bool TryGetLayoutCache(FuseState* state,
         *out_layout = entry.layout;
         return true;
     }
-    uint32_t start_idx = static_cast<uint32_t>(offset / chunk_size);
-    uint32_t end_idx = static_cast<uint32_t>((end - 1) / chunk_size);
+    uint32_t start_idx = static_cast<uint32_t>(offset / object_unit_size);
+    uint32_t end_idx = static_cast<uint32_t>((end - 1) / object_unit_size);
     for (uint32_t idx = start_idx; idx <= end_idx; ++idx) {
         bool found = false;
-        for (const auto& chunk : entry.layout.chunks()) {
-            if (chunk.index() == idx) {
+        for (const auto& object : entry.layout.objects()) {
+            if (object.index() == idx) {
                 found = true;
                 break;
             }
@@ -913,7 +944,7 @@ bool TryGetLayoutCache(FuseState* state,
 }
 
 std::string BuildRepairKey(const zb::rpc::ReplicaLocation& replica, uint64_t offset, size_t size) {
-    return replica.disk_id() + "|" + replica.chunk_id() + "|" + std::to_string(offset) + "|" + std::to_string(size);
+    return replica.disk_id() + "|" + ReplicaObjectId(replica) + "|" + std::to_string(offset) + "|" + std::to_string(size);
 }
 
 uint64_t BumpRepairGeneration(FuseState* state, const std::string& key) {
@@ -1198,27 +1229,13 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
         }
 
         zb::rpc::ResolveLayoutReply resolved;
-        if (state->mds.ResolveLayout(inode_id, 0, file_size, &resolved, &status)) {
-            layout = resolved.read_plan();
-            optical_plan = resolved.optical_plan();
-            UpdateLayoutCache(state, inode_id, resolved.root(), layout);
-        } else {
-            if (!state->mds.GetLayout(inode_id,
-                                      request_offset,
-                                      static_cast<uint64_t>(size),
-                                      &layout,
-                                      &optical_plan,
-                                      &status)) {
-                return -StatusToErrno(status);
-            }
-            if (layout.chunk_size() > 0) {
-                zb::rpc::LayoutRoot pseudo_root;
-                pseudo_root.set_inode_id(inode_id);
-                pseudo_root.set_layout_version(attr.version());
-                pseudo_root.set_file_size(file_size);
-                UpdateLayoutCache(state, inode_id, pseudo_root, layout);
-            }
+        if (!state->mds.ResolveLayout(inode_id, 0, file_size, &resolved, &status)) {
+            return -StatusToErrno(status);
         }
+        layout = resolved.read_plan();
+        optical_plan = resolved.optical_plan();
+        RecordPlanSource(resolved.plan_source());
+        UpdateLayoutCache(state, inode_id, resolved.root(), layout);
     }
 
     if (request_offset >= file_size) {
@@ -1242,30 +1259,30 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
     }
 
     std::string output(read_size, '\0');
-    uint64_t chunk_size = layout.chunk_size();
-    if (chunk_size == 0) {
+    uint64_t object_unit_size = layout.object_unit_size();
+    if (object_unit_size == 0) {
         return -EIO;
     }
-    for (const auto& chunk : layout.chunks()) {
-        uint64_t chunk_start = static_cast<uint64_t>(chunk.index()) * chunk_size;
-        uint64_t chunk_end = chunk_start + chunk_size;
-        uint64_t read_start = std::max<uint64_t>(chunk_start, request_offset);
-        uint64_t read_end = std::min<uint64_t>(chunk_end, request_offset + read_size);
+    for (const auto& object : layout.objects()) {
+        uint64_t object_start = static_cast<uint64_t>(object.index()) * object_unit_size;
+        uint64_t object_end = object_start + object_unit_size;
+        uint64_t read_start = std::max<uint64_t>(object_start, request_offset);
+        uint64_t read_end = std::min<uint64_t>(object_end, request_offset + read_size);
         if (read_end <= read_start) {
             continue;
         }
-        uint64_t chunk_off = read_start - chunk_start;
+        uint64_t object_off = read_start - object_start;
         uint64_t read_len = read_end - read_start;
 
         bool read_ok = false;
         std::string data;
         std::string error;
-        for (const auto& replica : chunk.replicas()) {
+        for (const auto& replica : object.replicas()) {
             if (replica.storage_tier() != zb::rpc::STORAGE_TIER_DISK ||
                 replica.replica_state() != zb::rpc::REPLICA_READY) {
                 continue;
             }
-            if (state->data_nodes.Read(replica, chunk_off, read_len, &data, &error)) {
+            if (state->data_nodes.Read(replica, object_off, read_len, &data, &error)) {
                 read_ok = true;
                 break;
             }
@@ -1292,44 +1309,41 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
     }
 
     zb::rpc::LayoutRoot base_root;
-    bool from_legacy_layout = false;
-    if (!state->mds.GetLayoutRoot(inode_id, &base_root, &from_legacy_layout, &status)) {
+    if (!state->mds.GetLayoutRoot(inode_id, &base_root, &status)) {
         base_root.Clear();
         base_root.set_inode_id(inode_id);
-        from_legacy_layout = true;
     }
-    (void)from_legacy_layout;
 
     zb::rpc::FileLayout layout;
     if (!state->mds.AllocateWrite(inode_id, static_cast<uint64_t>(offset), static_cast<uint64_t>(size), &layout, &status)) {
         return -StatusToErrno(status);
     }
 
-    uint64_t chunk_size = layout.chunk_size();
+    uint64_t object_unit_size = layout.object_unit_size();
     size_t remaining = size;
 
-    for (const auto& chunk : layout.chunks()) {
-        uint64_t chunk_start = static_cast<uint64_t>(chunk.index()) * chunk_size;
-        uint64_t chunk_end = chunk_start + chunk_size;
-        uint64_t write_start = std::max<uint64_t>(chunk_start, static_cast<uint64_t>(offset));
-        uint64_t write_end = std::min<uint64_t>(chunk_end, static_cast<uint64_t>(offset + size));
+    for (const auto& object : layout.objects()) {
+        uint64_t object_start = static_cast<uint64_t>(object.index()) * object_unit_size;
+        uint64_t object_end = object_start + object_unit_size;
+        uint64_t write_start = std::max<uint64_t>(object_start, static_cast<uint64_t>(offset));
+        uint64_t write_end = std::min<uint64_t>(object_end, static_cast<uint64_t>(offset + size));
         if (write_end <= write_start) {
             continue;
         }
-        uint64_t chunk_off = write_start - chunk_start;
+        uint64_t object_off = write_start - object_start;
         uint64_t write_len = write_end - write_start;
         std::string data(buf + (write_start - offset), buf + (write_start - offset + write_len));
 
         bool wrote_disk_replica = false;
         std::vector<zb::rpc::ReplicaLocation> failed_replicas;
-        for (const auto& replica : chunk.replicas()) {
+        for (const auto& replica : object.replicas()) {
             if (replica.storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
                 continue;
             }
-            const std::string repair_key = BuildRepairKey(replica, chunk_off, data.size());
+            const std::string repair_key = BuildRepairKey(replica, object_off, data.size());
             (void)BumpRepairGeneration(state, repair_key);
             std::string error;
-            if (!state->data_nodes.Write(replica, chunk_off, data, &error)) {
+            if (!state->data_nodes.Write(replica, object_off, data, &error)) {
                 failed_replicas.push_back(replica);
                 continue;
             }
@@ -1340,7 +1354,7 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
         }
         if (!failed_replicas.empty()) {
             for (const auto& failed_replica : failed_replicas) {
-                EnqueueReplicaRepair(state, failed_replica, chunk_off, data);
+                EnqueueReplicaRepair(state, failed_replica, object_off, data);
             }
             return -EIO;
         }
@@ -1351,16 +1365,18 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
     uint64_t new_size = static_cast<uint64_t>(offset + size);
     zb::rpc::LayoutRoot committed_root;
     const uint64_t expected_layout_version = base_root.layout_version();
+    const std::string write_op_id = BuildWriteOpId(inode_id,
+                                                   static_cast<uint64_t>(offset),
+                                                   static_cast<uint64_t>(size),
+                                                   "write");
     if (!state->mds.CommitLayoutRoot(inode_id,
                                      expected_layout_version,
                                      new_size,
+                                     write_op_id,
                                      &base_root,
                                      &committed_root,
                                      &status)) {
-        const bool allow_legacy_commit = IsLegacyFallbackStatus(status);
-        if (!allow_legacy_commit || !state->mds.CommitWrite(inode_id, new_size, &status)) {
-            return -StatusToErrno(status);
-        }
+        return -StatusToErrno(status);
     }
 
     InvalidateLayoutCache(state, inode_id);
@@ -1375,13 +1391,14 @@ int FuseTruncate(const char* path, off_t size, struct fuse_file_info* fi) {
         return -StatusToErrno(status);
     }
     zb::rpc::LayoutRoot base_root;
-    bool from_legacy = false;
-    if (state->mds.GetLayoutRoot(inode_id, &base_root, &from_legacy, &status)) {
-        (void)from_legacy;
+    if (state->mds.GetLayoutRoot(inode_id, &base_root, &status)) {
         zb::rpc::LayoutRoot committed;
+        const std::string truncate_op_id =
+            BuildWriteOpId(inode_id, 0, static_cast<uint64_t>(size), "truncate");
         if (state->mds.CommitLayoutRoot(inode_id,
                                         base_root.layout_version(),
                                         static_cast<uint64_t>(size),
+                                        truncate_op_id,
                                         &base_root,
                                         &committed,
                                         &status)) {
@@ -1389,12 +1406,7 @@ int FuseTruncate(const char* path, off_t size, struct fuse_file_info* fi) {
             return 0;
         }
     }
-    if (!IsLegacyFallbackStatus(status) ||
-        !state->mds.CommitWrite(inode_id, static_cast<uint64_t>(size), &status)) {
-        return -StatusToErrno(status);
-    }
-    InvalidateLayoutCache(state, inode_id);
-    return 0;
+    return -StatusToErrno(status);
 }
 
 } // namespace

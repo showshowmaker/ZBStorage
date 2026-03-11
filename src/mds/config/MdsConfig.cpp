@@ -232,21 +232,12 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
             cfg.scheduler_address = value;
         } else if (key == "SCHEDULER_REFRESH_MS") {
             cfg.scheduler_refresh_ms = static_cast<uint32_t>(std::stoul(value));
-        } else if (key == "ENABLE_PG_LAYOUT") {
-            if (!ParseBool(value, &cfg.enable_pg_layout)) {
-                if (error) {
-                    *error = "Invalid ENABLE_PG_LAYOUT value: " + value;
-                }
-                return {};
-            }
         } else if (key == "PG_VIEW_EPOCH") {
             cfg.pg_view_epoch = static_cast<uint64_t>(std::stoull(value));
         } else if (key == "PG_COUNT") {
             cfg.pg_count = static_cast<uint32_t>(std::stoul(value));
-        } else if (key == "LAYOUT_MODE") {
-            cfg.layout_mode = ToLower(value);
-        } else if (key == "CHUNK_SIZE") {
-            cfg.chunk_size = static_cast<uint64_t>(std::stoull(value));
+        } else if (key == "OBJECT_UNIT_SIZE") {
+            cfg.object_unit_size = static_cast<uint64_t>(std::stoull(value));
         } else if (key == "REPLICA") {
             cfg.replica = static_cast<uint32_t>(std::stoul(value));
         } else if (key == "ENABLE_OPTICAL_ARCHIVE") {
@@ -264,8 +255,8 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
             cfg.cold_file_ttl_sec = static_cast<uint64_t>(std::stoull(value));
         } else if (key == "ARCHIVE_SCAN_INTERVAL_MS") {
             cfg.archive_scan_interval_ms = static_cast<uint32_t>(std::stoul(value));
-        } else if (key == "ARCHIVE_MAX_CHUNKS_PER_ROUND") {
-            cfg.archive_max_chunks_per_round = static_cast<uint32_t>(std::stoul(value));
+        } else if (key == "ARCHIVE_MAX_OBJECTS_PER_ROUND") {
+            cfg.archive_max_objects_per_round = static_cast<uint32_t>(std::stoul(value));
         } else if (key == "ARCHIVE_CANDIDATE_QUEUE_SIZE") {
             cfg.archive_candidate_queue_size = static_cast<uint32_t>(std::stoul(value));
         } else if (key == "ARCHIVE_LEASE_DEFAULT_MS") {
@@ -300,12 +291,33 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
             cfg.layout_gc_orphan_grace_ms = static_cast<uint64_t>(std::stoull(value));
         } else if (key == "LAYOUT_GC_MAX_DELETE_PER_ROUND") {
             cfg.layout_gc_max_delete_per_round = static_cast<uint32_t>(std::stoul(value));
+        } else if (key == "LAYOUT_GC_DRY_RUN") {
+            if (!ParseBool(value, &cfg.layout_gc_dry_run)) {
+                if (error) {
+                    *error = "Invalid LAYOUT_GC_DRY_RUN value: " + value;
+                }
+                return {};
+            }
+        } else if (key == "LAYOUT_GC_PAUSED") {
+            if (!ParseBool(value, &cfg.layout_gc_paused)) {
+                if (error) {
+                    *error = "Invalid LAYOUT_GC_PAUSED value: " + value;
+                }
+                return {};
+            }
         } else if (key == "LAYOUT_OBJECT_REPLICA_COUNT") {
             cfg.layout_object_replica_count = static_cast<uint32_t>(std::stoul(value));
         } else if (key == "LAYOUT_OBJECT_SCRUB_ON_LOAD") {
             if (!ParseBool(value, &cfg.layout_object_scrub_on_load)) {
                 if (error) {
                     *error = "Invalid LAYOUT_OBJECT_SCRUB_ON_LOAD value: " + value;
+                }
+                return {};
+            }
+        } else if (key == "ENABLE_SIMPLIFIED_ANCHOR_METADATA") {
+            if (!ParseBool(value, &cfg.enable_simplified_anchor_metadata)) {
+                if (error) {
+                    *error = "Invalid ENABLE_SIMPLIFIED_ANCHOR_METADATA value: " + value;
                 }
                 return {};
             }
@@ -361,8 +373,8 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
     if (cfg.archive_target_bytes > cfg.archive_trigger_bytes) {
         cfg.archive_target_bytes = cfg.archive_trigger_bytes;
     }
-    if (cfg.archive_max_chunks_per_round == 0) {
-        cfg.archive_max_chunks_per_round = 1;
+    if (cfg.archive_max_objects_per_round == 0) {
+        cfg.archive_max_objects_per_round = 1;
     }
     if (cfg.archive_candidate_queue_size == 0) {
         cfg.archive_candidate_queue_size = 1;
@@ -387,9 +399,6 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
     }
     if (cfg.pg_view_epoch == 0) {
         cfg.pg_view_epoch = 1;
-    }
-    if (cfg.layout_mode.empty()) {
-        cfg.layout_mode = "legacy";
     }
     if (cfg.layout_gc_interval_ms == 0) {
         cfg.layout_gc_interval_ms = 1000;

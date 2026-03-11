@@ -19,27 +19,27 @@ message Status {
   string message = 2;
 }
 
-message WriteChunkRequest {
+message WriteObjectRequest {
   string disk_id = 1;
-  string chunk_id = 2;
+  string object_id = 2;
   uint64 offset = 3;
   bytes data = 4;
-  bool is_replication = 5;
-  uint64 epoch = 6;
-  string archive_op_id = 7;
-  uint64 inode_id = 8;
-  string file_id = 9;
-  string file_path = 10;
-  uint64 file_size = 11;
-  uint64 file_offset = 12;
-  uint32 file_mode = 13;
-  uint32 file_uid = 14;
-  uint32 file_gid = 15;
-  uint64 file_mtime = 16;
-  uint32 file_chunk_index = 17;
+  uint64 epoch = 5;
+  string archive_op_id = 6;
+  uint64 inode_id = 7;
+  string file_id = 8;
+  string file_path = 9;
+  uint64 file_size = 10;
+  uint64 file_offset = 11;
+  uint32 file_mode = 12;
+  uint32 file_uid = 13;
+  uint32 file_gid = 14;
+  uint64 file_mtime = 15;
+  uint32 file_object_index = 16;
+  bool is_replication = 17;
 }
 
-message WriteChunkReply {
+message WriteObjectReply {
   Status status = 1;
   uint64 bytes = 2;
   string image_id = 3;
@@ -47,9 +47,9 @@ message WriteChunkReply {
   uint64 image_length = 5;
 }
 
-message ReadChunkRequest {
+message ReadObjectRequest {
   string disk_id = 1;
-  string chunk_id = 2;
+  string object_id = 2;
   uint64 offset = 3;
   uint64 size = 4;
   string image_id = 5;
@@ -57,7 +57,7 @@ message ReadChunkRequest {
   uint64 image_length = 7;
 }
 
-message ReadChunkReply {
+message ReadObjectReply {
   Status status = 1;
   uint64 bytes = 2;
   bytes data = 3;
@@ -77,20 +77,21 @@ message ReadArchivedFileReply {
   bytes data = 3;
 }
 
-message DeleteChunkRequest {
+message DeleteObjectRequest {
   string disk_id = 1;
-  string chunk_id = 2;
+  string object_id = 2;
 }
 
-message DeleteChunkReply {
+message DeleteObjectReply {
   Status status = 1;
 }
 
 message UpdateArchiveStateRequest {
   string disk_id = 1;
-  string chunk_id = 2;
+  reserved 2;
   string archive_state = 3;
   uint64 version = 4;
+  string object_id = 5;
 }
 
 message UpdateArchiveStateReply {
@@ -111,10 +112,10 @@ message DiskReportReply {
 }
 
 service RealNodeService {
-  rpc WriteChunk(WriteChunkRequest) returns (WriteChunkReply);
-  rpc ReadChunk(ReadChunkRequest) returns (ReadChunkReply);
+  rpc WriteObject(WriteObjectRequest) returns (WriteObjectReply);
+  rpc ReadObject(ReadObjectRequest) returns (ReadObjectReply);
+  rpc DeleteObject(DeleteObjectRequest) returns (DeleteObjectReply);
   rpc ReadArchivedFile(ReadArchivedFileRequest) returns (ReadArchivedFileReply);
-  rpc DeleteChunk(DeleteChunkRequest) returns (DeleteChunkReply);
   rpc UpdateArchiveState(UpdateArchiveStateRequest) returns (UpdateArchiveStateReply);
   rpc GetDiskReport(google.protobuf.Empty) returns (DiskReportReply);
 }

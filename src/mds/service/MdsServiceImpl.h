@@ -2,6 +2,7 @@
 
 #include <brpc/channel.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -9,7 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "../allocator/ChunkAllocator.h"
+#include "../allocator/ObjectAllocator.h"
 #include "../archive/ArchiveCandidateQueue.h"
 #include "../archive/ArchiveLeaseManager.h"
 #include "../storage/RocksMetaStore.h"
@@ -27,12 +28,13 @@ public:
     };
 
     MdsServiceImpl(RocksMetaStore* store,
-                   ChunkAllocator* allocator,
-                   uint64_t default_chunk_size,
+                   ObjectAllocator* allocator,
+                   uint64_t default_object_unit_size,
                    ArchiveCandidateQueue* candidate_queue = nullptr,
                    ArchiveLeaseManager* lease_manager = nullptr);
 
     void SetLayoutObjectOptions(LayoutObjectOptions options);
+    void SetSimplifiedAnchorMetadataMode(bool enabled);
 
     void Lookup(google::protobuf::RpcController* cntl_base,
                 const zb::rpc::LookupRequest* request,
@@ -134,15 +136,16 @@ public:
 
 private:
     struct RecallTask {
-        std::string chunk_key;
+        std::string object_key;
         zb::rpc::ReplicaLocation optical_replica;
     };
     struct PendingWriteTransaction {
         uint64_t inode_id{0};
+        std::string op_id;
         uint64_t base_layout_version{0};
         uint64_t pending_layout_version{0};
         uint64_t create_ts_ms{0};
-        std::unordered_map<uint32_t, zb::rpc::ChunkMeta> chunk_updates;
+        LayoutNodeRecord pending_layout_node;
     };
 
     bool EnsureRoot(std::string* error);
@@ -156,20 +159,25 @@ private:
     bool DeleteInodeData(uint64_t inode_id, std::string* error);
     bool LoadLayoutRoot(uint64_t inode_id,
                         LayoutRootRecord* root,
-                        bool* from_legacy,
                         std::string* error);
     bool StoreLayoutRootAtomic(uint64_t inode_id,
                                const LayoutRootRecord& root,
                                uint64_t expected_layout_version,
                                bool update_inode_size,
                                uint64_t new_size,
+                               const std::string* commit_op_id,
+                               const LayoutNodeRecord* layout_node_override,
                                LayoutRootRecord* committed,
                                std::string* error);
-    bool BuildLayoutNodeFromChunks(uint64_t inode_id,
-                                   const std::string& layout_obj_id,
-                                   uint64_t object_version,
-                                   LayoutNodeRecord* node,
-                                   std::string* error);
+    bool LoadCommittedLayoutRootByOpId(uint64_t inode_id,
+                                       const std::string& op_id,
+                                       LayoutRootRecord* committed,
+                                       std::string* error);
+    bool BuildLayoutNodeFromObjects(uint64_t inode_id,
+                                    const std::string& layout_obj_id,
+                                    uint64_t object_version,
+                                    LayoutNodeRecord* node,
+                                    std::string* error);
     bool LoadHealthyLayoutNode(uint64_t inode_id,
                                const std::string& layout_obj_id,
                                uint64_t object_version,
@@ -188,6 +196,16 @@ private:
                        uint64_t size,
                        zb::rpc::FileLayout* layout,
                        std::string* error);
+    bool BuildReadPlanFromLayout(uint64_t inode_id,
+                                 uint64_t offset,
+                                 uint64_t size,
+                                 zb::rpc::FileLayout* layout,
+                                 std::string* error);
+    bool BuildReadPlanWithPolicy(uint64_t inode_id,
+                                 uint64_t offset,
+                                 uint64_t size,
+                                 zb::rpc::FileLayout* layout,
+                                 std::string* error);
     bool BuildOpticalReadPlan(uint64_t inode_id,
                               uint64_t offset,
                               uint64_t size,
@@ -200,50 +218,73 @@ private:
                         uint64_t object_version,
                         std::vector<LayoutExtentRecord>* extents,
                         std::string* error);
-    bool SelectReadableDiskReplica(const zb::rpc::ChunkMeta& chunk_meta, zb::rpc::ReplicaLocation* source) const;
-    bool SeedChunkForCowWrite(const zb::rpc::ChunkMeta& old_meta,
-                              const std::vector<zb::rpc::ReplicaLocation>& new_replicas,
-                              uint64_t chunk_size,
-                              std::string* error);
+    bool SelectReadableDiskObjectReplica(const zb::rpc::ObjectMeta& object_meta,
+                                         zb::rpc::ReplicaLocation* source) const;
+    bool ResolveObjectReplicas(uint32_t replica_count,
+                               const std::string& object_id,
+                               uint64_t placement_epoch,
+                               std::vector<zb::rpc::ReplicaLocation>* replicas,
+                               std::string* error) const;
+    bool SelectFileAnchor(uint64_t inode_id,
+                          const zb::rpc::InodeAttr& attr,
+                          zb::rpc::ReplicaLocation* anchor,
+                          std::string* error) const;
+    bool LoadFileAnchor(uint64_t inode_id, zb::rpc::ReplicaLocation* anchor, std::string* error) const;
+    bool SaveFileAnchor(uint64_t inode_id, const zb::rpc::ReplicaLocation& anchor, rocksdb::WriteBatch* batch) const;
+    bool BuildReadPlanFromAnchor(uint64_t inode_id,
+                                 uint64_t offset,
+                                 uint64_t size,
+                                 zb::rpc::FileLayout* layout,
+                                 std::string* error);
+    static std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index);
+    static void FillAnchorReplica(zb::rpc::ReplicaLocation* replica,
+                                  const zb::rpc::ReplicaLocation& anchor,
+                                  const std::string& object_id);
+    bool SeedObjectForCowWrite(const LayoutExtentRecord& old_extent,
+                               const std::vector<zb::rpc::ReplicaLocation>& new_replicas,
+                               uint64_t object_size,
+                               std::string* error);
     bool ConsumePendingWriteForCommit(uint64_t inode_id,
+                                      const std::string& op_id,
                                       uint64_t expected_base_layout_version,
                                       uint64_t new_file_size,
                                       LayoutRootRecord* committed_root,
                                       std::string* error);
-    bool HasReadyDiskReplica(const zb::rpc::ChunkMeta& chunk_meta) const;
-    bool FindReadyOpticalReplica(const zb::rpc::ChunkMeta& chunk_meta, zb::rpc::ReplicaLocation* optical) const;
-    bool CollectRecallTasksByImage(const std::string& seed_chunk_key,
-                                   const zb::rpc::ChunkMeta& seed_meta,
+    bool HasReadyDiskObjectReplica(const zb::rpc::ObjectMeta& object_meta) const;
+    bool FindReadyOpticalObjectReplica(const zb::rpc::ObjectMeta& object_meta,
+                                       zb::rpc::ReplicaLocation* optical) const;
+    bool CollectRecallTasksByImage(const std::string& seed_object_key,
+                                   const zb::rpc::ObjectMeta& seed_meta,
                                    const zb::rpc::ReplicaLocation& optical_seed,
                                    std::vector<RecallTask>* tasks,
                                    std::string* error);
     bool RecallTasksToDisk(const std::vector<RecallTask>& tasks, std::string* error);
     bool CacheWholeFileToDisk(uint64_t inode_id, std::string* error);
-    bool EnsureChunkReadableFromDisk(const std::string& chunk_key,
-                                     zb::rpc::ChunkMeta* chunk_meta,
-                                     std::unordered_set<std::string>* recalled_images,
-                                     bool* recalled_from_optical,
-                                     std::string* error);
-    bool ReadChunkFromReplica(const zb::rpc::ReplicaLocation& source,
-                              uint64_t read_size,
-                              std::string* data,
+    bool EnsureObjectReadableFromDisk(const std::string& object_key,
+                                      zb::rpc::ObjectMeta* object_meta,
+                                      std::unordered_set<std::string>* recalled_images,
+                                      bool* recalled_from_optical,
+                                      std::string* error);
+    bool ReadObjectFromReplica(const zb::rpc::ReplicaLocation& source,
+                               uint64_t read_size,
+                               std::string* data,
+                               std::string* error);
+    bool WriteObjectToReplica(const zb::rpc::ReplicaLocation& target,
+                              const std::string& object_id,
+                              const std::string& data,
                               std::string* error);
-    bool WriteChunkToReplica(const zb::rpc::ReplicaLocation& target,
-                             const std::string& chunk_id,
-                             const std::string& data,
-                             std::string* error);
     brpc::Channel* GetDataChannel(const std::string& address, std::string* error);
 
     uint64_t AllocateInodeId(std::string* error);
     uint64_t AllocateHandleId(std::string* error);
-    static std::string GenerateChunkId();
+    static std::string GenerateObjectId();
     static uint64_t NowSeconds();
     static uint64_t NowMilliseconds();
     static void FillStatus(zb::rpc::MdsStatus* status, zb::rpc::MdsStatusCode code, const std::string& message);
 
     RocksMetaStore* store_{};
-    ChunkAllocator* allocator_{};
-    uint64_t default_chunk_size_{0};
+    ObjectAllocator* allocator_{};
+    uint64_t default_object_unit_size_{0};
     ArchiveCandidateQueue* candidate_queue_{};
     ArchiveLeaseManager* lease_manager_{};
     mutable std::mutex channel_mu_;
@@ -252,6 +293,11 @@ private:
     std::unordered_map<uint64_t, PendingWriteTransaction> pending_writes_;
     mutable std::mutex layout_object_mu_;
     LayoutObjectOptions layout_object_options_;
+    bool simplified_anchor_metadata_mode_{true};
+    std::atomic<uint64_t> layout_read_hit_total_{0};
+    std::atomic<uint64_t> layout_commit_conflict_total_{0};
+    std::atomic<uint64_t> layout_commit_retry_total_{0};
+    std::atomic<uint64_t> pg_resolve_fail_total_{0};
 };
 
 } // namespace zb::mds

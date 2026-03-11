@@ -24,8 +24,8 @@ public:
         uint64_t archive_trigger_bytes{10ULL * 1024ULL * 1024ULL * 1024ULL};
         uint64_t archive_target_bytes{8ULL * 1024ULL * 1024ULL * 1024ULL};
         uint64_t cold_file_ttl_sec{3600};
-        uint32_t max_chunks_per_round{64};
-        uint64_t default_chunk_size{4ULL * 1024ULL * 1024ULL};
+        uint32_t max_objects_per_round{64};
+        uint64_t default_object_unit_size{4ULL * 1024ULL * 1024ULL};
     };
 
     OpticalArchiveManager(RocksMetaStore* store,
@@ -47,52 +47,57 @@ private:
 
     bool ShouldArchiveNow(const std::vector<NodeInfo>& nodes);
     bool LoadInodeAttr(uint64_t inode_id, zb::rpc::InodeAttr* attr, std::string* error) const;
-    bool ReadChunkFromReplica(const zb::rpc::ReplicaLocation& source,
-                              uint64_t read_size,
-                              std::string* data,
+    bool ReadObjectFromReplica(const zb::rpc::ReplicaLocation& source,
+                               uint64_t read_size,
+                               std::string* data,
+                               std::string* error);
+    bool WriteObjectToOptical(const NodeSelection& optical,
+                              const std::string& object_id,
+                              const std::string& op_id,
+                              const std::string& data,
+                              uint64_t inode_id,
+                              uint32_t object_index,
+                              const zb::rpc::InodeAttr* inode_attr,
+                              zb::rpc::ReplicaLocation* optical_location,
                               std::string* error);
-    bool WriteChunkToOptical(const NodeSelection& optical,
-                             const std::string& chunk_id,
-                             const std::string& op_id,
-                             const std::string& data,
-                             uint64_t inode_id,
-                             uint32_t chunk_index,
-                             const zb::rpc::InodeAttr* inode_attr,
-                             zb::rpc::ReplicaLocation* optical_location,
-                             std::string* error);
     bool DeleteDiskReplica(const zb::rpc::ReplicaLocation& replica, std::string* error);
     bool ResolveCandidateSource(const ArchiveCandidateEntry& candidate,
-                                std::string* chunk_key,
+                                std::string* object_key,
                                 zb::rpc::ReplicaLocation* source_disk,
-                                uint64_t* chunk_size,
+                                uint64_t* inode_id,
+                                uint32_t* object_index,
+                                uint64_t* object_size,
                                 std::string* error);
-    bool PersistOpticalReplica(const std::string& chunk_key,
+    bool PersistOpticalReplica(const std::string& object_key,
                                const NodeSelection& optical,
-                               const std::string& chunk_id,
+                               const std::string& object_id,
                                uint64_t data_size,
                                const zb::rpc::ReplicaLocation* optical_location,
                                rocksdb::WriteBatch* update_batch,
                                std::string* error);
     bool BurnSealedBatch(const NodeSelection& optical,
                          uint32_t* archived_count,
-                         std::unordered_set<std::string>* touched_chunk_keys,
+                         std::unordered_set<std::string>* touched_object_keys,
                          std::string* error);
     ArchiveByCandidateResult ArchiveByCandidate(const ArchiveCandidateEntry& candidate,
                                                 const NodeSelection& optical,
                                                 const std::string& lease_id,
                                                 const std::string& op_id,
-                                                std::unordered_set<std::string>* touched_chunk_keys,
+                                                std::unordered_set<std::string>* touched_object_keys,
                                                 std::string* error);
     bool ReconcileArchiveStates(uint32_t max_records, std::string* error);
-    bool ProcessReverseChunkRepairTasks(uint32_t max_records, std::string* error);
-    bool EnqueueReverseChunkRepair(const std::string& chunk_id, std::string* error);
-    bool FindChunkKeyByChunkId(const std::string& chunk_id, std::string* chunk_key, std::string* error);
-    bool HasReadyOpticalReplica(const std::string& chunk_key,
-                                const std::string& chunk_id,
+    bool ProcessReverseObjectRepairTasks(uint32_t max_records, std::string* error);
+    bool EnqueueReverseObjectRepair(const std::string& object_id, std::string* error);
+    bool ResolveObjectOwner(const std::string& object_id,
+                            uint64_t* inode_id,
+                            uint32_t* object_index,
+                            std::string* error);
+    bool FindObjectKeyByObjectId(const std::string& object_id, std::string* object_key, std::string* error);
+    bool HasReadyOpticalReplica(const std::string& object_id,
                                 bool* has_ready,
                                 std::string* error);
-    bool IsOpticalWriteCommitted(const std::string& chunk_id, const std::string& op_id, bool* committed, std::string* error);
-    bool MarkOpticalWriteCommitted(const std::string& chunk_id, const std::string& op_id, std::string* error);
+    bool IsOpticalWriteCommitted(const std::string& object_id, const std::string& op_id, bool* committed, std::string* error);
+    bool MarkOpticalWriteCommitted(const std::string& object_id, const std::string& op_id, std::string* error);
     bool UpdateSourceArchiveState(const ArchiveCandidateEntry& candidate,
                                   const std::string& archive_state,
                                   uint64_t version,

@@ -8,13 +8,13 @@ namespace fs = std::filesystem;
 namespace zb::real_node {
 
 std::string LocalPathResolver::Resolve(const std::string& root_path,
-                                       const std::string& chunk_id,
+                                       const std::string& object_id,
                                        bool create_parent_dirs) {
-    if (root_path.empty() || chunk_id.empty()) {
+    if (root_path.empty() || object_id.empty()) {
         return {};
     }
 
-    std::string prefix = BuildPrefix(chunk_id);
+    std::string prefix = BuildPrefix(object_id);
     std::string level1 = prefix.substr(0, 2);
     std::string level2 = prefix.substr(2, 2);
 
@@ -25,15 +25,15 @@ std::string LocalPathResolver::Resolve(const std::string& root_path,
         }
     }
 
-    fs::path file_path = dir_path / chunk_id;
+    fs::path file_path = dir_path / object_id;
     return file_path.string();
 }
 
-std::string LocalPathResolver::BuildPrefix(const std::string& chunk_id) const {
+std::string LocalPathResolver::BuildPrefix(const std::string& object_id) const {
     std::string prefix;
     prefix.reserve(4);
 
-    for (char ch : chunk_id) {
+    for (char ch : object_id) {
         if (prefix.size() >= 4) {
             break;
         }

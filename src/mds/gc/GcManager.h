@@ -13,6 +13,8 @@ public:
     struct Options {
         uint64_t orphan_grace_ms{10ULL * 60ULL * 1000ULL};
         uint32_t max_delete_per_round{1024};
+        bool dry_run{false};
+        bool paused{false};
     };
 
     explicit GcManager(RocksMetaStore* store);

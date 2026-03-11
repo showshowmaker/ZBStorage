@@ -10,11 +10,11 @@
 
 namespace zb::mds {
 
-struct StagedArchiveChunk {
+struct StagedArchiveObject {
     ArchiveCandidateEntry candidate;
     std::string lease_id;
     std::string op_id;
-    std::string chunk_key;
+    std::string object_key;
     uint64_t version{0};
     uint64_t size_bytes{0};
     std::string data_file;
@@ -31,28 +31,28 @@ public:
 
     bool Init(const std::string& staging_dir, Options options, std::string* error);
 
-    bool StageChunk(const ArchiveCandidateEntry& candidate,
-                    const std::string& lease_id,
-                    const std::string& op_id,
-                    const std::string& chunk_key,
-                    uint64_t version,
-                    const std::string& data,
-                    bool* inserted,
-                    bool* deferred,
-                    std::string* error);
-    bool HasSealedBatch() const;
-    bool SealIfReady(std::string* error);
-    std::vector<StagedArchiveChunk> SnapshotSealedBatch() const;
-    bool ReadChunkData(const StagedArchiveChunk& staged, std::string* data, std::string* error) const;
-    bool UpdateLease(const std::string& chunk_id,
+    bool StageObject(const ArchiveCandidateEntry& candidate,
                      const std::string& lease_id,
                      const std::string& op_id,
+                     const std::string& object_key,
                      uint64_t version,
+                     const std::string& data,
+                     bool* inserted,
+                     bool* deferred,
                      std::string* error);
-    bool MarkChunkDone(const std::string& chunk_id, std::string* error);
-    bool RemoveChunk(const std::string& chunk_id, std::string* error);
+    bool HasSealedBatch() const;
+    bool SealIfReady(std::string* error);
+    std::vector<StagedArchiveObject> SnapshotSealedBatch() const;
+    bool ReadObjectData(const StagedArchiveObject& staged, std::string* data, std::string* error) const;
+    bool UpdateObjectLease(const std::string& object_id,
+                           const std::string& lease_id,
+                           const std::string& op_id,
+                           uint64_t version,
+                           std::string* error);
+    bool MarkObjectDone(const std::string& object_id, std::string* error);
+    bool RemoveObject(const std::string& object_id, std::string* error);
     bool ResetIfDrained(std::string* error);
-    bool ContainsChunk(const std::string& chunk_id) const;
+    bool ContainsObject(const std::string& object_id) const;
     uint64_t CurrentBytes() const;
     uint64_t DiscSizeBytes() const;
     std::string CurrentBatchId() const;
@@ -66,13 +66,13 @@ private:
     bool PersistManifestLocked(std::string* error) const;
     bool EnsureDirsLocked(std::string* error) const;
     bool IsReadyToSealLocked() const;
-    std::string ChunkFilePathLocked(const std::string& chunk_id) const;
-    bool RemoveChunkFileNoThrow(const std::string& path) const;
+    std::string ObjectFilePathLocked(const std::string& object_id) const;
+    bool RemoveObjectFileNoThrow(const std::string& path) const;
 
     mutable std::mutex mu_;
     bool inited_{false};
     std::string staging_dir_;
-    std::string chunk_dir_;
+    std::string object_dir_;
     std::string manifest_path_;
     Options options_;
 
@@ -80,8 +80,8 @@ private:
     uint64_t created_ts_ms_{0};
     bool sealed_{false};
     uint64_t total_bytes_{0};
-    std::unordered_map<std::string, StagedArchiveChunk> chunks_;
-    std::vector<std::string> order_;
+    std::unordered_map<std::string, StagedArchiveObject> objects_;
+    std::vector<std::string> object_order_;
 };
 
 } // namespace zb::mds

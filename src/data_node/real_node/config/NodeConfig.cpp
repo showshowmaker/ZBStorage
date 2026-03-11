@@ -168,12 +168,13 @@ NodeConfig NodeConfig::LoadFromFile(const std::string& path, std::string* error)
                 }
                 return {};
             }
-        } else if (key == "ARCHIVE_TRACK_MAX_CHUNKS") {
+        } else if (key == "ARCHIVE_TRACK_MAX_OBJECTS") {
             try {
-                cfg.archive_track_max_chunks = static_cast<uint32_t>(std::stoul(value));
+                cfg.archive_track_max_objects = static_cast<uint32_t>(std::stoul(value));
             } catch (const std::exception&) {
                 if (error) {
-                    *error = "Invalid ARCHIVE_TRACK_MAX_CHUNKS at line " + std::to_string(line_no);
+                    *error = "Invalid ARCHIVE_TRACK_MAX_OBJECTS at line " +
+                             std::to_string(line_no);
                 }
                 return {};
             }
@@ -207,8 +208,8 @@ NodeConfig NodeConfig::LoadFromFile(const std::string& path, std::string* error)
     if (cfg.archive_report_topk == 0) {
         cfg.archive_report_topk = 1;
     }
-    if (cfg.archive_track_max_chunks == 0) {
-        cfg.archive_track_max_chunks = 1;
+    if (cfg.archive_track_max_objects == 0) {
+        cfg.archive_track_max_objects = 1;
     }
     if (cfg.archive_meta_snapshot_interval_ops == 0) {
         cfg.archive_meta_snapshot_interval_ops = 1;

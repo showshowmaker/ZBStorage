@@ -47,7 +47,7 @@ std::string ToHex(uint64_t value, size_t width) {
     return out;
 }
 
-std::string MakeChunkId(const std::string& server, const std::string& disk) {
+std::string MakeObjectId(const std::string& server, const std::string& disk) {
     std::hash<std::string> hasher;
     uint64_t h1 = static_cast<uint64_t>(hasher(server));
     uint64_t h2 = static_cast<uint64_t>(hasher(disk));
@@ -64,10 +64,10 @@ std::string Trim(std::string value) {
     return value;
 }
 
-std::string BuildPrefix(const std::string& chunk_id) {
+std::string BuildPrefix(const std::string& object_id) {
     std::string prefix;
     prefix.reserve(4);
-    for (char ch : chunk_id) {
+    for (char ch : object_id) {
         if (prefix.size() >= 4) {
             break;
         }
@@ -85,15 +85,15 @@ std::string BuildPrefix(const std::string& chunk_id) {
     return prefix;
 }
 
-std::string ResolveLocalPath(const std::string& root_path, const std::string& chunk_id) {
-    if (root_path.empty() || chunk_id.empty()) {
+std::string ResolveLocalPath(const std::string& root_path, const std::string& object_id) {
+    if (root_path.empty() || object_id.empty()) {
         return {};
     }
-    std::string prefix = BuildPrefix(chunk_id);
+    std::string prefix = BuildPrefix(object_id);
     std::string level1 = prefix.substr(0, 2);
     std::string level2 = prefix.substr(2, 2);
     fs::path dir_path = fs::path(root_path) / level1 / level2;
-    fs::path file_path = dir_path / chunk_id;
+    fs::path file_path = dir_path / object_id;
     return file_path.string();
 }
 
@@ -258,27 +258,27 @@ int main(int argc, char* argv[]) {
         zb::rpc::RealNodeService_Stub stub(&channel);
 
         for (const auto& disk : disks) {
-            const std::string chunk_id = MakeChunkId(server, disk);
+            const std::string object_id = MakeObjectId(server, disk);
             const std::string payload = "payload-" + server + "-" + disk;
 
-            zb::rpc::WriteChunkRequest write_req;
+            zb::rpc::WriteObjectRequest write_req;
             write_req.set_disk_id(disk);
-            write_req.set_chunk_id(chunk_id);
+            write_req.set_object_id(object_id);
             write_req.set_offset(0);
             write_req.set_data(payload);
 
-            zb::rpc::WriteChunkReply write_resp;
+            zb::rpc::WriteObjectReply write_resp;
             brpc::Controller write_cntl;
-            stub.WriteChunk(&write_cntl, &write_req, &write_resp, nullptr);
+            stub.WriteObject(&write_cntl, &write_req, &write_resp, nullptr);
             if (write_cntl.Failed()) {
-                std::cerr << "WriteChunk RPC failed: server=" << server
+                std::cerr << "WriteObject RPC failed: server=" << server
                           << " disk=" << disk
                           << " error=" << write_cntl.ErrorText() << std::endl;
                 ++failures;
                 continue;
             }
             if (!StatusOk(write_resp.status())) {
-                std::cerr << "WriteChunk status not ok: server=" << server
+                std::cerr << "WriteObject status not ok: server=" << server
                           << " disk=" << disk
                           << " code=" << write_resp.status().code()
                           << " msg=" << write_resp.status().message() << std::endl;
@@ -286,24 +286,24 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            zb::rpc::ReadChunkRequest read_req;
+            zb::rpc::ReadObjectRequest read_req;
             read_req.set_disk_id(disk);
-            read_req.set_chunk_id(chunk_id);
+            read_req.set_object_id(object_id);
             read_req.set_offset(0);
             read_req.set_size(payload.size());
 
-            zb::rpc::ReadChunkReply read_resp;
+            zb::rpc::ReadObjectReply read_resp;
             brpc::Controller read_cntl;
-            stub.ReadChunk(&read_cntl, &read_req, &read_resp, nullptr);
+            stub.ReadObject(&read_cntl, &read_req, &read_resp, nullptr);
             if (read_cntl.Failed()) {
-                std::cerr << "ReadChunk RPC failed: server=" << server
+                std::cerr << "ReadObject RPC failed: server=" << server
                           << " disk=" << disk
                           << " error=" << read_cntl.ErrorText() << std::endl;
                 ++failures;
                 continue;
             }
             if (!StatusOk(read_resp.status())) {
-                std::cerr << "ReadChunk status not ok: server=" << server
+                std::cerr << "ReadObject status not ok: server=" << server
                           << " disk=" << disk
                           << " code=" << read_resp.status().code()
                           << " msg=" << read_resp.status().message() << std::endl;
@@ -311,7 +311,7 @@ int main(int argc, char* argv[]) {
                 continue;
             }
             if (read_resp.data() != payload || read_resp.bytes() != payload.size()) {
-                std::cerr << "ReadChunk verify failed: server=" << server
+                std::cerr << "ReadObject verify failed: server=" << server
                           << " disk=" << disk
                           << " expected_bytes=" << payload.size()
                           << " got_bytes=" << read_resp.bytes()
@@ -330,7 +330,7 @@ int main(int argc, char* argv[]) {
                     ++failures;
                     continue;
                 }
-                const std::string file_path = ResolveLocalPath(it->second, chunk_id);
+                const std::string file_path = ResolveLocalPath(it->second, object_id);
                 std::ifstream file(file_path, std::ios::binary);
                 if (!file) {
                     std::cerr << "File not found on disk: " << file_path << std::endl;

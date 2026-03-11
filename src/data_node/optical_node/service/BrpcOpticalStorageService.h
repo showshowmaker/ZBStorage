@@ -9,25 +9,25 @@ class BrpcOpticalStorageService : public zb::rpc::RealNodeService {
 public:
     explicit BrpcOpticalStorageService(OpticalStorageServiceImpl* service);
 
-    void WriteChunk(google::protobuf::RpcController* cntl_base,
-                    const zb::rpc::WriteChunkRequest* request,
-                    zb::rpc::WriteChunkReply* response,
+    void WriteObject(google::protobuf::RpcController* cntl_base,
+                     const zb::rpc::WriteObjectRequest* request,
+                     zb::rpc::WriteObjectReply* response,
+                     google::protobuf::Closure* done) override;
+
+    void ReadObject(google::protobuf::RpcController* cntl_base,
+                    const zb::rpc::ReadObjectRequest* request,
+                    zb::rpc::ReadObjectReply* response,
                     google::protobuf::Closure* done) override;
 
-    void ReadChunk(google::protobuf::RpcController* cntl_base,
-                   const zb::rpc::ReadChunkRequest* request,
-                   zb::rpc::ReadChunkReply* response,
-                   google::protobuf::Closure* done) override;
+    void DeleteObject(google::protobuf::RpcController* cntl_base,
+                      const zb::rpc::DeleteObjectRequest* request,
+                      zb::rpc::DeleteObjectReply* response,
+                      google::protobuf::Closure* done) override;
 
     void ReadArchivedFile(google::protobuf::RpcController* cntl_base,
                           const zb::rpc::ReadArchivedFileRequest* request,
                           zb::rpc::ReadArchivedFileReply* response,
                           google::protobuf::Closure* done) override;
-
-    void DeleteChunk(google::protobuf::RpcController* cntl_base,
-                     const zb::rpc::DeleteChunkRequest* request,
-                     zb::rpc::DeleteChunkReply* response,
-                     google::protobuf::Closure* done) override;
 
     void UpdateArchiveState(google::protobuf::RpcController* cntl_base,
                             const zb::rpc::UpdateArchiveStateRequest* request,

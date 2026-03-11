@@ -8,9 +8,9 @@
 
 namespace zb::msg {
 
-struct WriteChunkRequest {
+struct WriteObjectRequest {
     std::string disk_id;
-    std::string chunk_id;
+    std::string object_id;
     uint64_t offset{0};
     std::string data;
     bool is_replication{false};
@@ -25,10 +25,18 @@ struct WriteChunkRequest {
     uint32_t file_uid{0};
     uint32_t file_gid{0};
     uint64_t file_mtime{0};
-    uint32_t file_chunk_index{0};
+    uint32_t file_object_index{0};
+
+    std::string ArchiveObjectId() const {
+        return object_id;
+    }
+
+    void SetArchiveObjectId(const std::string& id) {
+        object_id = id;
+    }
 };
 
-struct WriteChunkReply {
+struct WriteObjectReply {
     Status status;
     uint64_t bytes{0};
     std::string image_id;
@@ -36,17 +44,25 @@ struct WriteChunkReply {
     uint64_t image_length{0};
 };
 
-struct ReadChunkRequest {
+struct ReadObjectRequest {
     std::string disk_id;
-    std::string chunk_id;
+    std::string object_id;
     uint64_t offset{0};
     uint64_t size{0};
     std::string image_id;
     uint64_t image_offset{0};
     uint64_t image_length{0};
+
+    std::string ArchiveObjectId() const {
+        return object_id;
+    }
+
+    void SetArchiveObjectId(const std::string& id) {
+        object_id = id;
+    }
 };
 
-struct ReadChunkReply {
+struct ReadObjectReply {
     Status status;
     uint64_t bytes{0};
     std::string data;
@@ -66,12 +82,20 @@ struct ReadArchivedFileReply {
     std::string data;
 };
 
-struct DeleteChunkRequest {
+struct DeleteObjectRequest {
     std::string disk_id;
-    std::string chunk_id;
+    std::string object_id;
+
+    std::string ArchiveObjectId() const {
+        return object_id;
+    }
+
+    void SetArchiveObjectId(const std::string& id) {
+        object_id = id;
+    }
 };
 
-struct DeleteChunkReply {
+struct DeleteObjectReply {
     Status status;
 };
 

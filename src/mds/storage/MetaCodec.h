@@ -24,6 +24,10 @@ struct LayoutExtentRecord {
     uint64_t object_offset{0};
     uint64_t object_length{0};
     uint64_t object_version{0};
+    uint32_t object_index{0};
+    uint32_t pg_id{0};
+    uint64_t placement_epoch{0};
+    uint32_t storage_tier{0};
 };
 
 struct LayoutNodeRecord {
@@ -60,8 +64,8 @@ public:
     static std::string EncodeInodeAttr(const zb::rpc::InodeAttr& attr);
     static bool DecodeInodeAttr(const std::string& data, zb::rpc::InodeAttr* attr);
 
-    static std::string EncodeChunkMeta(const zb::rpc::ChunkMeta& meta);
-    static bool DecodeChunkMeta(const std::string& data, zb::rpc::ChunkMeta* meta);
+    static std::string EncodeObjectMeta(const zb::rpc::ObjectMeta& meta);
+    static bool DecodeObjectMeta(const std::string& data, zb::rpc::ObjectMeta* meta);
 
     static std::string EncodeLayoutRoot(const LayoutRootRecord& root);
     static bool DecodeLayoutRoot(const std::string& data, LayoutRootRecord* root);

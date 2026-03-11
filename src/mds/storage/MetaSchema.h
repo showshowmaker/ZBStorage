@@ -17,53 +17,104 @@ inline std::string DentryPrefix(uint64_t parent_inode) {
     return "D/" + std::to_string(parent_inode) + "/";
 }
 
-inline std::string ChunkKey(uint64_t inode_id, uint32_t index) {
-    return "C/" + std::to_string(inode_id) + "/" + std::to_string(index);
+inline std::string ObjectKey(uint64_t inode_id, uint32_t index) {
+    return "O/" + std::to_string(inode_id) + "/" + std::to_string(index);
 }
 
-inline std::string ChunkPrefix(uint64_t inode_id) {
-    return "C/" + std::to_string(inode_id) + "/";
+inline std::string ObjectPrefix(uint64_t inode_id) {
+    return "O/" + std::to_string(inode_id) + "/";
 }
 
-inline std::string ReverseChunkKey(const std::string& chunk_id) {
-    return "RC/" + chunk_id;
+inline std::string ObjectGlobalPrefix() {
+    return "O/";
 }
 
-inline std::string ArchiveStateKey(const std::string& chunk_id) {
-    return "AS/" + chunk_id;
+inline std::string ReverseObjectKey(const std::string& object_id) {
+    return "RO/" + object_id;
+}
+
+inline std::string ObjectArchiveStateKey(const std::string& object_id) {
+    return "AS/" + object_id;
 }
 
 inline std::string ArchiveStatePrefix() {
     return "AS/";
 }
 
-inline std::string ArchiveOpticalWriteKey(const std::string& chunk_id, const std::string& op_id) {
-    return "AOW/" + chunk_id + "/" + op_id;
+inline std::string ObjectArchiveStatePrefix() {
+    return ArchiveStatePrefix();
+}
+
+inline std::string ArchiveOpticalWriteObjectKey(const std::string& object_id, const std::string& op_id) {
+    return "AOW/" + object_id + "/" + op_id;
 }
 
 inline std::string ArchiveOpticalWritePrefix() {
     return "AOW/";
 }
 
-inline std::string ArchiveReverseRepairKey(const std::string& chunk_id) {
-    return "ARR/" + chunk_id;
+inline std::string ArchiveReverseObjectRepairKey(const std::string& object_id) {
+    return "ARR/" + object_id;
 }
 
 inline std::string ArchiveReverseRepairPrefix() {
     return "ARR/";
 }
 
-inline std::string ArchiveImageChunkPrefix(const std::string& optical_node_id,
-                                           const std::string& optical_disk_id,
-                                           const std::string& image_id) {
+inline std::string ArchiveReverseObjectRepairPrefix() {
+    return ArchiveReverseRepairPrefix();
+}
+
+inline std::string ArchiveImageObjectPrefix(const std::string& optical_node_id,
+                                            const std::string& optical_disk_id,
+                                            const std::string& image_id) {
     return "AIC/" + optical_node_id + "/" + optical_disk_id + "/" + image_id + "/";
 }
 
-inline std::string ArchiveImageChunkKey(const std::string& optical_node_id,
-                                        const std::string& optical_disk_id,
-                                        const std::string& image_id,
-                                        const std::string& chunk_id) {
-    return ArchiveImageChunkPrefix(optical_node_id, optical_disk_id, image_id) + chunk_id;
+inline std::string ArchiveImageObjectKey(const std::string& optical_node_id,
+                                         const std::string& optical_disk_id,
+                                         const std::string& image_id,
+                                         const std::string& object_id) {
+    return ArchiveImageObjectPrefix(optical_node_id, optical_disk_id, image_id) + object_id;
+}
+
+// Object -> optical replica location index (serialized ReplicaLocation).
+inline std::string ArchiveObjectOpticalLocationKey(const std::string& object_id) {
+    return "AOL/" + object_id;
+}
+
+inline std::string ArchiveObjectOpticalLocationPrefix() {
+    return "AOL/";
+}
+
+// Object -> owner file mapping index.
+inline std::string ObjectOwnerKey(const std::string& object_id) {
+    return "OO/" + object_id;
+}
+
+inline std::string ObjectOwnerPrefix() {
+    return "OO/";
+}
+
+inline std::string EncodeObjectOwnerValue(uint64_t inode_id, uint32_t object_index) {
+    return std::to_string(inode_id) + ":" + std::to_string(object_index);
+}
+
+inline bool DecodeObjectOwnerValue(const std::string& value, uint64_t* inode_id, uint32_t* object_index) {
+    if (!inode_id || !object_index) {
+        return false;
+    }
+    const size_t sep = value.find(':');
+    if (sep == std::string::npos || sep == 0 || sep + 1 >= value.size()) {
+        return false;
+    }
+    try {
+        *inode_id = static_cast<uint64_t>(std::stoull(value.substr(0, sep)));
+        *object_index = static_cast<uint32_t>(std::stoul(value.substr(sep + 1)));
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 inline std::string LayoutRootKey(uint64_t inode_id) {
@@ -72,6 +123,22 @@ inline std::string LayoutRootKey(uint64_t inode_id) {
 
 inline std::string LayoutRootPrefix() {
     return "LR/";
+}
+
+inline std::string FileAnchorKey(uint64_t inode_id) {
+    return "FA/" + std::to_string(inode_id);
+}
+
+inline std::string FileAnchorPrefix() {
+    return "FA/";
+}
+
+inline std::string LayoutCommitOpKey(uint64_t inode_id, const std::string& op_id) {
+    return "LCO/" + std::to_string(inode_id) + "/" + op_id;
+}
+
+inline std::string LayoutCommitOpPrefix(uint64_t inode_id) {
+    return "LCO/" + std::to_string(inode_id) + "/";
 }
 
 inline std::string LayoutObjectKey(const std::string& layout_obj_id) {
@@ -176,11 +243,11 @@ inline bool ParseLayoutObjectReplicaKey(const std::string& key, std::string* lay
     }
 }
 
-inline bool ParseChunkKey(const std::string& key, uint64_t* inode_id, uint32_t* index) {
+inline bool ParseObjectKey(const std::string& key, uint64_t* inode_id, uint32_t* index) {
     if (!inode_id || !index) {
         return false;
     }
-    if (key.size() < 4 || key[0] != 'C' || key[1] != '/') {
+    if (key.size() < 4 || key[0] != 'O' || key[1] != '/') {
         return false;
     }
     size_t slash = key.find('/', 2);

@@ -23,7 +23,7 @@ cmake --build build -j
 
 ```ini
 MDS_DB_PATH=/tmp/zb_mds_rocks
-CHUNK_SIZE=4194304
+OBJECT_UNIT_SIZE=4194304
 REPLICA=2
 NODES=vpool@127.0.0.1:29080,type=VIRTUAL,weight=10,virtual_node_count=100000;node-01@127.0.0.1:19080,type=REAL,weight=1
 DISKS=vpool:disk-01,disk-02,disk-03;node-01:disk-01,disk-02,disk-03

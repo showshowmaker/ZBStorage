@@ -31,7 +31,7 @@ public:
                 std::string* error);
 
 private:
-    bool LoadOrInitRecordLocked(const std::string& chunk_id,
+    bool LoadOrInitRecordLocked(const std::string& object_id,
                                 zb::rpc::ArchiveLeaseRecord* record,
                                 std::string* error) const;
     bool PersistRecordLocked(const zb::rpc::ArchiveLeaseRecord& record, std::string* error) const;

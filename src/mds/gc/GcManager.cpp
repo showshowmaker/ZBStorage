@@ -40,13 +40,17 @@ bool GcManager::RunOnce(std::string* error) {
         return false;
     }
 
+    if (options_.paused) {
+        return true;
+    }
+
     std::unordered_set<std::string> reachable;
     if (!CollectReachableLayoutObjects(&reachable, error)) {
         return false;
     }
 
-    uint32_t deleted_count = 0;
-    if (!SweepUnreachableLayoutObjects(reachable, &deleted_count, error)) {
+    uint32_t layout_deleted = 0;
+    if (!SweepUnreachableLayoutObjects(reachable, &layout_deleted, error)) {
         return false;
     }
     return true;
@@ -74,9 +78,6 @@ bool GcManager::CollectReachableLayoutObjects(std::unordered_set<std::string>* r
             continue;
         }
         if (root.layout_root_id.empty()) {
-            continue;
-        }
-        if (root.layout_root_id.rfind("legacy:", 0) == 0) {
             continue;
         }
         if (reachable->insert(root.layout_root_id).second) {
@@ -137,7 +138,9 @@ bool GcManager::SweepUnreachableLayoutObjects(const std::unordered_set<std::stri
 
         const std::string seen_key = LayoutGcSeenKey(layout_obj_id);
         if (reachable.find(layout_obj_id) != reachable.end()) {
-            batch.Delete(seen_key);
+            if (!options_.dry_run) {
+                batch.Delete(seen_key);
+            }
             continue;
         }
 
@@ -145,19 +148,25 @@ bool GcManager::SweepUnreachableLayoutObjects(const std::unordered_set<std::stri
         std::string local_error;
         if (!store_->Get(seen_key, &seen_data, &local_error)) {
             if (local_error.empty()) {
-                batch.Put(seen_key, MetaCodec::EncodeUInt64(now_ms));
+                if (!options_.dry_run) {
+                    batch.Put(seen_key, MetaCodec::EncodeUInt64(now_ms));
+                }
             }
             continue;
         }
         uint64_t first_seen_ms = 0;
         if (!MetaCodec::DecodeUInt64(seen_data, &first_seen_ms)) {
-            batch.Put(seen_key, MetaCodec::EncodeUInt64(now_ms));
+            if (!options_.dry_run) {
+                batch.Put(seen_key, MetaCodec::EncodeUInt64(now_ms));
+            }
             continue;
         }
         if (now_ms < first_seen_ms || now_ms - first_seen_ms < options_.orphan_grace_ms) {
             continue;
         }
-        batch.Delete(key);
+        if (!options_.dry_run) {
+            batch.Delete(key);
+        }
         const std::string replica_prefix = LayoutObjectReplicaPrefix(layout_obj_id);
         std::unique_ptr<rocksdb::Iterator> replica_it(store_->db()->NewIterator(rocksdb::ReadOptions()));
         for (replica_it->Seek(replica_prefix); replica_it->Valid(); replica_it->Next()) {
@@ -165,9 +174,13 @@ bool GcManager::SweepUnreachableLayoutObjects(const std::unordered_set<std::stri
             if (replica_key.rfind(replica_prefix, 0) != 0) {
                 break;
             }
-            batch.Delete(replica_key);
+            if (!options_.dry_run) {
+                batch.Delete(replica_key);
+            }
         }
-        batch.Delete(seen_key);
+        if (!options_.dry_run) {
+            batch.Delete(seen_key);
+        }
         ++deleted;
         if (deleted >= options_.max_delete_per_round) {
             break;
@@ -205,26 +218,32 @@ bool GcManager::SweepUnreachableLayoutObjects(const std::unordered_set<std::stri
             std::string local_error;
             if (!store_->Get(seen_key, &seen_data, &local_error)) {
                 if (local_error.empty()) {
-                    batch.Put(seen_key, MetaCodec::EncodeUInt64(now_ms));
+                    if (!options_.dry_run) {
+                        batch.Put(seen_key, MetaCodec::EncodeUInt64(now_ms));
+                    }
                 }
                 continue;
             }
             uint64_t first_seen_ms = 0;
             if (!MetaCodec::DecodeUInt64(seen_data, &first_seen_ms)) {
-                batch.Put(seen_key, MetaCodec::EncodeUInt64(now_ms));
+                if (!options_.dry_run) {
+                    batch.Put(seen_key, MetaCodec::EncodeUInt64(now_ms));
+                }
                 continue;
             }
             if (now_ms < first_seen_ms || now_ms - first_seen_ms < options_.orphan_grace_ms) {
                 continue;
             }
 
-            batch.Delete(replica_key);
-            batch.Delete(seen_key);
+            if (!options_.dry_run) {
+                batch.Delete(replica_key);
+                batch.Delete(seen_key);
+            }
             ++deleted;
         }
     }
 
-    if (batch.Count() > 0) {
+    if (!options_.dry_run && batch.Count() > 0) {
         std::string write_error;
         if (!store_->WriteBatch(&batch, &write_error)) {
             if (error) {

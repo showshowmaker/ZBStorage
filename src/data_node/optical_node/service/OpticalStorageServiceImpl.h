@@ -48,13 +48,13 @@ public:
                                   const std::string& secondary_address);
     ReplicationStatusSnapshot GetReplicationStatus() const;
 
-    zb::msg::WriteChunkReply WriteChunk(const zb::msg::WriteChunkRequest& request);
-    zb::msg::ReadChunkReply ReadChunk(const zb::msg::ReadChunkRequest& request);
+    zb::msg::WriteObjectReply WriteObject(const zb::msg::WriteObjectRequest& request);
+    zb::msg::ReadObjectReply ReadObject(const zb::msg::ReadObjectRequest& request);
     zb::msg::ReadArchivedFileReply ReadArchivedFile(const zb::msg::ReadArchivedFileRequest& request);
-    zb::msg::DeleteChunkReply DeleteChunk(const zb::msg::DeleteChunkRequest& request);
+    zb::msg::DeleteObjectReply DeleteObject(const zb::msg::DeleteObjectRequest& request);
     zb::msg::DiskReportReply GetDiskReport() const;
     zb::msg::Status UpdateArchiveState(const std::string& disk_id,
-                                       const std::string& chunk_id,
+                                       const std::string& object_id,
                                        const std::string& archive_state,
                                        uint64_t version);
 
@@ -67,7 +67,7 @@ private:
         uint64_t image_length{0};
     };
 
-    zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
+    zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteObjectRequest& request, uint64_t epoch);
     static uint64_t NowMilliseconds();
     void PruneArchiveOpCacheLocked(uint64_t now_ms);
 
@@ -81,11 +81,11 @@ private:
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> peer_channels_;
 
     mutable std::mutex archive_op_mu_;
-    std::unordered_map<std::string, ArchiveOpCacheEntry> last_archive_op_by_chunk_;
+    std::unordered_map<std::string, ArchiveOpCacheEntry> last_archive_op_by_object_;
     uint64_t archive_op_cache_touch_{0};
 
     mutable std::mutex cache_mu_;
-    std::unordered_map<std::string, std::string> cache_chunks_;
+    std::unordered_map<std::string, std::string> cache_objects_;
 };
 
 } // namespace zb::optical_node

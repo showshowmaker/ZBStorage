@@ -7,7 +7,9 @@ namespace zb::mds {
 namespace {
 
 constexpr uint32_t kEnvelopeMagic = 0x5A424D44U; // ZBMD
-constexpr uint32_t kEnvelopeVersion = 1;
+constexpr uint32_t kEnvelopeVersionV1 = 1;
+constexpr uint32_t kEnvelopeVersionV2 = 2;
+constexpr uint32_t kEnvelopeVersionCurrent = kEnvelopeVersionV2;
 
 constexpr size_t kU32Size = sizeof(uint32_t);
 constexpr size_t kU64Size = sizeof(uint64_t);
@@ -97,18 +99,18 @@ bool ReadString(const std::string& in, size_t* cursor, std::string* value) {
     return true;
 }
 
-std::string EncodeEnvelope(const std::string& payload) {
+std::string EncodeEnvelope(const std::string& payload, uint32_t version = kEnvelopeVersionCurrent) {
     std::string out;
     out.reserve(sizeof(uint32_t) * 4 + payload.size());
     AppendU32(&out, kEnvelopeMagic);
-    AppendU32(&out, kEnvelopeVersion);
+    AppendU32(&out, version);
     AppendU32(&out, static_cast<uint32_t>(payload.size()));
     out.append(payload);
     AppendU32(&out, Crc32(payload.data(), payload.size()));
     return out;
 }
 
-bool DecodeEnvelope(const std::string& data, std::string* payload) {
+bool DecodeEnvelope(const std::string& data, std::string* payload, uint32_t* version_out = nullptr) {
     if (!payload) {
         return false;
     }
@@ -120,7 +122,7 @@ bool DecodeEnvelope(const std::string& data, std::string* payload) {
         !ReadU32(data, &cursor, &len)) {
         return false;
     }
-    if (magic != kEnvelopeMagic || version != kEnvelopeVersion) {
+    if (magic != kEnvelopeMagic || version < kEnvelopeVersionV1 || version > kEnvelopeVersionCurrent) {
         return false;
     }
     if (cursor + len + kU32Size != data.size()) {
@@ -132,25 +134,59 @@ bool DecodeEnvelope(const std::string& data, std::string* payload) {
     if (!ReadU32(data, &cursor, &crc)) {
         return false;
     }
-    return crc == Crc32(payload->data(), payload->size());
+    if (crc != Crc32(payload->data(), payload->size())) {
+        return false;
+    }
+    if (version_out) {
+        *version_out = version;
+    }
+    return true;
 }
 
-void EncodeExtentPayload(const LayoutExtentRecord& extent, std::string* payload) {
+void EncodeExtentPayload(const LayoutExtentRecord& extent, std::string* payload, uint32_t envelope_version) {
     AppendU64(payload, extent.logical_offset);
     AppendU64(payload, extent.length);
     AppendString(payload, extent.object_id);
     AppendU64(payload, extent.object_offset);
     AppendU64(payload, extent.object_length);
     AppendU64(payload, extent.object_version);
+    if (envelope_version >= kEnvelopeVersionV2) {
+        AppendU32(payload, extent.object_index);
+        AppendU32(payload, extent.pg_id);
+        AppendU64(payload, extent.placement_epoch);
+        AppendU32(payload, extent.storage_tier);
+    }
 }
 
-bool DecodeExtentPayload(const std::string& payload, size_t* cursor, LayoutExtentRecord* extent) {
-    return ReadU64(payload, cursor, &extent->logical_offset) &&
-           ReadU64(payload, cursor, &extent->length) &&
-           ReadString(payload, cursor, &extent->object_id) &&
-           ReadU64(payload, cursor, &extent->object_offset) &&
-           ReadU64(payload, cursor, &extent->object_length) &&
-           ReadU64(payload, cursor, &extent->object_version);
+bool DecodeExtentPayload(const std::string& payload,
+                         size_t* cursor,
+                         LayoutExtentRecord* extent,
+                         uint32_t envelope_version) {
+    if (!extent) {
+        return false;
+    }
+    extent->object_index = 0;
+    extent->pg_id = 0;
+    extent->placement_epoch = 0;
+    extent->storage_tier = 0;
+
+    if (!(ReadU64(payload, cursor, &extent->logical_offset) &&
+          ReadU64(payload, cursor, &extent->length) &&
+          ReadString(payload, cursor, &extent->object_id) &&
+          ReadU64(payload, cursor, &extent->object_offset) &&
+          ReadU64(payload, cursor, &extent->object_length) &&
+          ReadU64(payload, cursor, &extent->object_version))) {
+        return false;
+    }
+    if (envelope_version >= kEnvelopeVersionV2) {
+        if (!(ReadU32(payload, cursor, &extent->object_index) &&
+              ReadU32(payload, cursor, &extent->pg_id) &&
+              ReadU64(payload, cursor, &extent->placement_epoch) &&
+              ReadU32(payload, cursor, &extent->storage_tier))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void EncodePgMemberPayload(const PgViewMemberRecord& member, std::string* payload) {
@@ -208,13 +244,13 @@ bool MetaCodec::DecodeInodeAttr(const std::string& data, zb::rpc::InodeAttr* att
     return attr->ParseFromString(data);
 }
 
-std::string MetaCodec::EncodeChunkMeta(const zb::rpc::ChunkMeta& meta) {
+std::string MetaCodec::EncodeObjectMeta(const zb::rpc::ObjectMeta& meta) {
     std::string out;
     meta.SerializeToString(&out);
     return out;
 }
 
-bool MetaCodec::DecodeChunkMeta(const std::string& data, zb::rpc::ChunkMeta* meta) {
+bool MetaCodec::DecodeObjectMeta(const std::string& data, zb::rpc::ObjectMeta* meta) {
     if (!meta) {
         return false;
     }
@@ -256,17 +292,18 @@ bool MetaCodec::DecodeLayoutRoot(const std::string& data, LayoutRootRecord* root
 std::string MetaCodec::EncodeLayoutNode(const LayoutNodeRecord& node) {
     std::string payload;
     payload.reserve(256);
+    const uint32_t envelope_version = kEnvelopeVersionCurrent;
     AppendString(&payload, node.node_id);
     AppendU32(&payload, node.level);
     AppendU32(&payload, static_cast<uint32_t>(node.extents.size()));
     for (const auto& extent : node.extents) {
-        EncodeExtentPayload(extent, &payload);
+        EncodeExtentPayload(extent, &payload, envelope_version);
     }
     AppendU32(&payload, static_cast<uint32_t>(node.child_layout_ids.size()));
     for (const auto& child_id : node.child_layout_ids) {
         AppendString(&payload, child_id);
     }
-    return EncodeEnvelope(payload);
+    return EncodeEnvelope(payload, envelope_version);
 }
 
 bool MetaCodec::DecodeLayoutNode(const std::string& data, LayoutNodeRecord* node) {
@@ -274,7 +311,8 @@ bool MetaCodec::DecodeLayoutNode(const std::string& data, LayoutNodeRecord* node
         return false;
     }
     std::string payload;
-    if (!DecodeEnvelope(data, &payload)) {
+    uint32_t envelope_version = 0;
+    if (!DecodeEnvelope(data, &payload, &envelope_version)) {
         return false;
     }
     size_t cursor = 0;
@@ -290,7 +328,7 @@ bool MetaCodec::DecodeLayoutNode(const std::string& data, LayoutNodeRecord* node
     node->extents.reserve(extent_count);
     for (uint32_t i = 0; i < extent_count; ++i) {
         LayoutExtentRecord extent;
-        if (!DecodeExtentPayload(payload, &cursor, &extent)) {
+        if (!DecodeExtentPayload(payload, &cursor, &extent, envelope_version)) {
             return false;
         }
         node->extents.push_back(std::move(extent));

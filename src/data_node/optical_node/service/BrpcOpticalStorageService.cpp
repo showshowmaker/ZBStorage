@@ -34,10 +34,10 @@ void FillStatus(const zb::msg::Status& status, zb::rpc::Status* out) {
 
 BrpcOpticalStorageService::BrpcOpticalStorageService(OpticalStorageServiceImpl* service) : service_(service) {}
 
-void BrpcOpticalStorageService::WriteChunk(google::protobuf::RpcController* cntl_base,
-                                           const zb::rpc::WriteChunkRequest* request,
-                                           zb::rpc::WriteChunkReply* response,
-                                           google::protobuf::Closure* done) {
+void BrpcOpticalStorageService::WriteObject(google::protobuf::RpcController* cntl_base,
+                                            const zb::rpc::WriteObjectRequest* request,
+                                            zb::rpc::WriteObjectReply* response,
+                                            google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
     (void)cntl_base;
     if (!service_ || !request || !response) {
@@ -49,9 +49,9 @@ void BrpcOpticalStorageService::WriteChunk(google::protobuf::RpcController* cntl
         return;
     }
 
-    zb::msg::WriteChunkRequest internal_req;
+    zb::msg::WriteObjectRequest internal_req;
     internal_req.disk_id = request->disk_id();
-    internal_req.chunk_id = request->chunk_id();
+    internal_req.SetArchiveObjectId(request->object_id());
     internal_req.offset = request->offset();
     internal_req.data = request->data();
     internal_req.is_replication = request->is_replication();
@@ -66,9 +66,9 @@ void BrpcOpticalStorageService::WriteChunk(google::protobuf::RpcController* cntl
     internal_req.file_uid = request->file_uid();
     internal_req.file_gid = request->file_gid();
     internal_req.file_mtime = request->file_mtime();
-    internal_req.file_chunk_index = request->file_chunk_index();
+    internal_req.file_object_index = request->file_object_index();
 
-    zb::msg::WriteChunkReply internal_reply = service_->WriteChunk(internal_req);
+    const zb::msg::WriteObjectReply internal_reply = service_->WriteObject(internal_req);
     FillStatus(internal_reply.status, response->mutable_status());
     response->set_bytes(internal_reply.bytes);
     response->set_image_id(internal_reply.image_id);
@@ -76,10 +76,10 @@ void BrpcOpticalStorageService::WriteChunk(google::protobuf::RpcController* cntl
     response->set_image_length(internal_reply.image_length);
 }
 
-void BrpcOpticalStorageService::ReadChunk(google::protobuf::RpcController* cntl_base,
-                                          const zb::rpc::ReadChunkRequest* request,
-                                          zb::rpc::ReadChunkReply* response,
-                                          google::protobuf::Closure* done) {
+void BrpcOpticalStorageService::ReadObject(google::protobuf::RpcController* cntl_base,
+                                           const zb::rpc::ReadObjectRequest* request,
+                                           zb::rpc::ReadObjectReply* response,
+                                           google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
     (void)cntl_base;
     if (!service_ || !request || !response) {
@@ -91,19 +91,41 @@ void BrpcOpticalStorageService::ReadChunk(google::protobuf::RpcController* cntl_
         return;
     }
 
-    zb::msg::ReadChunkRequest internal_req;
+    zb::msg::ReadObjectRequest internal_req;
     internal_req.disk_id = request->disk_id();
-    internal_req.chunk_id = request->chunk_id();
+    internal_req.SetArchiveObjectId(request->object_id());
     internal_req.offset = request->offset();
     internal_req.size = request->size();
     internal_req.image_id = request->image_id();
     internal_req.image_offset = request->image_offset();
     internal_req.image_length = request->image_length();
 
-    zb::msg::ReadChunkReply internal_reply = service_->ReadChunk(internal_req);
+    const zb::msg::ReadObjectReply internal_reply = service_->ReadObject(internal_req);
     FillStatus(internal_reply.status, response->mutable_status());
     response->set_bytes(internal_reply.bytes);
     response->set_data(internal_reply.data);
+}
+
+void BrpcOpticalStorageService::DeleteObject(google::protobuf::RpcController* cntl_base,
+                                             const zb::rpc::DeleteObjectRequest* request,
+                                             zb::rpc::DeleteObjectReply* response,
+                                             google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!service_ || !request || !response) {
+        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
+        if (status) {
+            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            status->set_message("Service not initialized");
+        }
+        return;
+    }
+
+    zb::msg::DeleteObjectRequest internal_req;
+    internal_req.disk_id = request->disk_id();
+    internal_req.SetArchiveObjectId(request->object_id());
+    const zb::msg::DeleteObjectReply internal_reply = service_->DeleteObject(internal_req);
+    FillStatus(internal_reply.status, response->mutable_status());
 }
 
 void BrpcOpticalStorageService::ReadArchivedFile(google::protobuf::RpcController* cntl_base,
@@ -134,28 +156,6 @@ void BrpcOpticalStorageService::ReadArchivedFile(google::protobuf::RpcController
     response->set_data(internal_reply.data);
 }
 
-void BrpcOpticalStorageService::DeleteChunk(google::protobuf::RpcController* cntl_base,
-                                            const zb::rpc::DeleteChunkRequest* request,
-                                            zb::rpc::DeleteChunkReply* response,
-                                            google::protobuf::Closure* done) {
-    brpc::ClosureGuard done_guard(done);
-    (void)cntl_base;
-    if (!service_ || !request || !response) {
-        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
-        if (status) {
-            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
-            status->set_message("Service not initialized");
-        }
-        return;
-    }
-
-    zb::msg::DeleteChunkRequest internal_req;
-    internal_req.disk_id = request->disk_id();
-    internal_req.chunk_id = request->chunk_id();
-    zb::msg::DeleteChunkReply internal_reply = service_->DeleteChunk(internal_req);
-    FillStatus(internal_reply.status, response->mutable_status());
-}
-
 void BrpcOpticalStorageService::UpdateArchiveState(google::protobuf::RpcController* cntl_base,
                                                    const zb::rpc::UpdateArchiveStateRequest* request,
                                                    zb::rpc::UpdateArchiveStateReply* response,
@@ -171,8 +171,9 @@ void BrpcOpticalStorageService::UpdateArchiveState(google::protobuf::RpcControll
         return;
     }
 
+    const std::string object_id = request->object_id();
     const zb::msg::Status internal_status =
-        service_->UpdateArchiveState(request->disk_id(), request->chunk_id(), request->archive_state(), request->version());
+        service_->UpdateArchiveState(request->disk_id(), object_id, request->archive_state(), request->version());
     FillStatus(internal_status, response->mutable_status());
 }
 

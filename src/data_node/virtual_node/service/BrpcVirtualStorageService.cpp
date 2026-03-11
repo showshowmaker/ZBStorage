@@ -2,6 +2,7 @@
 
 #include <brpc/controller.h>
 
+#include "../../common/ObjectStore.h"
 #include "../../../msg/status.h"
 
 namespace zb::virtual_node {
@@ -36,9 +37,38 @@ void FillStatus(const zb::msg::Status& status, zb::rpc::Status* out) {
 
 BrpcVirtualStorageService::BrpcVirtualStorageService(VirtualStorageServiceImpl* service) : service_(service) {}
 
-void BrpcVirtualStorageService::WriteChunk(google::protobuf::RpcController* cntl_base,
-                                           const zb::rpc::WriteChunkRequest* request,
-                                           zb::rpc::WriteChunkReply* response,
+void BrpcVirtualStorageService::WriteObject(google::protobuf::RpcController* cntl_base,
+                                            const zb::rpc::WriteObjectRequest* request,
+                                            zb::rpc::WriteObjectReply* response,
+                                            google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!service_ || !request || !response) {
+        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
+        if (status) {
+            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            status->set_message("Service not initialized");
+        }
+        return;
+    }
+
+    zb::data_node::ObjectWriteRequest object_req;
+    object_req.disk_id = request->disk_id();
+    object_req.object_id = request->object_id();
+    object_req.offset = request->offset();
+    object_req.data = request->data();
+    object_req.epoch = request->epoch();
+    object_req.is_replication = request->is_replication();
+    const zb::msg::Status st = service_->PutObject(object_req);
+    FillStatus(st, response->mutable_status());
+    if (st.ok()) {
+        response->set_bytes(static_cast<uint64_t>(request->data().size()));
+    }
+}
+
+void BrpcVirtualStorageService::ReadObject(google::protobuf::RpcController* cntl_base,
+                                           const zb::rpc::ReadObjectRequest* request,
+                                           zb::rpc::ReadObjectReply* response,
                                            google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
     (void)cntl_base;
@@ -51,37 +81,23 @@ void BrpcVirtualStorageService::WriteChunk(google::protobuf::RpcController* cntl
         return;
     }
 
-    zb::msg::WriteChunkRequest internal_req;
-    internal_req.disk_id = request->disk_id();
-    internal_req.chunk_id = request->chunk_id();
-    internal_req.offset = request->offset();
-    internal_req.data = request->data();
-    internal_req.is_replication = request->is_replication();
-    internal_req.epoch = request->epoch();
-    internal_req.archive_op_id = request->archive_op_id();
-    internal_req.inode_id = request->inode_id();
-    internal_req.file_id = request->file_id();
-    internal_req.file_path = request->file_path();
-    internal_req.file_size = request->file_size();
-    internal_req.file_offset = request->file_offset();
-    internal_req.file_mode = request->file_mode();
-    internal_req.file_uid = request->file_uid();
-    internal_req.file_gid = request->file_gid();
-    internal_req.file_mtime = request->file_mtime();
-    internal_req.file_chunk_index = request->file_chunk_index();
-
-    zb::msg::WriteChunkReply internal_reply = service_->WriteChunk(internal_req);
-    FillStatus(internal_reply.status, response->mutable_status());
-    response->set_bytes(internal_reply.bytes);
-    response->set_image_id(internal_reply.image_id);
-    response->set_image_offset(internal_reply.image_offset);
-    response->set_image_length(internal_reply.image_length);
+    zb::data_node::ObjectReadRequest object_req;
+    object_req.disk_id = request->disk_id();
+    object_req.object_id = request->object_id();
+    object_req.offset = request->offset();
+    object_req.size = request->size();
+    const zb::data_node::ObjectReadResult result = service_->GetObject(object_req);
+    FillStatus(result.status, response->mutable_status());
+    if (result.status.ok()) {
+        response->set_bytes(static_cast<uint64_t>(result.data.size()));
+        response->set_data(result.data);
+    }
 }
 
-void BrpcVirtualStorageService::ReadChunk(google::protobuf::RpcController* cntl_base,
-                                          const zb::rpc::ReadChunkRequest* request,
-                                          zb::rpc::ReadChunkReply* response,
-                                          google::protobuf::Closure* done) {
+void BrpcVirtualStorageService::DeleteObject(google::protobuf::RpcController* cntl_base,
+                                             const zb::rpc::DeleteObjectRequest* request,
+                                             zb::rpc::DeleteObjectReply* response,
+                                             google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
     (void)cntl_base;
     if (!service_ || !request || !response) {
@@ -93,19 +109,11 @@ void BrpcVirtualStorageService::ReadChunk(google::protobuf::RpcController* cntl_
         return;
     }
 
-    zb::msg::ReadChunkRequest internal_req;
-    internal_req.disk_id = request->disk_id();
-    internal_req.chunk_id = request->chunk_id();
-    internal_req.offset = request->offset();
-    internal_req.size = request->size();
-    internal_req.image_id = request->image_id();
-    internal_req.image_offset = request->image_offset();
-    internal_req.image_length = request->image_length();
-
-    zb::msg::ReadChunkReply internal_reply = service_->ReadChunk(internal_req);
-    FillStatus(internal_reply.status, response->mutable_status());
-    response->set_bytes(internal_reply.bytes);
-    response->set_data(internal_reply.data);
+    zb::data_node::ObjectDeleteRequest object_req;
+    object_req.disk_id = request->disk_id();
+    object_req.object_id = request->object_id();
+    const zb::msg::Status st = service_->DeleteObject(object_req);
+    FillStatus(st, response->mutable_status());
 }
 
 void BrpcVirtualStorageService::ReadArchivedFile(google::protobuf::RpcController* cntl_base,
@@ -136,28 +144,6 @@ void BrpcVirtualStorageService::ReadArchivedFile(google::protobuf::RpcController
     response->set_data(internal_reply.data);
 }
 
-void BrpcVirtualStorageService::DeleteChunk(google::protobuf::RpcController* cntl_base,
-                                            const zb::rpc::DeleteChunkRequest* request,
-                                            zb::rpc::DeleteChunkReply* response,
-                                            google::protobuf::Closure* done) {
-    brpc::ClosureGuard done_guard(done);
-    (void)cntl_base;
-    if (!service_ || !request || !response) {
-        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
-        if (status) {
-            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
-            status->set_message("Service not initialized");
-        }
-        return;
-    }
-
-    zb::msg::DeleteChunkRequest internal_req;
-    internal_req.disk_id = request->disk_id();
-    internal_req.chunk_id = request->chunk_id();
-    zb::msg::DeleteChunkReply internal_reply = service_->DeleteChunk(internal_req);
-    FillStatus(internal_reply.status, response->mutable_status());
-}
-
 void BrpcVirtualStorageService::UpdateArchiveState(google::protobuf::RpcController* cntl_base,
                                                    const zb::rpc::UpdateArchiveStateRequest* request,
                                                    zb::rpc::UpdateArchiveStateReply* response,
@@ -173,8 +159,9 @@ void BrpcVirtualStorageService::UpdateArchiveState(google::protobuf::RpcControll
         return;
     }
 
+    const std::string object_id = request->object_id();
     const zb::msg::Status internal_status =
-        service_->UpdateArchiveState(request->disk_id(), request->chunk_id(), request->archive_state(), request->version());
+        service_->UpdateArchiveState(request->disk_id(), object_id, request->archive_state(), request->version());
     FillStatus(internal_status, response->mutable_status());
 }
 

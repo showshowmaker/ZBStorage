@@ -217,10 +217,11 @@ private:
                 request.set_report_ts_ms(NowMs());
                 for (const auto& sample : samples) {
                     zb::rpc::ArchiveCandidate* candidate = request.add_candidates();
+                    const std::string object_id = sample.ArchiveObjectId();
                     candidate->set_node_id(node_id_);
                     candidate->set_node_address(node_address_);
                     candidate->set_disk_id(sample.disk_id);
-                    candidate->set_chunk_id(sample.chunk_id);
+                    candidate->set_object_id(object_id);
                     candidate->set_last_access_ts_ms(sample.last_access_ts_ms);
                     candidate->set_size_bytes(sample.size_bytes);
                     candidate->set_checksum(sample.checksum);
@@ -307,7 +308,7 @@ int main(int argc, char* argv[]) {
     zb::real_node::LocalPathResolver path_resolver;
     zb::real_node::IOExecutor io_executor;
     zb::real_node::StorageServiceImpl storage_service(&disk_manager, &path_resolver, &io_executor);
-    storage_service.SetArchiveTrackingMaxChunks(cfg.archive_track_max_chunks);
+    storage_service.SetArchiveTrackingMaxObjects(cfg.archive_track_max_objects);
     std::string archive_meta_dir = cfg.archive_meta_dir;
     if (archive_meta_dir.empty()) {
         if (!cfg.disk_base_dir.empty()) {
@@ -320,7 +321,7 @@ int main(int argc, char* argv[]) {
     }
     std::string archive_meta_error;
     if (!storage_service.InitArchiveMetaStore(archive_meta_dir,
-                                              cfg.archive_track_max_chunks,
+                                              cfg.archive_track_max_objects,
                                               cfg.archive_meta_snapshot_interval_ops,
                                               cfg.archive_meta_wal_fsync,
                                               &archive_meta_error)) {

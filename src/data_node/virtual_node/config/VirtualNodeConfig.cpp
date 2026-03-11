@@ -179,10 +179,11 @@ VirtualNodeConfig VirtualNodeConfig::LoadFromFile(const std::string& path, std::
                 }
                 return {};
             }
-        } else if (key == "ARCHIVE_TRACK_MAX_CHUNKS") {
-            if (!ParseUint32(value, &cfg.archive_track_max_chunks)) {
+        } else if (key == "ARCHIVE_TRACK_MAX_OBJECTS") {
+            if (!ParseUint32(value, &cfg.archive_track_max_objects)) {
                 if (error) {
-                    *error = "Invalid ARCHIVE_TRACK_MAX_CHUNKS at line " + std::to_string(line_no);
+                    *error = "Invalid ARCHIVE_TRACK_MAX_OBJECTS at line " +
+                             std::to_string(line_no);
                 }
                 return {};
             }
@@ -297,8 +298,8 @@ VirtualNodeConfig VirtualNodeConfig::LoadFromFile(const std::string& path, std::
     if (cfg.archive_report_topk == 0) {
         cfg.archive_report_topk = 1;
     }
-    if (cfg.archive_track_max_chunks == 0) {
-        cfg.archive_track_max_chunks = 1;
+    if (cfg.archive_track_max_objects == 0) {
+        cfg.archive_track_max_objects = 1;
     }
     if (cfg.archive_meta_snapshot_interval_ops == 0) {
         cfg.archive_meta_snapshot_interval_ops = 1;

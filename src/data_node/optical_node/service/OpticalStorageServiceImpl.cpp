@@ -17,8 +17,8 @@ constexpr size_t kArchiveOpCacheMaxEntries = 100000;
 constexpr uint64_t kArchiveOpCacheTtlMs = 24ULL * 60ULL * 60ULL * 1000ULL;
 constexpr uint64_t kArchiveOpCachePruneInterval = 1024;
 
-std::string BuildCacheChunkKey(const std::string& disk_id, const std::string& chunk_id) {
-    return disk_id + "/" + chunk_id;
+std::string BuildCacheObjectKey(const std::string& disk_id, const std::string& object_id) {
+    return disk_id + "/" + object_id;
 }
 
 } // namespace
@@ -78,14 +78,15 @@ ReplicationStatusSnapshot OpticalStorageServiceImpl::GetReplicationStatus() cons
     return repl_;
 }
 
-zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::WriteChunkRequest& request) {
-    zb::msg::WriteChunkReply reply;
+zb::msg::WriteObjectReply OpticalStorageServiceImpl::WriteObject(const zb::msg::WriteObjectRequest& request) {
+    zb::msg::WriteObjectReply reply;
     if (!store_) {
         reply.status = zb::msg::Status::InternalError("Service not initialized");
         return reply;
     }
-    if (request.disk_id.empty() || request.chunk_id.empty()) {
-        reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
+    const std::string object_id = request.ArchiveObjectId();
+    if (request.disk_id.empty() || object_id.empty()) {
+        reply.status = zb::msg::Status::InvalidArgument("disk_id or object_id is empty");
         return reply;
     }
 
@@ -103,8 +104,8 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
     if (!request.archive_op_id.empty()) {
         std::lock_guard<std::mutex> lock(archive_op_mu_);
         PruneArchiveOpCacheLocked(now_ms);
-        auto it = last_archive_op_by_chunk_.find(request.chunk_id);
-        if (it != last_archive_op_by_chunk_.end() &&
+        auto it = last_archive_op_by_object_.find(object_id);
+        if (it != last_archive_op_by_object_.end() &&
             it->second.op_id == request.archive_op_id &&
             now_ms >= it->second.last_seen_ts_ms &&
             now_ms - it->second.last_seen_ts_ms <= kArchiveOpCacheTtlMs) {
@@ -134,13 +135,13 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
         file_meta.file_uid = request.file_uid;
         file_meta.file_gid = request.file_gid;
         file_meta.file_mtime = request.file_mtime;
-        file_meta.file_chunk_index = request.file_chunk_index;
+        file_meta.file_object_index = request.file_object_index;
 
-        reply.status = store_->WriteChunk(request.disk_id,
-                                          request.chunk_id,
-                                          request.data,
-                                          &file_meta,
-                                          &location);
+        reply.status = store_->WriteObject(request.disk_id,
+                                           object_id,
+                                           request.data,
+                                           &file_meta,
+                                           &location);
         if (!reply.status.ok()) {
             return reply;
         }
@@ -165,7 +166,7 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
     if (!request.archive_op_id.empty()) {
         std::lock_guard<std::mutex> lock(archive_op_mu_);
         PruneArchiveOpCacheLocked(now_ms);
-        ArchiveOpCacheEntry& entry = last_archive_op_by_chunk_[request.chunk_id];
+        ArchiveOpCacheEntry& entry = last_archive_op_by_object_[object_id];
         entry.op_id = request.archive_op_id;
         entry.last_seen_ts_ms = now_ms;
         entry.image_id = location.image_id;
@@ -176,21 +177,22 @@ zb::msg::WriteChunkReply OpticalStorageServiceImpl::WriteChunk(const zb::msg::Wr
     return reply;
 }
 
-zb::msg::ReadChunkReply OpticalStorageServiceImpl::ReadChunk(const zb::msg::ReadChunkRequest& request) {
-    zb::msg::ReadChunkReply reply;
+zb::msg::ReadObjectReply OpticalStorageServiceImpl::ReadObject(const zb::msg::ReadObjectRequest& request) {
+    zb::msg::ReadObjectReply reply;
     if (!store_) {
         reply.status = zb::msg::Status::InternalError("Service not initialized");
         return reply;
     }
-    if (request.disk_id.empty() || request.chunk_id.empty()) {
-        reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
+    const std::string object_id = request.ArchiveObjectId();
+    if (request.disk_id.empty() || object_id.empty()) {
+        reply.status = zb::msg::Status::InvalidArgument("disk_id or object_id is empty");
         return reply;
     }
 
     if (request.image_id.empty()) {
         std::lock_guard<std::mutex> lock(cache_mu_);
-        auto it = cache_chunks_.find(BuildCacheChunkKey(request.disk_id, request.chunk_id));
-        if (it != cache_chunks_.end()) {
+        auto it = cache_objects_.find(BuildCacheObjectKey(request.disk_id, object_id));
+        if (it != cache_objects_.end()) {
             const std::string& blob = it->second;
             if (request.offset >= blob.size()) {
                 reply.bytes = 0;
@@ -206,15 +208,15 @@ zb::msg::ReadChunkReply OpticalStorageServiceImpl::ReadChunk(const zb::msg::Read
         }
     }
 
-    reply.status = store_->ReadChunk(request.disk_id,
-                                     request.chunk_id,
-                                     request.offset,
-                                     request.size,
-                                     request.image_id,
-                                     request.image_offset,
-                                     request.image_length,
-                                     &reply.data,
-                                     &reply.bytes);
+    reply.status = store_->ReadObject(request.disk_id,
+                                      object_id,
+                                      request.offset,
+                                      request.size,
+                                      request.image_id,
+                                      request.image_offset,
+                                      request.image_length,
+                                      &reply.data,
+                                      &reply.bytes);
     return reply;
 }
 
@@ -239,23 +241,24 @@ zb::msg::ReadArchivedFileReply OpticalStorageServiceImpl::ReadArchivedFile(
     return reply;
 }
 
-zb::msg::DeleteChunkReply OpticalStorageServiceImpl::DeleteChunk(const zb::msg::DeleteChunkRequest& request) {
-    zb::msg::DeleteChunkReply reply;
+zb::msg::DeleteObjectReply OpticalStorageServiceImpl::DeleteObject(const zb::msg::DeleteObjectRequest& request) {
+    zb::msg::DeleteObjectReply reply;
     if (!store_) {
         reply.status = zb::msg::Status::InternalError("Service not initialized");
         return reply;
     }
-    if (request.disk_id.empty() || request.chunk_id.empty()) {
-        reply.status = zb::msg::Status::InvalidArgument("disk_id or chunk_id is empty");
+    const std::string object_id = request.ArchiveObjectId();
+    if (request.disk_id.empty() || object_id.empty()) {
+        reply.status = zb::msg::Status::InvalidArgument("disk_id or object_id is empty");
         return reply;
     }
 
     {
         std::lock_guard<std::mutex> lock(cache_mu_);
-        cache_chunks_.erase(BuildCacheChunkKey(request.disk_id, request.chunk_id));
+        cache_objects_.erase(BuildCacheObjectKey(request.disk_id, object_id));
     }
 
-    reply.status = store_->DeleteChunk(request.disk_id, request.chunk_id);
+    reply.status = store_->DeleteObject(request.disk_id, object_id);
     if (reply.status.code == zb::msg::StatusCode::kNotFound) {
         reply.status = zb::msg::Status::Ok();
     }
@@ -272,17 +275,17 @@ zb::msg::DiskReportReply OpticalStorageServiceImpl::GetDiskReport() const {
 }
 
 zb::msg::Status OpticalStorageServiceImpl::UpdateArchiveState(const std::string& disk_id,
-                                                              const std::string& chunk_id,
+                                                              const std::string& object_id,
                                                               const std::string& archive_state,
                                                               uint64_t version) {
     (void)disk_id;
-    (void)chunk_id;
+    (void)object_id;
     (void)archive_state;
     (void)version;
     return zb::msg::Status::Ok();
 }
 
-zb::msg::Status OpticalStorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request,
+zb::msg::Status OpticalStorageServiceImpl::ReplicateWriteToSecondary(const zb::msg::WriteObjectRequest& request,
                                                                      uint64_t epoch) {
     ReplicationStatusSnapshot repl_snapshot = GetReplicationStatus();
     if (!repl_snapshot.replication_enabled || repl_snapshot.peer_address.empty()) {
@@ -314,9 +317,10 @@ zb::msg::Status OpticalStorageServiceImpl::ReplicateWriteToSecondary(const zb::m
     }
 
     zb::rpc::RealNodeService_Stub stub(channel);
-    zb::rpc::WriteChunkRequest replicate_req;
+    zb::rpc::WriteObjectRequest replicate_req;
+    const std::string object_id = request.ArchiveObjectId();
     replicate_req.set_disk_id(request.disk_id);
-    replicate_req.set_chunk_id(request.chunk_id);
+    replicate_req.set_object_id(object_id);
     replicate_req.set_offset(request.offset);
     replicate_req.set_data(request.data);
     replicate_req.set_is_replication(true);
@@ -331,11 +335,11 @@ zb::msg::Status OpticalStorageServiceImpl::ReplicateWriteToSecondary(const zb::m
     replicate_req.set_file_uid(request.file_uid);
     replicate_req.set_file_gid(request.file_gid);
     replicate_req.set_file_mtime(request.file_mtime);
-    replicate_req.set_file_chunk_index(request.file_chunk_index);
+    replicate_req.set_file_object_index(request.file_object_index);
 
-    zb::rpc::WriteChunkReply replicate_resp;
+    zb::rpc::WriteObjectReply replicate_resp;
     brpc::Controller cntl;
-    stub.WriteChunk(&cntl, &replicate_req, &replicate_resp, nullptr);
+    stub.WriteObject(&cntl, &replicate_req, &replicate_resp, nullptr);
     if (cntl.Failed()) {
         return zb::msg::Status::IoError("replication rpc failed: " + cntl.ErrorText());
     }
@@ -353,27 +357,27 @@ uint64_t OpticalStorageServiceImpl::NowMilliseconds() {
 void OpticalStorageServiceImpl::PruneArchiveOpCacheLocked(uint64_t now_ms) {
     ++archive_op_cache_touch_;
     const bool need_periodic_prune = (archive_op_cache_touch_ % kArchiveOpCachePruneInterval) == 0;
-    if (!need_periodic_prune && last_archive_op_by_chunk_.size() <= kArchiveOpCacheMaxEntries) {
+    if (!need_periodic_prune && last_archive_op_by_object_.size() <= kArchiveOpCacheMaxEntries) {
         return;
     }
 
-    for (auto it = last_archive_op_by_chunk_.begin(); it != last_archive_op_by_chunk_.end();) {
+    for (auto it = last_archive_op_by_object_.begin(); it != last_archive_op_by_object_.end();) {
         const ArchiveOpCacheEntry& entry = it->second;
         const bool expired = now_ms >= entry.last_seen_ts_ms &&
                              now_ms - entry.last_seen_ts_ms > kArchiveOpCacheTtlMs;
         if (expired) {
-            it = last_archive_op_by_chunk_.erase(it);
+            it = last_archive_op_by_object_.erase(it);
         } else {
             ++it;
         }
     }
-    if (last_archive_op_by_chunk_.size() <= kArchiveOpCacheMaxEntries) {
+    if (last_archive_op_by_object_.size() <= kArchiveOpCacheMaxEntries) {
         return;
     }
 
     std::vector<std::pair<std::string, uint64_t>> candidates;
-    candidates.reserve(last_archive_op_by_chunk_.size());
-    for (const auto& item : last_archive_op_by_chunk_) {
+    candidates.reserve(last_archive_op_by_object_.size());
+    for (const auto& item : last_archive_op_by_object_) {
         candidates.emplace_back(item.first, item.second.last_seen_ts_ms);
     }
     std::sort(candidates.begin(),
@@ -384,7 +388,7 @@ void OpticalStorageServiceImpl::PruneArchiveOpCacheLocked(uint64_t now_ms) {
               });
     const size_t remove_count = candidates.size() - kArchiveOpCacheMaxEntries;
     for (size_t i = 0; i < remove_count; ++i) {
-        last_archive_op_by_chunk_.erase(candidates[i].first);
+        last_archive_op_by_object_.erase(candidates[i].first);
     }
 }
 

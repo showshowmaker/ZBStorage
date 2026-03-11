@@ -25,7 +25,7 @@ DEFINE_string(base_dir, "/optical_stress", "Base directory in distributed filesy
 DEFINE_bool(auto_suffix, true, "Append timestamp suffix to base_dir to avoid conflicts");
 DEFINE_uint32(file_count, 64, "Number of files to write concurrently");
 DEFINE_uint64(write_size, 1048576, "Bytes per write");
-DEFINE_uint64(chunk_size, 4194304, "Chunk size used by Create");
+DEFINE_uint64(object_unit_size, 4194304, "Object unit size used by Create");
 DEFINE_uint32(replica, 1, "Replica count used by Create");
 DEFINE_uint64(duration_sec, 1800, "Stress write duration in seconds");
 DEFINE_uint64(target_total_bytes, 0, "Optional total bytes to write, 0 means unlimited by bytes");
@@ -34,7 +34,7 @@ DEFINE_uint32(sample_files, 8, "Number of files sampled for layout check per rep
 DEFINE_bool(require_optical, true, "Fail if no optical replica is observed");
 DEFINE_uint64(cooldown_sec, 0, "Cooldown time after writes for archive/evict to catch up");
 DEFINE_bool(require_optical_only_after_cooldown, false,
-            "After cooldown, require at least one chunk with optical replica only (no disk replica)");
+            "After cooldown, require at least one object with optical replica only (no disk replica)");
 
 namespace {
 
@@ -47,11 +47,15 @@ struct FileState {
 
 struct LayoutStats {
     uint64_t files_scanned{0};
-    uint64_t chunks_total{0};
-    uint64_t chunks_with_optical{0};
-    uint64_t chunks_with_disk{0};
-    uint64_t chunks_optical_only{0};
+    uint64_t objects_total{0};
+    uint64_t objects_with_optical{0};
+    uint64_t objects_with_disk{0};
+    uint64_t objects_optical_only{0};
 };
+
+std::string ReplicaObjectId(const zb::rpc::ReplicaLocation& replica) {
+    return replica.object_id();
+}
 
 class MdsClient {
 public:
@@ -87,14 +91,14 @@ public:
         return false;
     }
 
-    bool Create(const std::string& path, uint32_t replica, uint64_t chunk_size, uint64_t* inode_id, std::string* err) {
+    bool Create(const std::string& path, uint32_t replica, uint64_t object_unit_size, uint64_t* inode_id, std::string* err) {
         zb::rpc::CreateRequest req;
         req.set_path(path);
         req.set_mode(0644);
         req.set_uid(0);
         req.set_gid(0);
         req.set_replica(replica);
-        req.set_chunk_size(chunk_size);
+        req.set_object_unit_size(object_unit_size);
         zb::rpc::CreateReply resp;
         brpc::Controller cntl;
         stub_.Create(&cntl, &req, &resp, nullptr);
@@ -228,16 +232,16 @@ public:
                 continue;
             }
             zb::rpc::RealNodeService_Stub stub(ch);
-            zb::rpc::WriteChunkRequest req;
+            zb::rpc::WriteObjectRequest req;
             req.set_disk_id(replica.disk_id());
-            req.set_chunk_id(replica.chunk_id());
+            req.set_object_id(ReplicaObjectId(replica));
             req.set_offset(offset);
             req.set_data(data);
             req.set_epoch(replica.epoch());
-            zb::rpc::WriteChunkReply resp;
+            zb::rpc::WriteObjectReply resp;
             brpc::Controller cntl;
             cntl.set_timeout_ms(FLAGS_timeout_ms);
-            stub.WriteChunk(&cntl, &req, &resp, nullptr);
+            stub.WriteObject(&cntl, &req, &resp, nullptr);
             if (cntl.Failed()) {
                 last_error = cntl.ErrorText();
                 continue;
@@ -337,24 +341,24 @@ bool WriteByLayout(DataNodeClient* data_client,
         return false;
     }
 
-    const uint64_t chunk_size = layout.chunk_size();
+    const uint64_t object_unit_size = layout.object_unit_size();
     const uint64_t write_size = static_cast<uint64_t>(payload.size());
-    for (const auto& chunk : layout.chunks()) {
-        const uint64_t chunk_start = static_cast<uint64_t>(chunk.index()) * chunk_size;
-        const uint64_t chunk_end = chunk_start + chunk_size;
-        const uint64_t write_start = std::max<uint64_t>(chunk_start, file_offset);
-        const uint64_t write_end = std::min<uint64_t>(chunk_end, file_offset + write_size);
+    for (const auto& object : layout.objects()) {
+        const uint64_t object_start = static_cast<uint64_t>(object.index()) * object_unit_size;
+        const uint64_t object_end = object_start + object_unit_size;
+        const uint64_t write_start = std::max<uint64_t>(object_start, file_offset);
+        const uint64_t write_end = std::min<uint64_t>(object_end, file_offset + write_size);
         if (write_end <= write_start) {
             continue;
         }
 
-        const uint64_t chunk_off = write_start - chunk_start;
+        const uint64_t object_off = write_start - object_start;
         const uint64_t write_len = write_end - write_start;
         const uint64_t payload_off = write_start - file_offset;
         const std::string piece = payload.substr(static_cast<size_t>(payload_off), static_cast<size_t>(write_len));
 
-        for (const auto& replica : chunk.replicas()) {
-            if (!data_client->WriteReplica(replica, chunk_off, piece, err)) {
+        for (const auto& replica : object.replicas()) {
+            if (!data_client->WriteReplica(replica, object_off, piece, err)) {
                 return false;
             }
         }
@@ -381,25 +385,25 @@ LayoutStats CollectLayoutStats(MdsClient* mds, const std::vector<FileState>& fil
         }
 
         ++stats.files_scanned;
-        for (const auto& chunk : layout.chunks()) {
+        for (const auto& object : layout.objects()) {
             bool has_optical = false;
             bool has_disk = false;
-            for (const auto& replica : chunk.replicas()) {
+            for (const auto& replica : object.replicas()) {
                 if (replica.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL) {
                     has_optical = true;
                 } else {
                     has_disk = true;
                 }
             }
-            ++stats.chunks_total;
+            ++stats.objects_total;
             if (has_optical) {
-                ++stats.chunks_with_optical;
+                ++stats.objects_with_optical;
             }
             if (has_disk) {
-                ++stats.chunks_with_disk;
+                ++stats.objects_with_disk;
             }
             if (has_optical && !has_disk) {
-                ++stats.chunks_optical_only;
+                ++stats.objects_optical_only;
             }
         }
     }
@@ -411,8 +415,8 @@ LayoutStats CollectLayoutStats(MdsClient* mds, const std::vector<FileState>& fil
 int main(int argc, char* argv[]) {
     google::ParseCommandLineFlags(&argc, &argv, true);
 
-    if (FLAGS_file_count == 0 || FLAGS_write_size == 0 || FLAGS_chunk_size == 0 || FLAGS_duration_sec == 0) {
-        std::cerr << "invalid flags: file_count/write_size/chunk_size/duration_sec must be > 0" << std::endl;
+    if (FLAGS_file_count == 0 || FLAGS_write_size == 0 || FLAGS_object_unit_size == 0 || FLAGS_duration_sec == 0) {
+        std::cerr << "invalid flags: file_count/write_size/object_unit_size/duration_sec must be > 0" << std::endl;
         return 1;
     }
 
@@ -441,7 +445,7 @@ int main(int argc, char* argv[]) {
     for (uint32_t i = 0; i < FLAGS_file_count; ++i) {
         FileState state;
         state.path = base_dir + "/f_" + std::to_string(i) + ".bin";
-        if (!mds.Create(state.path, FLAGS_replica, FLAGS_chunk_size, &state.inode_id, &err)) {
+        if (!mds.Create(state.path, FLAGS_replica, FLAGS_object_unit_size, &state.inode_id, &err)) {
             std::cerr << "Create failed: " << state.path << " err=" << err << std::endl;
             return 1;
         }
@@ -490,7 +494,7 @@ int main(int argc, char* argv[]) {
 
         if (!WriteByLayout(&data_client, layout, offset, payload, &err)) {
             ++failures;
-            std::cerr << "chunk write failed inode=" << f.inode_id << " err=" << err << std::endl;
+            std::cerr << "object write failed inode=" << f.inode_id << " err=" << err << std::endl;
             continue;
         }
 
@@ -508,16 +512,16 @@ int main(int argc, char* argv[]) {
 
         if (now >= next_report) {
             LayoutStats stats = CollectLayoutStats(&mds, files);
-            observed_optical = observed_optical || (stats.chunks_with_optical > 0);
-            observed_optical_only = observed_optical_only || (stats.chunks_optical_only > 0);
+            observed_optical = observed_optical || (stats.objects_with_optical > 0);
+            observed_optical_only = observed_optical_only || (stats.objects_optical_only > 0);
             std::cout << "[report] elapsed_sec=" << elapsed_sec
                       << " total_bytes=" << total_bytes
                       << " write_ops=" << write_ops
                       << " failures=" << failures
                       << " sampled_files=" << stats.files_scanned
-                      << " sampled_chunks=" << stats.chunks_total
-                      << " chunks_with_optical=" << stats.chunks_with_optical
-                      << " chunks_optical_only=" << stats.chunks_optical_only
+                      << " sampled_objects=" << stats.objects_total
+                      << " objects_with_optical=" << stats.objects_with_optical
+                      << " objects_optical_only=" << stats.objects_optical_only
                       << std::endl;
             next_report = now + std::chrono::seconds(std::max<uint32_t>(1, FLAGS_report_interval_sec));
         }
@@ -527,12 +531,12 @@ int main(int argc, char* argv[]) {
         std::cout << "cooldown " << FLAGS_cooldown_sec << "s for archive/evict..." << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(FLAGS_cooldown_sec));
         LayoutStats stats = CollectLayoutStats(&mds, files);
-        observed_optical = observed_optical || (stats.chunks_with_optical > 0);
-        observed_optical_only = observed_optical_only || (stats.chunks_optical_only > 0);
+        observed_optical = observed_optical || (stats.objects_with_optical > 0);
+        observed_optical_only = observed_optical_only || (stats.objects_optical_only > 0);
         std::cout << "[cooldown-check] sampled_files=" << stats.files_scanned
-                  << " sampled_chunks=" << stats.chunks_total
-                  << " chunks_with_optical=" << stats.chunks_with_optical
-                  << " chunks_optical_only=" << stats.chunks_optical_only
+                  << " sampled_objects=" << stats.objects_total
+                  << " objects_with_optical=" << stats.objects_with_optical
+                  << " objects_optical_only=" << stats.objects_optical_only
                   << std::endl;
     }
 
@@ -549,7 +553,7 @@ int main(int argc, char* argv[]) {
         return 2;
     }
     if (FLAGS_require_optical_only_after_cooldown && !observed_optical_only) {
-        std::cerr << "FAILED: no optical-only chunk observed after cooldown." << std::endl;
+        std::cerr << "FAILED: no optical-only object observed after cooldown." << std::endl;
         return 3;
     }
     if (failures > 0) {

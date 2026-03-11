@@ -8,7 +8,7 @@
 #include <thread>
 #include <unordered_map>
 
-#include "../allocator/ChunkAllocator.h"
+#include "../allocator/ObjectAllocator.h"
 #include "../allocator/NodeStateCache.h"
 #include "../allocator/PGManager.h"
 #include "../archive/ArchiveBatchStager.h"
@@ -51,14 +51,14 @@ int main(int argc, char* argv[]) {
     pg_options.pg_count = cfg.pg_count;
     pg_options.replica = cfg.replica > 0 ? cfg.replica : 1;
     zb::mds::PGManager pg_manager(pg_options);
-    if (cfg.enable_pg_layout && !cfg.nodes.empty()) {
+    if (!cfg.nodes.empty()) {
         const uint64_t initial_pg_epoch = cfg.pg_view_epoch > 0 ? cfg.pg_view_epoch : 1;
         if (!pg_manager.RebuildFromNodes(cfg.nodes, initial_pg_epoch, &error)) {
             std::cerr << "Failed to initialize PG placement view: " << error << std::endl;
             return 1;
         }
     }
-    zb::mds::ChunkAllocator allocator(&cache, &pg_manager, cfg.enable_pg_layout);
+    zb::mds::ObjectAllocator allocator(&cache, &pg_manager);
     zb::mds::ArchiveCandidateQueue candidate_queue(cfg.archive_candidate_queue_size);
     zb::mds::ArchiveLeaseManager::Options lease_options;
     lease_options.default_lease_ms = cfg.archive_lease_default_ms;
@@ -66,11 +66,12 @@ int main(int argc, char* argv[]) {
     lease_options.max_lease_ms = cfg.archive_lease_max_ms;
     zb::mds::ArchiveLeaseManager lease_manager(&store, lease_options);
     zb::mds::ArchiveBatchStager batch_stager;
-    zb::mds::MdsServiceImpl service(&store, &allocator, cfg.chunk_size, &candidate_queue, &lease_manager);
+    zb::mds::MdsServiceImpl service(&store, &allocator, cfg.object_unit_size, &candidate_queue, &lease_manager);
     zb::mds::MdsServiceImpl::LayoutObjectOptions layout_options;
     layout_options.replica_count = cfg.layout_object_replica_count;
     layout_options.scrub_on_load = cfg.layout_object_scrub_on_load;
     service.SetLayoutObjectOptions(layout_options);
+    service.SetSimplifiedAnchorMetadataMode(cfg.enable_simplified_anchor_metadata);
     std::unique_ptr<zb::mds::OpticalArchiveManager> archive_manager;
     if (cfg.enable_optical_archive) {
         zb::mds::ArchiveBatchStager::Options stager_options;
@@ -90,8 +91,8 @@ int main(int argc, char* argv[]) {
         options.archive_trigger_bytes = cfg.archive_trigger_bytes;
         options.archive_target_bytes = cfg.archive_target_bytes;
         options.cold_file_ttl_sec = cfg.cold_file_ttl_sec;
-        options.max_chunks_per_round = cfg.archive_max_chunks_per_round;
-        options.default_chunk_size = cfg.chunk_size;
+        options.max_objects_per_round = cfg.archive_max_objects_per_round;
+        options.default_object_unit_size = cfg.object_unit_size;
         archive_manager =
             std::make_unique<zb::mds::OpticalArchiveManager>(&store,
                                                               &cache,
@@ -214,18 +215,16 @@ int main(int argc, char* argv[]) {
                         }
                         nodes.push_back(std::move(info));
                     }
-                    if (cfg.enable_pg_layout) {
-                        uint64_t pg_epoch = response.generation();
+                    uint64_t pg_epoch = response.generation();
+                    if (pg_epoch == 0) {
+                        pg_epoch = pg_manager.CurrentEpoch() + 1;
                         if (pg_epoch == 0) {
-                            pg_epoch = pg_manager.CurrentEpoch() + 1;
-                            if (pg_epoch == 0) {
-                                pg_epoch = 1;
-                            }
+                            pg_epoch = 1;
                         }
-                        std::string pg_error;
-                        if (!pg_manager.RebuildFromNodes(nodes, pg_epoch, &pg_error)) {
-                            std::cerr << "Failed to rebuild PG placement view: " << pg_error << std::endl;
-                        }
+                    }
+                    std::string pg_error;
+                    if (!pg_manager.RebuildFromNodes(nodes, pg_epoch, &pg_error)) {
+                        std::cerr << "Failed to rebuild PG placement view: " << pg_error << std::endl;
                     }
                     cache.ReplaceNodes(std::move(nodes));
                     min_generation = response.generation();
@@ -251,6 +250,8 @@ int main(int argc, char* argv[]) {
         zb::mds::GcManager::Options gc_options;
         gc_options.orphan_grace_ms = cfg.layout_gc_orphan_grace_ms;
         gc_options.max_delete_per_round = cfg.layout_gc_max_delete_per_round;
+        gc_options.dry_run = cfg.layout_gc_dry_run;
+        gc_options.paused = cfg.layout_gc_paused;
         gc_manager = std::make_unique<zb::mds::GcManager>(&store, gc_options);
         layout_gc_thread = std::thread([&]() {
             const uint32_t interval_ms = cfg.layout_gc_interval_ms > 0 ? cfg.layout_gc_interval_ms : 30000;

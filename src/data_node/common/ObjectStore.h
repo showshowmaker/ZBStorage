@@ -22,6 +22,7 @@ struct ObjectWriteRequest {
     uint64_t offset{0};
     std::string_view data;
     uint64_t epoch{0};
+    bool is_replication{false};
 };
 
 struct ObjectReadRequest {
@@ -50,9 +51,9 @@ public:
     virtual zb::msg::Status DeleteObject(const ObjectDeleteRequest& request) = 0;
 };
 
-class RealChunkObjectStore final : public ObjectStore {
+class RealObjectStore final : public ObjectStore {
 public:
-    explicit RealChunkObjectStore(zb::real_node::StorageServiceImpl* storage);
+    explicit RealObjectStore(zb::real_node::StorageServiceImpl* storage);
 
     zb::msg::Status PutObject(const ObjectWriteRequest& request) override;
     ObjectReadResult GetObject(const ObjectReadRequest& request) override;
@@ -62,9 +63,9 @@ private:
     zb::real_node::StorageServiceImpl* storage_{};
 };
 
-class VirtualChunkObjectStore final : public ObjectStore {
+class VirtualObjectStore final : public ObjectStore {
 public:
-    explicit VirtualChunkObjectStore(zb::virtual_node::VirtualStorageServiceImpl* storage);
+    explicit VirtualObjectStore(zb::virtual_node::VirtualStorageServiceImpl* storage);
 
     zb::msg::Status PutObject(const ObjectWriteRequest& request) override;
     ObjectReadResult GetObject(const ObjectReadRequest& request) override;

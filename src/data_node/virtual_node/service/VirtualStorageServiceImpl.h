@@ -16,7 +16,7 @@
 
 #include "../config/VirtualNodeConfig.h"
 #include "../../common/ObjectStore.h"
-#include "../../real_node/service/ArchiveChunkMetaStore.h"
+#include "../../real_node/service/ArchiveObjectMetaStore.h"
 #include "../../../msg/storage_node_messages.h"
 
 namespace zb::virtual_node {
@@ -38,7 +38,7 @@ struct ReplicationStatusSnapshot {
 
 struct ArchiveCandidateStat {
     std::string disk_id;
-    std::string chunk_id;
+    std::string object_id;
     uint64_t last_access_ts_ms{0};
     uint64_t size_bytes{0};
     uint64_t checksum{0};
@@ -48,6 +48,14 @@ struct ArchiveCandidateStat {
     double score{0.0};
     uint64_t read_ops{0};
     uint64_t write_ops{0};
+
+    std::string ArchiveObjectId() const {
+        return object_id;
+    }
+
+    void SetArchiveObjectId(const std::string& id) {
+        object_id = id;
+    }
 };
 
 class VirtualStorageServiceImpl {
@@ -71,64 +79,64 @@ public:
                                   const std::string& secondary_address);
     ReplicationStatusSnapshot GetReplicationStatus() const;
 
-    zb::msg::WriteChunkReply WriteChunk(const zb::msg::WriteChunkRequest& request);
-    zb::msg::ReadChunkReply ReadChunk(const zb::msg::ReadChunkRequest& request);
+    zb::msg::WriteObjectReply WriteObject(const zb::msg::WriteObjectRequest& request);
+    zb::msg::ReadObjectReply ReadObject(const zb::msg::ReadObjectRequest& request);
     zb::msg::ReadArchivedFileReply ReadArchivedFile(const zb::msg::ReadArchivedFileRequest& request);
-    zb::msg::DeleteChunkReply DeleteChunk(const zb::msg::DeleteChunkRequest& request);
+    zb::msg::DeleteObjectReply DeleteObject(const zb::msg::DeleteObjectRequest& request);
     zb::msg::Status PutObject(const zb::data_node::ObjectWriteRequest& request);
     zb::data_node::ObjectReadResult GetObject(const zb::data_node::ObjectReadRequest& request);
     zb::msg::Status DeleteObject(const zb::data_node::ObjectDeleteRequest& request);
     zb::msg::DiskReportReply GetDiskReport() const;
     bool InitArchiveMetaStore(const std::string& meta_dir,
-                              size_t max_chunks,
+                              size_t max_objects,
                               uint32_t snapshot_interval_ops,
                               bool wal_fsync,
                               std::string* error);
     bool FlushArchiveMetaSnapshot(std::string* error);
     zb::msg::Status UpdateArchiveState(const std::string& disk_id,
-                                       const std::string& chunk_id,
+                                       const std::string& object_id,
                                        const std::string& archive_state,
                                        uint64_t version);
-    void SetArchiveTrackingMaxChunks(size_t max_chunks);
+    void SetArchiveTrackingMaxObjects(size_t max_objects);
     std::vector<ArchiveCandidateStat> CollectArchiveCandidates(uint32_t max_candidates, uint64_t min_age_ms) const;
 
 private:
     struct ReplicationRepairTask {
         std::string key;
-        zb::msg::WriteChunkRequest request;
+        zb::msg::WriteObjectRequest request;
         uint64_t epoch{0};
         uint32_t attempts{0};
         uint64_t generation{0};
     };
 
     bool ResolveEffectiveDisk(const std::string& requested_disk_id,
-                              const std::string& chunk_id,
+                              const std::string& object_id,
                               bool allow_dynamic_register,
                               std::string* effective_disk);
     bool ValidateDisk(const std::string& disk_id) const;
     void SimulateIo(uint64_t bytes, bool is_read);
-    void TrackChunkAccess(const std::string& disk_id,
-                          const std::string& chunk_id,
-                          uint64_t end_offset,
-                          bool is_write,
-                          uint64_t checksum);
-    void RemoveChunkTracking(const std::string& disk_id, const std::string& chunk_id);
+    void TrackObjectAccess(const std::string& disk_id,
+                           const std::string& object_id,
+                           uint64_t end_offset,
+                           bool is_write,
+                           uint64_t checksum);
+    void RemoveObjectTracking(const std::string& disk_id, const std::string& object_id);
     uint32_t RandomJitterMs();
-    zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
-    void EnqueueReplicationRepair(const zb::msg::WriteChunkRequest& request, uint64_t epoch);
-    uint64_t BumpReplicationRepairGeneration(const zb::msg::WriteChunkRequest& request);
-    static std::string BuildReplicationRepairKey(const zb::msg::WriteChunkRequest& request);
+    zb::msg::Status ReplicateWriteToSecondary(const zb::msg::WriteObjectRequest& request, uint64_t epoch);
+    void EnqueueReplicationRepair(const zb::msg::WriteObjectRequest& request, uint64_t epoch);
+    uint64_t BumpReplicationRepairGeneration(const zb::msg::WriteObjectRequest& request);
+    static std::string BuildReplicationRepairKey(const zb::msg::WriteObjectRequest& request);
     void ReplicationRepairLoop();
     static uint64_t FastChecksum64(const std::string& data);
     static uint64_t NowMilliseconds();
-    static std::string BuildChunkKey(const std::string& disk_id, const std::string& chunk_id);
+    static std::string BuildObjectKey(const std::string& disk_id, const std::string& object_id);
 
     VirtualNodeConfig config_;
     std::unordered_set<std::string> disk_set_;
-    mutable std::mutex chunk_mu_;
-    std::unordered_map<std::string, std::string> chunk_data_;
-    std::unordered_map<std::string, std::string> chunk_home_disk_;
-    std::unordered_map<std::string, uint64_t> chunk_sizes_;
+    mutable std::mutex object_mu_;
+    std::unordered_map<std::string, std::string> object_data_;
+    std::unordered_map<std::string, std::string> object_home_disk_;
+    std::unordered_map<std::string, uint64_t> object_sizes_;
     std::unordered_map<std::string, uint64_t> disk_used_bytes_;
     mutable std::mutex rng_mu_;
     std::mt19937 rng_;
@@ -145,8 +153,8 @@ private:
     std::unordered_map<std::string, uint64_t> repl_repair_generation_;
     std::atomic<bool> stop_repl_repair_{false};
     std::thread repl_repair_thread_;
-    real_node::ArchiveChunkMetaStore archive_meta_store_;
-    size_t archive_tracking_max_chunks_{500000};
+    real_node::ArchiveObjectMetaStore archive_meta_store_;
+    size_t archive_tracking_max_objects_{500000};
 };
 
 } // namespace zb::virtual_node

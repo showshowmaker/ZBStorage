@@ -8,7 +8,7 @@
 
 DEFINE_string(server, "127.0.0.1:8000", "Real node server address");
 DEFINE_string(disk_id, "disk-01", "Target disk id");
-DEFINE_string(chunk_id, "550e8400-e29b-41d4-a716-446655440000", "Chunk id");
+DEFINE_string(object_id, "550e8400-e29b-41d4-a716-446655440000", "Object id for read/write");
 DEFINE_string(write_data, "hello", "Payload for write");
 DEFINE_uint64(offset, 0, "Write/read offset");
 DEFINE_uint64(read_size, 5, "Read size");
@@ -28,6 +28,11 @@ void PrintStatus(const zb::rpc::Status& status) {
 
 int main(int argc, char* argv[]) {
     google::ParseCommandLineFlags(&argc, &argv, true);
+    const std::string object_id = FLAGS_object_id;
+    if (object_id.empty()) {
+        std::cerr << "Missing --object_id" << std::endl;
+        return 1;
+    }
 
     brpc::Channel channel;
     brpc::ChannelOptions options;
@@ -44,19 +49,19 @@ int main(int argc, char* argv[]) {
     brpc::Controller controller;
 
     if (FLAGS_mode == "write" || FLAGS_mode == "both") {
-        zb::rpc::WriteChunkRequest request;
+        zb::rpc::WriteObjectRequest request;
         request.set_disk_id(FLAGS_disk_id);
-        request.set_chunk_id(FLAGS_chunk_id);
+        request.set_object_id(object_id);
         request.set_offset(FLAGS_offset);
         request.set_data(FLAGS_write_data);
 
-        zb::rpc::WriteChunkReply response;
-        stub.WriteChunk(&controller, &request, &response, nullptr);
+        zb::rpc::WriteObjectReply response;
+        stub.WriteObject(&controller, &request, &response, nullptr);
         if (controller.Failed()) {
-            std::cerr << "WriteChunk RPC failed: " << controller.ErrorText() << std::endl;
+            std::cerr << "WriteObject RPC failed: " << controller.ErrorText() << std::endl;
             return 1;
         }
-        std::cout << "WriteChunk bytes=" << response.bytes() << std::endl;
+        std::cout << "WriteObject bytes=" << response.bytes() << std::endl;
         PrintStatus(response.status());
         if (!StatusOk(response.status())) {
             return 1;
@@ -64,20 +69,20 @@ int main(int argc, char* argv[]) {
     }
 
     if (FLAGS_mode == "read" || FLAGS_mode == "both") {
-        zb::rpc::ReadChunkRequest request;
+        zb::rpc::ReadObjectRequest request;
         request.set_disk_id(FLAGS_disk_id);
-        request.set_chunk_id(FLAGS_chunk_id);
+        request.set_object_id(object_id);
         request.set_offset(FLAGS_offset);
         request.set_size(FLAGS_read_size);
 
         controller.Reset();
-        zb::rpc::ReadChunkReply response;
-        stub.ReadChunk(&controller, &request, &response, nullptr);
+        zb::rpc::ReadObjectReply response;
+        stub.ReadObject(&controller, &request, &response, nullptr);
         if (controller.Failed()) {
-            std::cerr << "ReadChunk RPC failed: " << controller.ErrorText() << std::endl;
+            std::cerr << "ReadObject RPC failed: " << controller.ErrorText() << std::endl;
             return 1;
         }
-        std::cout << "ReadChunk bytes=" << response.bytes() << " data=" << response.data() << std::endl;
+        std::cout << "ReadObject bytes=" << response.bytes() << " data=" << response.data() << std::endl;
         PrintStatus(response.status());
         if (!StatusOk(response.status())) {
             return 1;

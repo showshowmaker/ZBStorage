@@ -130,7 +130,7 @@ bool ImageStore::Init(std::string* error) {
         }
         ec.clear();
 
-        std::unordered_set<std::string> deleted_chunks;
+        std::unordered_set<std::string> deleted_objects;
         std::ifstream manifest(ctx.manifest_path);
         uint64_t logical_used_bytes = 0;
         if (manifest) {
@@ -141,7 +141,7 @@ bool ImageStore::Init(std::string* error) {
                     continue;
                 }
                 if (parts[0] == "W" && parts.size() >= 6) {
-                    ChunkRecord rec;
+                    ObjectRecord rec;
                     rec.image_id = parts[2];
                     try {
                         rec.offset = static_cast<uint64_t>(std::stoull(parts[3]));
@@ -156,17 +156,17 @@ bool ImageStore::Init(std::string* error) {
                             rec.file_meta.file_mode = static_cast<uint32_t>(std::stoul(parts[12]));
                             rec.file_meta.file_uid = static_cast<uint32_t>(std::stoul(parts[13]));
                             rec.file_meta.file_gid = static_cast<uint32_t>(std::stoul(parts[14]));
-                            rec.file_meta.file_chunk_index = static_cast<uint32_t>(std::stoul(parts[15]));
+                            rec.file_meta.file_object_index = static_cast<uint32_t>(std::stoul(parts[15]));
                         }
                     } catch (...) {
                         continue;
                     }
-                    ctx.chunks[parts[1]] = rec;
+                    ctx.objects[parts[1]] = rec;
                     logical_used_bytes += rec.length;
-                    deleted_chunks.erase(parts[1]);
+                    deleted_objects.erase(parts[1]);
                 } else if (parts[0] == "D" && parts.size() >= 2) {
-                    ctx.chunks.erase(parts[1]);
-                    deleted_chunks.insert(parts[1]);
+                    ctx.objects.erase(parts[1]);
+                    deleted_objects.insert(parts[1]);
                 }
             }
         }
@@ -194,17 +194,17 @@ bool ImageStore::Init(std::string* error) {
             }
         }
 
-        for (const auto& deleted : deleted_chunks) {
-            ctx.chunks.erase(deleted);
+        for (const auto& deleted : deleted_objects) {
+            ctx.objects.erase(deleted);
         }
 
         ctx.files.clear();
-        for (const auto& chunk_item : ctx.chunks) {
-            UpsertFileExtent(&ctx, chunk_item.first, chunk_item.second);
-            auto image_it = ctx.image_sizes.find(chunk_item.second.image_id);
-            const uint64_t rec_end = chunk_item.second.offset + chunk_item.second.length;
+        for (const auto& object_item : ctx.objects) {
+            UpsertFileExtent(&ctx, object_item.first, object_item.second);
+            auto image_it = ctx.image_sizes.find(object_item.second.image_id);
+            const uint64_t rec_end = object_item.second.offset + object_item.second.length;
             if (image_it == ctx.image_sizes.end() || rec_end > image_it->second) {
-                ctx.image_sizes[chunk_item.second.image_id] = rec_end;
+                ctx.image_sizes[object_item.second.image_id] = rec_end;
             }
         }
 
@@ -235,11 +235,11 @@ bool ImageStore::Init(std::string* error) {
     return true;
 }
 
-zb::msg::Status ImageStore::WriteChunk(const std::string& disk_id,
-                                       const std::string& chunk_id,
-                                       const std::string& data,
-                                       const FileArchiveMeta* file_meta,
-                                       ImageLocation* location) {
+zb::msg::Status ImageStore::WriteObject(const std::string& disk_id,
+                                        const std::string& object_id,
+                                        const std::string& data,
+                                        const FileArchiveMeta* file_meta,
+                                        ImageLocation* location) {
     uint64_t write_delay_bytes = 0;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -253,7 +253,7 @@ zb::msg::Status ImageStore::WriteChunk(const std::string& disk_id,
         if (file_meta) {
             normalized = *file_meta;
         }
-        normalized.file_id = BuildFileId(file_meta, normalized.inode_id, chunk_id);
+        normalized.file_id = BuildFileId(file_meta, normalized.inode_id, object_id);
         if (normalized.file_path.empty() && normalized.inode_id != 0) {
             normalized.file_path = "/inode/" + std::to_string(normalized.inode_id);
         }
@@ -263,7 +263,7 @@ zb::msg::Status ImageStore::WriteChunk(const std::string& disk_id,
             static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                       std::chrono::system_clock::now().time_since_epoch())
                                       .count());
-        if (!EncodeFileArchiveMeta(normalized, disk_id, chunk_id, commit_ts_ms, &encoded_meta)) {
+        if (!EncodeFileArchiveMeta(normalized, disk_id, object_id, commit_ts_ms, &encoded_meta)) {
             return zb::msg::Status::InternalError("failed to encode image metadata");
         }
         const uint64_t total_record_bytes =
@@ -278,22 +278,22 @@ zb::msg::Status ImageStore::WriteChunk(const std::string& disk_id,
         }
 
         uint64_t payload_offset = 0;
-        if (!AppendRecordLocked(ctx, chunk_id, data, &normalized, &payload_offset, &error)) {
+        if (!AppendRecordLocked(ctx, object_id, data, &normalized, &payload_offset, &error)) {
             return zb::msg::Status::IoError(error);
         }
 
-        ChunkRecord rec;
+        ObjectRecord rec;
         rec.image_id = ctx->current_image_id;
         rec.offset = payload_offset;
         rec.length = static_cast<uint64_t>(data.size());
         rec.file_meta = normalized;
-        ctx->chunks[chunk_id] = rec;
-        UpsertFileExtent(ctx, chunk_id, rec);
+        ctx->objects[object_id] = rec;
+        UpsertFileExtent(ctx, object_id, rec);
         ctx->image_sizes[rec.image_id] = std::max<uint64_t>(ctx->image_sizes[rec.image_id], ctx->current_image_size);
         ctx->used_bytes += total_record_bytes;
 
         std::ostringstream oss;
-        oss << "W|" << chunk_id << "|" << rec.image_id << "|" << rec.offset << "|" << rec.length << "|" << disk_id
+        oss << "W|" << object_id << "|" << rec.image_id << "|" << rec.offset << "|" << rec.length << "|" << disk_id
             << "|" << rec.file_meta.inode_id
             << "|" << rec.file_meta.file_id
             << "|" << rec.file_meta.file_path
@@ -303,7 +303,7 @@ zb::msg::Status ImageStore::WriteChunk(const std::string& disk_id,
             << "|" << rec.file_meta.file_mode
             << "|" << rec.file_meta.file_uid
             << "|" << rec.file_meta.file_gid
-            << "|" << rec.file_meta.file_chunk_index;
+            << "|" << rec.file_meta.file_object_index;
         if (!AppendManifestLocked(*ctx, oss.str(), &error)) {
             return zb::msg::Status::IoError(error);
         }
@@ -320,11 +320,11 @@ zb::msg::Status ImageStore::WriteChunk(const std::string& disk_id,
     return zb::msg::Status::Ok();
 }
 
-zb::msg::Status ImageStore::ReadChunk(const std::string& disk_id,
-                                      const std::string& chunk_id,
-                                      uint64_t offset,
-                                      uint64_t size,
-                                      const std::string& image_id_hint,
+zb::msg::Status ImageStore::ReadObject(const std::string& disk_id,
+                                       const std::string& object_id,
+                                       uint64_t offset,
+                                       uint64_t size,
+                                       const std::string& image_id_hint,
                                       uint64_t image_offset_hint,
                                       uint64_t image_length_hint,
                                       std::string* out,
@@ -336,7 +336,7 @@ zb::msg::Status ImageStore::ReadChunk(const std::string& disk_id,
         *bytes_read = 0;
     }
 
-    ChunkRecord rec;
+    ObjectRecord rec;
     std::string cache_image_path;
     uint64_t load_delay_bytes = 0;
     uint64_t read_delay_bytes = 0;
@@ -350,9 +350,9 @@ zb::msg::Status ImageStore::ReadChunk(const std::string& disk_id,
             return zb::msg::Status::NotFound(error);
         }
 
-        auto it = ctx->chunks.find(chunk_id);
+        auto it = ctx->objects.find(object_id);
         if (!image_id_hint.empty()) {
-            if (it != ctx->chunks.end()) {
+            if (it != ctx->objects.end()) {
                 rec = it->second;
             }
             rec.image_id = image_id_hint;
@@ -361,8 +361,8 @@ zb::msg::Status ImageStore::ReadChunk(const std::string& disk_id,
                 rec.length = image_length_hint;
             }
         } else {
-            if (it == ctx->chunks.end()) {
-                return zb::msg::Status::NotFound("chunk not found");
+            if (it == ctx->objects.end()) {
+                return zb::msg::Status::NotFound("object not found");
             }
             rec = it->second;
         }
@@ -415,7 +415,7 @@ zb::msg::Status ImageStore::ReadChunk(const std::string& disk_id,
     SleepByBytes(read_delay_bytes, cache_read_bytes_per_sec_);
 
     if (use_simulated_payload) {
-        *out = BuildSimulatedChunkData(chunk_id, offset, read_delay_bytes);
+        *out = BuildSimulatedObjectData(object_id, offset, read_delay_bytes);
         if (bytes_read) {
             *bytes_read = static_cast<uint64_t>(out->size());
         }
@@ -425,7 +425,7 @@ zb::msg::Status ImageStore::ReadChunk(const std::string& disk_id,
     std::ifstream input(cache_image_path, std::ios::binary);
     if (!input) {
         if (simulate_io_) {
-            *out = BuildSimulatedChunkData(chunk_id, offset, read_delay_bytes);
+            *out = BuildSimulatedObjectData(object_id, offset, read_delay_bytes);
             if (bytes_read) {
                 *bytes_read = static_cast<uint64_t>(out->size());
             }
@@ -436,7 +436,7 @@ zb::msg::Status ImageStore::ReadChunk(const std::string& disk_id,
     input.seekg(static_cast<std::streamoff>(rec.offset + offset));
     if (!input.good()) {
         if (simulate_io_) {
-            *out = BuildSimulatedChunkData(chunk_id, offset, read_delay_bytes);
+            *out = BuildSimulatedObjectData(object_id, offset, read_delay_bytes);
             if (bytes_read) {
                 *bytes_read = static_cast<uint64_t>(out->size());
             }
@@ -581,7 +581,7 @@ zb::msg::Status ImageStore::ReadArchivedFile(const std::string& disc_id,
             if (!simulate_io_) {
                 return zb::msg::Status::IoError("failed to open archived image file");
             }
-            const std::string sim = BuildSimulatedChunkData(effective_file_id, seg.dst_offset, seg.length);
+            const std::string sim = BuildSimulatedObjectData(effective_file_id, seg.dst_offset, seg.length);
             std::memcpy(out->data() + static_cast<size_t>(seg.dst_offset), sim.data(), static_cast<size_t>(seg.length));
             continue;
         }
@@ -590,7 +590,7 @@ zb::msg::Status ImageStore::ReadArchivedFile(const std::string& disc_id,
             if (!simulate_io_) {
                 return zb::msg::Status::IoError("failed to seek archived image");
             }
-            const std::string sim = BuildSimulatedChunkData(effective_file_id, seg.dst_offset, seg.length);
+            const std::string sim = BuildSimulatedObjectData(effective_file_id, seg.dst_offset, seg.length);
             std::memcpy(out->data() + static_cast<size_t>(seg.dst_offset), sim.data(), static_cast<size_t>(seg.length));
             continue;
         }
@@ -602,7 +602,7 @@ zb::msg::Status ImageStore::ReadArchivedFile(const std::string& disc_id,
             if (!simulate_io_) {
                 return zb::msg::Status::IoError("failed to read archived image");
             }
-            const std::string sim = BuildSimulatedChunkData(effective_file_id, seg.dst_offset, seg.length);
+            const std::string sim = BuildSimulatedObjectData(effective_file_id, seg.dst_offset, seg.length);
             std::memcpy(out->data() + static_cast<size_t>(seg.dst_offset), sim.data(), static_cast<size_t>(seg.length));
             continue;
         }
@@ -615,23 +615,23 @@ zb::msg::Status ImageStore::ReadArchivedFile(const std::string& disc_id,
     return zb::msg::Status::Ok();
 }
 
-zb::msg::Status ImageStore::DeleteChunk(const std::string& disk_id, const std::string& chunk_id) {
+zb::msg::Status ImageStore::DeleteObject(const std::string& disk_id, const std::string& object_id) {
     std::lock_guard<std::mutex> lock(mu_);
     DiskContext* ctx = nullptr;
     std::string error;
     if (!EnsureDiskContextLocked(disk_id, &ctx, &error)) {
         return zb::msg::Status::NotFound(error);
     }
-    auto it = ctx->chunks.find(chunk_id);
-    if (it == ctx->chunks.end()) {
-        return zb::msg::Status::NotFound("chunk not found");
+    auto it = ctx->objects.find(object_id);
+    if (it == ctx->objects.end()) {
+        return zb::msg::Status::NotFound("object not found");
     }
-    ctx->chunks.erase(it);
+    ctx->objects.erase(it);
     for (auto file_it = ctx->files.begin(); file_it != ctx->files.end();) {
         auto& extents = file_it->second.extents;
         extents.erase(std::remove_if(extents.begin(),
                                      extents.end(),
-                                     [&](const ImageFileExtent& extent) { return extent.chunk_id == chunk_id; }),
+                                     [&](const ImageFileExtent& extent) { return extent.object_id == object_id; }),
                       extents.end());
         if (extents.empty()) {
             file_it = ctx->files.erase(file_it);
@@ -639,7 +639,7 @@ zb::msg::Status ImageStore::DeleteChunk(const std::string& disk_id, const std::s
             ++file_it;
         }
     }
-    if (!AppendManifestLocked(*ctx, "D|" + chunk_id, &error)) {
+    if (!AppendManifestLocked(*ctx, "D|" + object_id, &error)) {
         return zb::msg::Status::IoError(error);
     }
     return zb::msg::Status::Ok();
@@ -730,13 +730,13 @@ std::string ImageStore::ToHex(uint64_t value, size_t width) {
     return out;
 }
 
-std::string ImageStore::BuildHashPrefix(const std::string& chunk_id) {
+std::string ImageStore::BuildHashPrefix(const std::string& object_id) {
     std::hash<std::string> hasher;
-    return ToHex(static_cast<uint64_t>(hasher(chunk_id)), 8);
+    return ToHex(static_cast<uint64_t>(hasher(object_id)), 8);
 }
 
-std::string ImageStore::JoinChunkKey(const std::string& disk_id, const std::string& chunk_id) {
-    return disk_id + "/" + chunk_id;
+std::string ImageStore::JoinObjectKey(const std::string& disk_id, const std::string& object_id) {
+    return disk_id + "/" + object_id;
 }
 
 void ImageStore::SleepByBytes(uint64_t bytes, uint64_t bytes_per_sec) {
@@ -748,13 +748,13 @@ void ImageStore::SleepByBytes(uint64_t bytes, uint64_t bytes_per_sec) {
     std::this_thread::sleep_for(std::chrono::nanoseconds(duration_ns));
 }
 
-std::string ImageStore::BuildSimulatedChunkData(const std::string& chunk_id, uint64_t offset, uint64_t size) {
+std::string ImageStore::BuildSimulatedObjectData(const std::string& object_id, uint64_t offset, uint64_t size) {
     if (size == 0) {
         return {};
     }
     std::string data(static_cast<size_t>(size), '\0');
     std::hash<std::string> hasher;
-    const uint64_t seed = static_cast<uint64_t>(hasher(chunk_id));
+    const uint64_t seed = static_cast<uint64_t>(hasher(object_id));
     for (uint64_t i = 0; i < size; ++i) {
         const uint64_t v = seed + offset + i;
         data[static_cast<size_t>(i)] = static_cast<char>('a' + (v % 26));
@@ -874,7 +874,7 @@ bool ImageStore::ReadString(const std::string& in, size_t* cursor, std::string* 
 
 std::string ImageStore::BuildFileId(const FileArchiveMeta* meta,
                                     uint64_t inode_id_hint,
-                                    const std::string& chunk_id) {
+                                    const std::string& object_id) {
     if (meta && !meta->file_id.empty()) {
         return meta->file_id;
     }
@@ -885,12 +885,12 @@ std::string ImageStore::BuildFileId(const FileArchiveMeta* meta,
     if (inode_id != 0) {
         return "inode-" + std::to_string(inode_id);
     }
-    return "chunk-" + chunk_id;
+    return "object-" + object_id;
 }
 
 bool ImageStore::EncodeFileArchiveMeta(const FileArchiveMeta& meta,
                                        const std::string& disk_id,
-                                       const std::string& chunk_id,
+                                       const std::string& object_id,
                                        uint64_t commit_ts_ms,
                                        std::string* out) {
     if (!out) {
@@ -907,9 +907,9 @@ bool ImageStore::EncodeFileArchiveMeta(const FileArchiveMeta& meta,
     AppendU32(out, meta.file_uid);
     AppendU32(out, meta.file_gid);
     AppendU64(out, meta.file_mtime);
-    AppendU32(out, meta.file_chunk_index);
+    AppendU32(out, meta.file_object_index);
     AppendString(out, disk_id);
-    AppendString(out, chunk_id);
+    AppendString(out, object_id);
     AppendString(out, meta.file_id);
     AppendString(out, meta.file_path);
     return true;
@@ -918,7 +918,7 @@ bool ImageStore::EncodeFileArchiveMeta(const FileArchiveMeta& meta,
 bool ImageStore::DecodeFileArchiveMeta(const std::string& data,
                                        FileArchiveMeta* meta,
                                        std::string* disk_id,
-                                       std::string* chunk_id,
+                                       std::string* object_id,
                                        uint64_t* commit_ts_ms) {
     if (!meta) {
         return false;
@@ -927,8 +927,8 @@ bool ImageStore::DecodeFileArchiveMeta(const std::string& data,
     if (disk_id) {
         disk_id->clear();
     }
-    if (chunk_id) {
-        chunk_id->clear();
+    if (object_id) {
+        object_id->clear();
     }
     if (commit_ts_ms) {
         *commit_ts_ms = 0;
@@ -953,14 +953,14 @@ bool ImageStore::DecodeFileArchiveMeta(const std::string& data,
         !ReadU32(data, &cursor, &meta->file_uid) ||
         !ReadU32(data, &cursor, &meta->file_gid) ||
         !ReadU64(data, &cursor, &meta->file_mtime) ||
-        !ReadU32(data, &cursor, &meta->file_chunk_index)) {
+        !ReadU32(data, &cursor, &meta->file_object_index)) {
         return false;
     }
 
     std::string parsed_disk_id;
-    std::string parsed_chunk_id;
+    std::string parsed_object_id;
     if (!ReadString(data, &cursor, &parsed_disk_id) ||
-        !ReadString(data, &cursor, &parsed_chunk_id) ||
+        !ReadString(data, &cursor, &parsed_object_id) ||
         !ReadString(data, &cursor, &meta->file_id) ||
         !ReadString(data, &cursor, &meta->file_path)) {
         return false;
@@ -971,8 +971,8 @@ bool ImageStore::DecodeFileArchiveMeta(const std::string& data,
     if (disk_id) {
         *disk_id = std::move(parsed_disk_id);
     }
-    if (chunk_id) {
-        *chunk_id = std::move(parsed_chunk_id);
+    if (object_id) {
+        *object_id = std::move(parsed_object_id);
     }
     return true;
 }
@@ -1009,7 +1009,7 @@ bool ImageStore::DecodeImageRecordHeader(const char* bytes, size_t size, ImageRe
 }
 
 bool ImageStore::AppendRecordLocked(DiskContext* ctx,
-                                    const std::string& chunk_id,
+                                    const std::string& object_id,
                                     const std::string& data,
                                     const FileArchiveMeta* file_meta,
                                     uint64_t* payload_offset,
@@ -1025,7 +1025,7 @@ bool ImageStore::AppendRecordLocked(DiskContext* ctx,
     if (file_meta) {
         meta = *file_meta;
     }
-    meta.file_id = BuildFileId(file_meta, meta.inode_id, chunk_id);
+    meta.file_id = BuildFileId(file_meta, meta.inode_id, object_id);
     if (meta.file_path.empty() && meta.inode_id != 0) {
         meta.file_path = "/inode/" + std::to_string(meta.inode_id);
     }
@@ -1035,7 +1035,7 @@ bool ImageStore::AppendRecordLocked(DiskContext* ctx,
                                   std::chrono::system_clock::now().time_since_epoch())
                                   .count());
     std::string encoded_meta;
-    if (!EncodeFileArchiveMeta(meta, ctx->disk_id, chunk_id, commit_ts_ms, &encoded_meta)) {
+    if (!EncodeFileArchiveMeta(meta, ctx->disk_id, object_id, commit_ts_ms, &encoded_meta)) {
         if (error) {
             *error = "failed to encode file metadata";
         }
@@ -1154,40 +1154,40 @@ bool ImageStore::ReplayImageFileLocked(DiskContext* ctx, const std::string& imag
 
         FileArchiveMeta file_meta;
         std::string meta_disk_id;
-        std::string meta_chunk_id;
+        std::string meta_object_id;
         uint64_t commit_ts_ms = 0;
-        if (!DecodeFileArchiveMeta(meta_payload, &file_meta, &meta_disk_id, &meta_chunk_id, &commit_ts_ms)) {
+        if (!DecodeFileArchiveMeta(meta_payload, &file_meta, &meta_disk_id, &meta_object_id, &commit_ts_ms)) {
             continue;
         }
         (void)commit_ts_ms;
         if (!meta_disk_id.empty() && meta_disk_id != ctx->disk_id) {
             continue;
         }
-        if (meta_chunk_id.empty()) {
+        if (meta_object_id.empty()) {
             continue;
         }
 
-        ChunkRecord rec;
+        ObjectRecord rec;
         rec.image_id = image_id;
         rec.offset = payload_offset;
         rec.length = header.data_length;
         rec.file_meta = file_meta;
-        ctx->chunks[meta_chunk_id] = rec;
+        ctx->objects[meta_object_id] = rec;
     }
     return true;
 }
 
 void ImageStore::UpsertFileExtent(DiskContext* ctx,
-                                  const std::string& chunk_id,
-                                  const ChunkRecord& rec) {
-    if (!ctx || chunk_id.empty()) {
+                                  const std::string& object_id,
+                                  const ObjectRecord& rec) {
+    if (!ctx || object_id.empty()) {
         return;
     }
     for (auto file_it = ctx->files.begin(); file_it != ctx->files.end();) {
         auto& extents = file_it->second.extents;
         extents.erase(std::remove_if(extents.begin(),
                                      extents.end(),
-                                     [&](const ImageFileExtent& extent) { return extent.chunk_id == chunk_id; }),
+                                     [&](const ImageFileExtent& extent) { return extent.object_id == object_id; }),
                       extents.end());
         if (extents.empty()) {
             file_it = ctx->files.erase(file_it);
@@ -1205,7 +1205,7 @@ void ImageStore::UpsertFileExtent(DiskContext* ctx,
 
     std::string file_id = rec.file_meta.file_id;
     if (file_id.empty()) {
-        file_id = BuildFileId(&rec.file_meta, rec.file_meta.inode_id, chunk_id);
+        file_id = BuildFileId(&rec.file_meta, rec.file_meta.inode_id, object_id);
     }
 
     ImageFileEntry& entry = ctx->files[file_id];
@@ -1235,7 +1235,7 @@ void ImageStore::UpsertFileExtent(DiskContext* ctx,
     }
 
     ImageFileExtent extent;
-    extent.chunk_id = chunk_id;
+    extent.object_id = object_id;
     extent.image_id = rec.image_id;
     extent.file_offset = rec.file_meta.file_offset;
     extent.image_offset = rec.offset;
@@ -1245,7 +1245,7 @@ void ImageStore::UpsertFileExtent(DiskContext* ctx,
         if (lhs.file_offset != rhs.file_offset) {
             return lhs.file_offset < rhs.file_offset;
         }
-        return lhs.chunk_id < rhs.chunk_id;
+        return lhs.object_id < rhs.object_id;
     });
 }
 

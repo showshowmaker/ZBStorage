@@ -35,7 +35,7 @@ message InodeAttr {
   uint64 mtime = 8;
   uint64 ctime = 9;
   uint32 nlink = 10;
-  uint64 chunk_size = 11;
+  uint64 object_unit_size = 11;
   uint32 replica = 12;
   uint64 version = 13;
 }
@@ -57,11 +57,19 @@ enum ReplicaState {
   REPLICA_DEGRADED = 2;
 }
 
+enum ReadPlanSource {
+  READ_PLAN_SOURCE_UNKNOWN = 0;
+  READ_PLAN_SOURCE_LAYOUT = 1;
+  READ_PLAN_SOURCE_RESERVED_2 = 2;
+  READ_PLAN_SOURCE_OPTICAL = 3;
+}
+
 message ReplicaLocation {
   string node_id = 1;
   string node_address = 2;
   string disk_id = 3;
-  string chunk_id = 4;
+  reserved 4;
+  string object_id = 19;
   uint64 size = 5;
   uint32 checksum = 6;
   string group_id = 7;
@@ -78,15 +86,15 @@ message ReplicaLocation {
   uint64 image_length = 18;
 }
 
-message ChunkMeta {
+message ObjectMeta {
   uint32 index = 1;
   repeated ReplicaLocation replicas = 2;
 }
 
 message FileLayout {
   uint64 inode_id = 1;
-  uint64 chunk_size = 2;
-  repeated ChunkMeta chunks = 3;
+  uint64 object_unit_size = 2;
+  repeated ObjectMeta objects = 3;
 }
 
 message OpticalReadPlan {
@@ -107,7 +115,7 @@ message LayoutRoot {
   uint64 file_size = 4;
   uint64 epoch = 5;
   uint64 update_ts = 6;
-  uint64 chunk_size = 7;
+  uint64 object_unit_size = 7;
 }
 
 message LayoutExtent {
@@ -117,7 +125,10 @@ message LayoutExtent {
   uint64 object_offset = 4;
   uint64 object_length = 5;
   uint64 object_version = 6;
-  uint32 chunk_index = 7;
+  uint32 object_index = 7;
+  uint32 pg_id = 8;
+  uint64 placement_epoch = 9;
+  StorageTier storage_tier = 10;
 }
 
 message LookupRequest {
@@ -163,7 +174,7 @@ message CreateRequest {
   uint32 uid = 3;
   uint32 gid = 4;
   uint32 replica = 5;
-  uint64 chunk_size = 6;
+  uint64 object_unit_size = 6;
 }
 
 message CreateReply {
@@ -238,6 +249,7 @@ message GetLayoutReply {
   MdsStatus status = 1;
   FileLayout layout = 2;
   OpticalReadPlan optical_plan = 3;
+  ReadPlanSource plan_source = 4;
 }
 
 message CommitWriteRequest {
@@ -256,7 +268,7 @@ message GetLayoutRootRequest {
 message GetLayoutRootReply {
   MdsStatus status = 1;
   LayoutRoot root = 2;
-  bool from_legacy = 3;
+  reserved 3;
 }
 
 message ResolveLayoutRequest {
@@ -270,8 +282,9 @@ message ResolveLayoutReply {
   LayoutRoot root = 2;
   repeated LayoutExtent extents = 3;
   FileLayout read_plan = 4;
-  bool from_legacy = 5;
+  reserved 5;
   OpticalReadPlan optical_plan = 6;
+  ReadPlanSource plan_source = 7;
 }
 
 message CommitLayoutRootRequest {
@@ -280,6 +293,7 @@ message CommitLayoutRootRequest {
   uint64 expected_layout_version = 3;
   bool update_inode_size = 4;
   uint64 new_size = 5;
+  string op_id = 6;
 }
 
 message CommitLayoutRootReply {
@@ -308,7 +322,7 @@ message ArchiveCandidate {
   string node_id = 1;
   string node_address = 2;
   string disk_id = 3;
-  string chunk_id = 4;
+  reserved 4;
   uint64 last_access_ts_ms = 5;
   uint64 size_bytes = 6;
   double score = 7;
@@ -317,6 +331,7 @@ message ArchiveCandidate {
   double heat_score = 10;
   string archive_state = 11;
   uint64 version = 12;
+  string object_id = 13;
 }
 
 message ReportArchiveCandidatesRequest {
@@ -339,7 +354,7 @@ enum ArchiveLifecycleState {
 }
 
 message ArchiveLeaseRecord {
-  string chunk_id = 1;
+  reserved 1;
   ArchiveLifecycleState state = 2;
   string owner_node_id = 3;
   string owner_node_address = 4;
@@ -350,15 +365,17 @@ message ArchiveLeaseRecord {
   uint64 version = 9;
   uint64 update_ts_ms = 10;
   uint64 archive_ts_ms = 11;
+  string object_id = 12;
 }
 
 message ClaimArchiveTaskRequest {
   string node_id = 1;
   string node_address = 2;
   string disk_id = 3;
-  string chunk_id = 4;
+  reserved 4;
   uint64 requested_lease_ms = 5;
   string request_id = 6;
+  string object_id = 7;
 }
 
 message ClaimArchiveTaskReply {
@@ -369,9 +386,10 @@ message ClaimArchiveTaskReply {
 
 message RenewArchiveLeaseRequest {
   string node_id = 1;
-  string chunk_id = 2;
+  reserved 2;
   string lease_id = 3;
   uint64 requested_lease_ms = 4;
+  string object_id = 5;
 }
 
 message RenewArchiveLeaseReply {
@@ -382,11 +400,12 @@ message RenewArchiveLeaseReply {
 
 message CommitArchiveTaskRequest {
   string node_id = 1;
-  string chunk_id = 2;
+  reserved 2;
   string lease_id = 3;
   string op_id = 4;
   bool success = 5;
   string error_message = 6;
+  string object_id = 7;
 }
 
 message CommitArchiveTaskReply {

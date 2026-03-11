@@ -11,7 +11,7 @@
 
 DEFINE_string(server, "127.0.0.1:29080", "Virtual node endpoint");
 DEFINE_string(disk, "disk-01", "Disk id to test");
-DEFINE_string(chunk_id, "virtual-test-chunk-001", "Chunk id for read/write test");
+DEFINE_string(object_id, "virtual-test-object-001", "Object id for read/write test");
 DEFINE_uint64(write_size, 1024, "Bytes to write");
 DEFINE_uint64(read_size, 1024, "Bytes to read");
 DEFINE_int32(timeout_ms, 3000, "RPC timeout in ms");
@@ -41,6 +41,11 @@ bool CheckStatusOk(const zb::rpc::Status& status, const char* op_name) {
 
 int main(int argc, char* argv[]) {
     google::ParseCommandLineFlags(&argc, &argv, true);
+    const std::string object_id = FLAGS_object_id;
+    if (object_id.empty()) {
+        std::cerr << "Missing --object_id" << std::endl;
+        return 1;
+    }
 
     brpc::Channel channel;
     brpc::ChannelOptions options;
@@ -79,73 +84,73 @@ int main(int argc, char* argv[]) {
     }
 
     std::string write_data(static_cast<size_t>(FLAGS_write_size), 'a');
-    zb::rpc::WriteChunkRequest write_req;
+    zb::rpc::WriteObjectRequest write_req;
     write_req.set_disk_id(FLAGS_disk);
-    write_req.set_chunk_id(FLAGS_chunk_id);
+    write_req.set_object_id(object_id);
     write_req.set_offset(0);
     write_req.set_data(write_data);
 
-    zb::rpc::WriteChunkReply write_reply;
+    zb::rpc::WriteObjectReply write_reply;
     brpc::Controller write_cntl;
     auto write_begin = std::chrono::steady_clock::now();
-    stub.WriteChunk(&write_cntl, &write_req, &write_reply, nullptr);
+    stub.WriteObject(&write_cntl, &write_req, &write_reply, nullptr);
     auto write_end = std::chrono::steady_clock::now();
     if (write_cntl.Failed()) {
-        std::cerr << "WriteChunk RPC failed: " << write_cntl.ErrorText() << std::endl;
+        std::cerr << "WriteObject RPC failed: " << write_cntl.ErrorText() << std::endl;
         return 1;
     }
-    if (!CheckStatusOk(write_reply.status(), "WriteChunk")) {
+    if (!CheckStatusOk(write_reply.status(), "WriteObject")) {
         return 1;
     }
     if (write_reply.bytes() != FLAGS_write_size) {
-        std::cerr << "WriteChunk bytes mismatch, expect=" << FLAGS_write_size
+        std::cerr << "WriteObject bytes mismatch, expect=" << FLAGS_write_size
                   << ", got=" << write_reply.bytes() << std::endl;
         return 1;
     }
 
-    zb::rpc::ReadChunkRequest read_req;
+    zb::rpc::ReadObjectRequest read_req;
     read_req.set_disk_id(FLAGS_disk);
-    read_req.set_chunk_id(FLAGS_chunk_id);
+    read_req.set_object_id(object_id);
     read_req.set_offset(0);
     read_req.set_size(FLAGS_read_size);
 
-    zb::rpc::ReadChunkReply read_reply;
+    zb::rpc::ReadObjectReply read_reply;
     brpc::Controller read_cntl;
     auto read_begin = std::chrono::steady_clock::now();
-    stub.ReadChunk(&read_cntl, &read_req, &read_reply, nullptr);
+    stub.ReadObject(&read_cntl, &read_req, &read_reply, nullptr);
     auto read_end = std::chrono::steady_clock::now();
     if (read_cntl.Failed()) {
-        std::cerr << "ReadChunk RPC failed: " << read_cntl.ErrorText() << std::endl;
+        std::cerr << "ReadObject RPC failed: " << read_cntl.ErrorText() << std::endl;
         return 1;
     }
-    if (!CheckStatusOk(read_reply.status(), "ReadChunk")) {
+    if (!CheckStatusOk(read_reply.status(), "ReadObject")) {
         return 1;
     }
     if (read_reply.bytes() != FLAGS_read_size || read_reply.data().size() != FLAGS_read_size) {
-        std::cerr << "ReadChunk length mismatch, expect=" << FLAGS_read_size
+        std::cerr << "ReadObject length mismatch, expect=" << FLAGS_read_size
                   << ", got_bytes=" << read_reply.bytes()
                   << ", got_data_size=" << read_reply.data().size() << std::endl;
         return 1;
     }
     if (!IsAllX(read_reply.data())) {
-        std::cerr << "ReadChunk content mismatch: expected all 'x'" << std::endl;
+        std::cerr << "ReadObject content mismatch: expected all 'x'" << std::endl;
         return 1;
     }
 
-    zb::rpc::WriteChunkRequest bad_req;
+    zb::rpc::WriteObjectRequest bad_req;
     bad_req.set_disk_id("bad-disk");
-    bad_req.set_chunk_id(FLAGS_chunk_id);
+    bad_req.set_object_id(object_id);
     bad_req.set_offset(0);
     bad_req.set_data("abc");
-    zb::rpc::WriteChunkReply bad_reply;
+    zb::rpc::WriteObjectReply bad_reply;
     brpc::Controller bad_cntl;
-    stub.WriteChunk(&bad_cntl, &bad_req, &bad_reply, nullptr);
+    stub.WriteObject(&bad_cntl, &bad_req, &bad_reply, nullptr);
     if (bad_cntl.Failed()) {
-        std::cerr << "WriteChunk(bad-disk) RPC failed: " << bad_cntl.ErrorText() << std::endl;
+        std::cerr << "WriteObject(bad-disk) RPC failed: " << bad_cntl.ErrorText() << std::endl;
         return 1;
     }
     if (bad_reply.status().code() != zb::rpc::STATUS_NOT_FOUND) {
-        std::cerr << "WriteChunk(bad-disk) expect STATUS_NOT_FOUND, got="
+        std::cerr << "WriteObject(bad-disk) expect STATUS_NOT_FOUND, got="
                   << bad_reply.status().code() << std::endl;
         return 1;
     }

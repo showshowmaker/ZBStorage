@@ -35,6 +35,42 @@ bool IsReadyOpticalReplica(const zb::rpc::ReplicaLocation& replica) {
            replica.replica_state() == zb::rpc::REPLICA_READY;
 }
 
+std::string ReplicaObjectId(const zb::rpc::ReplicaLocation& replica) {
+    return replica.object_id();
+}
+
+std::string ArchiveObjectId(const zb::rpc::ArchiveLeaseRecord& record) {
+    return record.object_id();
+}
+
+void EnsureReplicaObjectId(zb::rpc::ReplicaLocation* replica, const std::string& object_id) {
+    if (!replica || object_id.empty()) {
+        return;
+    }
+    replica->set_object_id(object_id);
+}
+
+void SetArchiveObjectId(zb::rpc::ClaimArchiveTaskRequest* request, const std::string& object_id) {
+    if (!request || object_id.empty()) {
+        return;
+    }
+    request->set_object_id(object_id);
+}
+
+void SetArchiveObjectId(zb::rpc::RenewArchiveLeaseRequest* request, const std::string& object_id) {
+    if (!request || object_id.empty()) {
+        return;
+    }
+    request->set_object_id(object_id);
+}
+
+void SetArchiveObjectId(zb::rpc::CommitArchiveTaskRequest* request, const std::string& object_id) {
+    if (!request || object_id.empty()) {
+        return;
+    }
+    request->set_object_id(object_id);
+}
+
 bool MatchesCandidateNodeId(const std::string& candidate_node_id, const std::string& replica_node_id) {
     if (candidate_node_id.empty()) {
         return true;
@@ -63,8 +99,8 @@ OpticalArchiveManager::OpticalArchiveManager(RocksMetaStore* store,
     if (options_.archive_target_bytes > options_.archive_trigger_bytes) {
         options_.archive_target_bytes = options_.archive_trigger_bytes;
     }
-    if (options_.max_chunks_per_round == 0) {
-        options_.max_chunks_per_round = 1;
+    if (options_.max_objects_per_round == 0) {
+        options_.max_objects_per_round = 1;
     }
 }
 
@@ -88,21 +124,21 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
     uint64_t now = NowSeconds();
 
     rocksdb::WriteBatch batch;
-    std::unordered_set<std::string> touched_chunk_keys;
+    std::unordered_set<std::string> touched_object_keys;
     if (do_archive && !optical_nodes.empty() && candidate_queue_) {
         const NodeSelection& optical = optical_nodes.front();
         if (batch_stager_) {
-            struct FileChunkTask {
+            struct FileObjectTask {
                 ArchiveCandidateEntry candidate;
-                std::string chunk_key;
+                std::string object_key;
                 zb::rpc::ReplicaLocation source_disk;
-                uint64_t chunk_size{0};
-                uint32_t chunk_index{0};
+                uint64_t object_size{0};
+                uint32_t object_index{0};
             };
-            auto collect_file_chunk_tasks =
+            auto collect_file_object_tasks =
                 [&](const ArchiveCandidateEntry& seed,
                     uint64_t* inode_id,
-                    std::vector<FileChunkTask>* out,
+                    std::vector<FileObjectTask>* out,
                     uint64_t* total_size,
                     std::string* local_error) -> bool {
                 if (!inode_id || !out || !total_size) {
@@ -115,35 +151,31 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                 *inode_id = 0;
                 *total_size = 0;
 
-                std::string seed_chunk_key;
-                if (!FindChunkKeyByChunkId(seed.chunk_id, &seed_chunk_key, local_error)) {
-                    return false;
-                }
                 uint32_t seed_index = 0;
-                if (!ParseChunkKey(seed_chunk_key, inode_id, &seed_index)) {
-                    if (local_error) {
-                        *local_error = "invalid seed chunk key: " + seed_chunk_key;
-                    }
+                if (!ResolveObjectOwner(seed.ArchiveObjectId(), inode_id, &seed_index, local_error)) {
                     return false;
                 }
                 (void)seed_index;
 
-                const std::string prefix = ChunkPrefix(*inode_id);
+                const std::string prefix = ObjectPrefix(*inode_id);
                 std::unique_ptr<rocksdb::Iterator> it(store_->db()->NewIterator(rocksdb::ReadOptions()));
                 for (it->Seek(prefix); it->Valid(); it->Next()) {
-                    const std::string chunk_key = it->key().ToString();
-                    if (chunk_key.rfind(prefix, 0) != 0) {
+                    const std::string object_key = it->key().ToString();
+                    if (object_key.rfind(prefix, 0) != 0) {
                         break;
                     }
-                    uint64_t parsed_inode = 0;
-                    uint32_t chunk_index = 0;
-                    if (!ParseChunkKey(chunk_key, &parsed_inode, &chunk_index) || parsed_inode != *inode_id) {
+
+                    zb::rpc::ObjectMeta meta;
+                    if (!MetaCodec::DecodeObjectMeta(it->value().ToString(), &meta)) {
                         continue;
                     }
-
-                    zb::rpc::ChunkMeta meta;
-                    if (!MetaCodec::DecodeChunkMeta(it->value().ToString(), &meta)) {
-                        continue;
+                    uint32_t object_index = meta.index();
+                    if (object_index == 0) {
+                        uint64_t parsed_inode = 0;
+                        uint32_t parsed_index = 0;
+                        if (ParseObjectKey(object_key, &parsed_inode, &parsed_index) && parsed_inode == *inode_id) {
+                            object_index = parsed_index;
+                        }
                     }
                     bool has_optical_ready = false;
                     const zb::rpc::ReplicaLocation* selected_disk = nullptr;
@@ -152,7 +184,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                         if (IsReadyOpticalReplica(replica)) {
                             has_optical_ready = true;
                         }
-                        if (!IsDiskReplica(replica) || replica.chunk_id().empty()) {
+                        if (!IsDiskReplica(replica) || ReplicaObjectId(replica).empty()) {
                             continue;
                         }
                         if (!selected_disk) {
@@ -173,31 +205,31 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                         continue;
                     }
 
-                    FileChunkTask task;
-                    task.chunk_key = chunk_key;
-                    task.chunk_index = chunk_index;
+                    FileObjectTask task;
+                    task.object_key = object_key;
+                    task.object_index = object_index;
                     task.source_disk = *selected_disk;
-                    task.chunk_size = selected_disk->size() > 0
+                    task.object_size = selected_disk->size() > 0
                                           ? selected_disk->size()
-                                          : (seed.size_bytes > 0 ? seed.size_bytes : options_.default_chunk_size);
+                                          : (seed.size_bytes > 0 ? seed.size_bytes : options_.default_object_unit_size);
                     task.candidate = seed;
                     task.candidate.node_id = selected_disk->node_id();
                     task.candidate.node_address = selected_disk->node_address();
                     task.candidate.disk_id = selected_disk->disk_id();
-                    task.candidate.chunk_id = selected_disk->chunk_id();
-                    task.candidate.size_bytes = task.chunk_size;
+                    task.candidate.SetArchiveObjectId(ReplicaObjectId(*selected_disk));
+                    task.candidate.size_bytes = task.object_size;
                     out->push_back(std::move(task));
-                    *total_size += task.chunk_size;
+                    *total_size += task.object_size;
                 }
 
-                std::sort(out->begin(), out->end(), [](const FileChunkTask& a, const FileChunkTask& b) {
-                    return a.chunk_index < b.chunk_index;
+                std::sort(out->begin(), out->end(), [](const FileObjectTask& a, const FileObjectTask& b) {
+                    return a.object_index < b.object_index;
                 });
                 return true;
             };
             if (batch_stager_->HasSealedBatch()) {
                 std::string burn_error;
-                (void)BurnSealedBatch(optical, &archived_count, &touched_chunk_keys, &burn_error);
+                (void)BurnSealedBatch(optical, &archived_count, &touched_object_keys, &burn_error);
                 if (error && error->empty() && !burn_error.empty()) {
                     *error = burn_error;
                 }
@@ -205,7 +237,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
 
             uint32_t staged_count = 0;
             std::unordered_set<uint64_t> seen_inodes;
-            while (staged_count < options_.max_chunks_per_round && !batch_stager_->HasSealedBatch()) {
+            while (staged_count < options_.max_objects_per_round && !batch_stager_->HasSealedBatch()) {
                 ArchiveCandidateEntry seed_candidate;
                 if (!candidate_queue_->PopTop(&seed_candidate)) {
                     break;
@@ -213,9 +245,9 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
 
                 uint64_t inode_id = 0;
                 uint64_t file_total_size = 0;
-                std::vector<FileChunkTask> file_tasks;
+                std::vector<FileObjectTask> file_tasks;
                 std::string local_error;
-                if (!collect_file_chunk_tasks(seed_candidate, &inode_id, &file_tasks, &file_total_size, &local_error)) {
+                if (!collect_file_object_tasks(seed_candidate, &inode_id, &file_tasks, &file_total_size, &local_error)) {
                     if (error && error->empty() && !local_error.empty()) {
                         *error = local_error;
                     }
@@ -228,7 +260,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                     continue;
                 }
 
-                const uint32_t remaining_budget = options_.max_chunks_per_round - staged_count;
+                const uint32_t remaining_budget = options_.max_objects_per_round - staged_count;
                 if (file_tasks.size() > static_cast<size_t>(remaining_budget)) {
                     std::vector<ArchiveCandidateEntry> deferred_batch;
                     deferred_batch.push_back(seed_candidate);
@@ -251,19 +283,19 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                     continue;
                 }
 
-                struct LeasedChunk {
+                struct LeasedObject {
                     ArchiveCandidateEntry candidate;
                     std::string lease_id;
                     std::string op_id;
                 };
-                std::vector<LeasedChunk> leased_chunks;
+                std::vector<LeasedObject> leased_objects;
                 std::vector<std::pair<ArchiveCandidateEntry, uint64_t>> archiving_updates;
-                std::vector<std::string> staged_chunk_ids;
+                std::vector<std::string> staged_object_ids;
                 bool file_failed = false;
                 bool file_deferred = false;
 
                 for (const auto& task : file_tasks) {
-                    if (batch_stager_->ContainsChunk(task.candidate.chunk_id)) {
+                    if (batch_stager_->ContainsObject(task.candidate.ArchiveObjectId())) {
                         continue;
                     }
 
@@ -277,9 +309,9 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                         claim_req.set_node_id(task.candidate.node_id);
                         claim_req.set_node_address(task.candidate.node_address);
                         claim_req.set_disk_id(task.candidate.disk_id);
-                        claim_req.set_chunk_id(task.candidate.chunk_id);
+                        SetArchiveObjectId(&claim_req, task.candidate.ArchiveObjectId());
                         claim_req.set_requested_lease_ms(0);
-                        claim_req.set_request_id(task.candidate.chunk_id + ":" + batch_stager_->CurrentBatchId());
+                        claim_req.set_request_id(task.candidate.ArchiveObjectId() + ":" + batch_stager_->CurrentBatchId());
 
                         std::string claim_error;
                         if (!lease_manager_->Claim(claim_req, &claim_reply, &claim_error) || !claim_reply.granted()) {
@@ -287,7 +319,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                         } else {
                             lease_id = claim_reply.record().lease_id();
                             op_id = !claim_reply.record().lease_id().empty() ? claim_reply.record().lease_id()
-                                                                              : task.candidate.chunk_id;
+                                                                              : task.candidate.ArchiveObjectId();
                             stage_version =
                                 claim_reply.record().version() > 0 ? claim_reply.record().version() : stage_version;
                         }
@@ -306,15 +338,15 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                     }
 
                     std::string data;
-                    if (!ReadChunkFromReplica(task.source_disk, task.chunk_size, &data, &local_error)) {
+                    if (!ReadObjectFromReplica(task.source_disk, task.object_size, &data, &local_error)) {
                         if (lease_manager_ && !lease_id.empty()) {
                             zb::rpc::CommitArchiveTaskRequest commit_req;
                             commit_req.set_node_id(task.candidate.node_id);
-                            commit_req.set_chunk_id(task.candidate.chunk_id);
+                            SetArchiveObjectId(&commit_req, task.candidate.ArchiveObjectId());
                             commit_req.set_lease_id(lease_id);
                             commit_req.set_op_id(op_id);
                             commit_req.set_success(false);
-                            commit_req.set_error_message(local_error.empty() ? "failed to read source chunk" : local_error);
+                            commit_req.set_error_message(local_error.empty() ? "failed to read source object" : local_error);
                             zb::rpc::CommitArchiveTaskReply commit_reply;
                             std::string commit_error;
                             (void)lease_manager_->Commit(commit_req, &commit_reply, &commit_error);
@@ -325,10 +357,10 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
 
                     bool inserted = false;
                     bool deferred = false;
-                    if (!batch_stager_->StageChunk(task.candidate,
+                    if (!batch_stager_->StageObject(task.candidate,
                                                    lease_id,
                                                    op_id,
-                                                   task.chunk_key,
+                                                   task.object_key,
                                                    stage_version,
                                                    data,
                                                    &inserted,
@@ -337,11 +369,11 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                         if (lease_manager_ && !lease_id.empty()) {
                             zb::rpc::CommitArchiveTaskRequest commit_req;
                             commit_req.set_node_id(task.candidate.node_id);
-                            commit_req.set_chunk_id(task.candidate.chunk_id);
+                            SetArchiveObjectId(&commit_req, task.candidate.ArchiveObjectId());
                             commit_req.set_lease_id(lease_id);
                             commit_req.set_op_id(op_id);
                             commit_req.set_success(false);
-                            commit_req.set_error_message(local_error.empty() ? "failed to stage chunk" : local_error);
+                            commit_req.set_error_message(local_error.empty() ? "failed to stage object" : local_error);
                             zb::rpc::CommitArchiveTaskReply commit_reply;
                             std::string commit_error;
                             (void)lease_manager_->Commit(commit_req, &commit_reply, &commit_error);
@@ -350,14 +382,14 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                         break;
                     }
 
-                    LeasedChunk leased;
+                    LeasedObject leased;
                     leased.candidate = task.candidate;
                     leased.lease_id = lease_id;
                     leased.op_id = op_id;
-                    leased_chunks.push_back(std::move(leased));
+                    leased_objects.push_back(std::move(leased));
 
                     if (inserted) {
-                        staged_chunk_ids.push_back(task.candidate.chunk_id);
+                        staged_object_ids.push_back(task.candidate.ArchiveObjectId());
                         archiving_updates.emplace_back(task.candidate, stage_version);
                         continue;
                     }
@@ -367,21 +399,25 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                         break;
                     }
                     if (lease_manager_ && !lease_id.empty()) {
-                        (void)batch_stager_->UpdateLease(task.candidate.chunk_id, lease_id, op_id, stage_version, nullptr);
+                        (void)batch_stager_->UpdateObjectLease(task.candidate.ArchiveObjectId(),
+                                                               lease_id,
+                                                               op_id,
+                                                               stage_version,
+                                                               nullptr);
                     }
                 }
 
                 if (file_failed) {
-                    for (const auto& chunk_id : staged_chunk_ids) {
-                        (void)batch_stager_->RemoveChunk(chunk_id, nullptr);
+                    for (const auto& object_id : staged_object_ids) {
+                        (void)batch_stager_->RemoveObject(object_id, nullptr);
                     }
-                    for (const auto& leased : leased_chunks) {
+                    for (const auto& leased : leased_objects) {
                         if (!lease_manager_ || leased.lease_id.empty()) {
                             continue;
                         }
                         zb::rpc::CommitArchiveTaskRequest commit_req;
                         commit_req.set_node_id(leased.candidate.node_id);
-                        commit_req.set_chunk_id(leased.candidate.chunk_id);
+                        SetArchiveObjectId(&commit_req, leased.candidate.ArchiveObjectId());
                         commit_req.set_lease_id(leased.lease_id);
                         commit_req.set_op_id(leased.op_id);
                         commit_req.set_success(false);
@@ -405,7 +441,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                     std::string update_error;
                     (void)UpdateSourceArchiveState(update.first, "archiving", update.second, &update_error);
                 }
-                staged_count += static_cast<uint32_t>(staged_chunk_ids.size());
+                staged_count += static_cast<uint32_t>(staged_object_ids.size());
                 std::string seal_error;
                 (void)batch_stager_->SealIfReady(&seal_error);
                 if (error && error->empty() && !seal_error.empty()) {
@@ -415,13 +451,13 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
 
             if (batch_stager_->HasSealedBatch()) {
                 std::string burn_error;
-                (void)BurnSealedBatch(optical, &archived_count, &touched_chunk_keys, &burn_error);
+                (void)BurnSealedBatch(optical, &archived_count, &touched_object_keys, &burn_error);
                 if (error && error->empty() && !burn_error.empty()) {
                     *error = burn_error;
                 }
             }
         } else {
-            while (archived_count < options_.max_chunks_per_round) {
+            while (archived_count < options_.max_objects_per_round) {
                 ArchiveCandidateEntry candidate;
                 if (!candidate_queue_->PopTop(&candidate)) {
                     break;
@@ -436,16 +472,16 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                     claim_req.set_node_id(candidate.node_id);
                     claim_req.set_node_address(candidate.node_address);
                     claim_req.set_disk_id(candidate.disk_id);
-                    claim_req.set_chunk_id(candidate.chunk_id);
+                    SetArchiveObjectId(&claim_req, candidate.ArchiveObjectId());
                     claim_req.set_requested_lease_ms(0);
-                    claim_req.set_request_id(candidate.chunk_id);
+                    claim_req.set_request_id(candidate.ArchiveObjectId());
 
                     std::string claim_error;
                     if (!lease_manager_->Claim(claim_req, &claim_reply, &claim_error) || !claim_reply.granted()) {
                         granted = false;
                     } else {
                         lease_id = claim_reply.record().lease_id();
-                        op_id = !claim_reply.record().lease_id().empty() ? claim_reply.record().lease_id() : candidate.chunk_id;
+                        op_id = !claim_reply.record().lease_id().empty() ? claim_reply.record().lease_id() : candidate.ArchiveObjectId();
                     }
                 }
                 if (!granted) {
@@ -458,7 +494,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
 
                 std::string local_error;
                 const ArchiveByCandidateResult result =
-                    ArchiveByCandidate(candidate, optical, lease_id, op_id, &touched_chunk_keys, &local_error);
+                    ArchiveByCandidate(candidate, optical, lease_id, op_id, &touched_object_keys, &local_error);
                 if (result == ArchiveByCandidateResult::kArchived) {
                     ++archived_count;
                 }
@@ -466,7 +502,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                 if (lease_manager_ && !lease_id.empty()) {
                     zb::rpc::CommitArchiveTaskRequest commit_req;
                     commit_req.set_node_id(candidate.node_id);
-                    commit_req.set_chunk_id(candidate.chunk_id);
+                    SetArchiveObjectId(&commit_req, candidate.ArchiveObjectId());
                     commit_req.set_lease_id(lease_id);
                     commit_req.set_op_id(op_id);
                     commit_req.set_success(result == ArchiveByCandidateResult::kArchived);
@@ -488,7 +524,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
     }
 
     if (options_.cold_file_ttl_sec == 0) {
-        const uint32_t reconcile_budget = std::max<uint32_t>(64, options_.max_chunks_per_round * 4);
+        const uint32_t reconcile_budget = std::max<uint32_t>(64, options_.max_objects_per_round * 4);
         std::string reconcile_error;
         (void)ReconcileArchiveStates(reconcile_budget, &reconcile_error);
         if (error && error->empty() && !reconcile_error.empty()) {
@@ -497,30 +533,42 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
         return true;
     }
 
+    const std::string object_prefix = ObjectGlobalPrefix();
     std::unique_ptr<rocksdb::Iterator> it(store_->db()->NewIterator(rocksdb::ReadOptions()));
-    for (it->Seek("C/"); it->Valid(); it->Next()) {
+    for (it->Seek(object_prefix); it->Valid(); it->Next()) {
         const std::string key = it->key().ToString();
-        if (key.size() < 2 || key[0] != 'C' || key[1] != '/') {
+        if (key.rfind(object_prefix, 0) != 0) {
             break;
         }
-        if (touched_chunk_keys.find(key) != touched_chunk_keys.end()) {
+        if (touched_object_keys.find(key) != touched_object_keys.end()) {
             continue;
         }
 
+        zb::rpc::ObjectMeta meta;
+        if (!MetaCodec::DecodeObjectMeta(it->value().ToString(), &meta)) {
+            continue;
+        }
+
+        std::string local_error;
         uint64_t inode_id = 0;
-        uint32_t chunk_index = 0;
-        if (!ParseChunkKey(key, &inode_id, &chunk_index)) {
+        uint32_t object_index = 0;
+        bool owner_resolved = false;
+        for (const auto& replica : meta.replicas()) {
+            const std::string object_id = ReplicaObjectId(replica);
+            if (object_id.empty()) {
+                continue;
+            }
+            if (ResolveObjectOwner(object_id, &inode_id, &object_index, &local_error)) {
+                owner_resolved = true;
+            }
+            break;
+        }
+        if (!owner_resolved && !ParseObjectKey(key, &inode_id, &object_index)) {
             continue;
         }
-        (void)chunk_index;
-
-        zb::rpc::ChunkMeta meta;
-        if (!MetaCodec::DecodeChunkMeta(it->value().ToString(), &meta)) {
-            continue;
-        }
+        (void)object_index;
 
         zb::rpc::InodeAttr inode;
-        std::string local_error;
         if (!LoadInodeAttr(inode_id, &inode, &local_error)) {
             continue;
         }
@@ -542,20 +590,23 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
 
         bool changed = false;
 
-        const bool allow_scan_archive = do_archive && !candidate_queue_;
+        // Stage-B policy: disable online full-table archive fallback.
+        // Archiving must be driven by candidate queue + reverse index.
+        const bool allow_scan_archive = false;
         if (allow_scan_archive && has_disk && !has_optical_ready && source_disk && !optical_nodes.empty() &&
-            archived_count < options_.max_chunks_per_round) {
+            archived_count < options_.max_objects_per_round) {
             std::string data;
-            uint64_t chunk_size = inode.chunk_size() ? inode.chunk_size() : options_.default_chunk_size;
-            if (ReadChunkFromReplica(*source_disk, chunk_size, &data, &local_error)) {
+            uint64_t object_unit_size = inode.object_unit_size() ? inode.object_unit_size() : options_.default_object_unit_size;
+            if (ReadObjectFromReplica(*source_disk, object_unit_size, &data, &local_error)) {
                 const NodeSelection& optical = optical_nodes.front();
                 zb::rpc::ReplicaLocation optical_location;
-                if (WriteChunkToOptical(optical,
-                                        source_disk->chunk_id(),
-                                        source_disk->chunk_id(),
+                const std::string source_object_id = ReplicaObjectId(*source_disk);
+                if (WriteObjectToOptical(optical,
+                                        source_object_id,
+                                        source_object_id,
                                         data,
                                         inode_id,
-                                        chunk_index,
+                                        object_index,
                                         &inode,
                                         &optical_location,
                                         &local_error)) {
@@ -563,7 +614,8 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                     new_replica->set_node_id(optical.node_id);
                     new_replica->set_node_address(optical.address);
                     new_replica->set_disk_id(optical.disk_id);
-                    new_replica->set_chunk_id(source_disk->chunk_id());
+                    const std::string object_id = ReplicaObjectId(*source_disk);
+                    EnsureReplicaObjectId(new_replica, object_id);
                     new_replica->set_size(static_cast<uint64_t>(data.size()));
                     new_replica->set_group_id(optical.group_id);
                     new_replica->set_epoch(optical.epoch);
@@ -580,10 +632,10 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                         new_replica->set_image_length(optical_location.image_length());
                     }
                     if (!new_replica->image_id().empty()) {
-                        batch.Put(ArchiveImageChunkKey(new_replica->node_id(),
-                                                       new_replica->disk_id(),
-                                                       new_replica->image_id(),
-                                                       source_disk->chunk_id()),
+                        batch.Put(ArchiveImageObjectKey(new_replica->node_id(),
+                                                        new_replica->disk_id(),
+                                                        new_replica->image_id(),
+                                                        source_object_id),
                                   key);
                     }
                     changed = true;
@@ -619,10 +671,10 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
         }
 
         if (changed) {
-            batch.Put(key, MetaCodec::EncodeChunkMeta(meta));
+            batch.Put(key, MetaCodec::EncodeObjectMeta(meta));
         }
 
-        if (archived_count >= options_.max_chunks_per_round && !options_.cold_file_ttl_sec) {
+        if (archived_count >= options_.max_objects_per_round && !options_.cold_file_ttl_sec) {
             break;
         }
     }
@@ -637,7 +689,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
         }
     }
 
-    const uint32_t reconcile_budget = std::max<uint32_t>(64, options_.max_chunks_per_round * 4);
+    const uint32_t reconcile_budget = std::max<uint32_t>(64, options_.max_objects_per_round * 4);
     std::string reconcile_error;
     (void)ReconcileArchiveStates(reconcile_budget, &reconcile_error);
     if (error && error->empty() && !reconcile_error.empty()) {
@@ -648,167 +700,205 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
 }
 
 bool OpticalArchiveManager::ResolveCandidateSource(const ArchiveCandidateEntry& candidate,
-                                                   std::string* chunk_key,
+                                                   std::string* object_key,
                                                    zb::rpc::ReplicaLocation* source_disk,
-                                                   uint64_t* chunk_size,
+                                                   uint64_t* inode_id,
+                                                   uint32_t* object_index,
+                                                   uint64_t* object_size,
                                                    std::string* error) {
-    if (!chunk_key || !source_disk || !chunk_size) {
+    if (!object_key || !source_disk || !inode_id || !object_index || !object_size) {
         if (error) {
             *error = "invalid source output pointers";
         }
         return false;
     }
-    *chunk_size = options_.default_chunk_size;
+    *inode_id = 0;
+    *object_index = 0;
+    *object_size = options_.default_object_unit_size;
     std::string local_error;
-    if (!FindChunkKeyByChunkId(candidate.chunk_id, chunk_key, &local_error)) {
+    bool has_object_key = FindObjectKeyByObjectId(candidate.ArchiveObjectId(), object_key, &local_error);
+    if (!has_object_key) {
+        object_key->clear();
+    }
+
+    if (!ResolveObjectOwner(candidate.ArchiveObjectId(), inode_id, object_index, &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "chunk key not found for candidate " + candidate.chunk_id : local_error;
+            *error = local_error.empty() ? "failed to resolve object owner for " + candidate.ArchiveObjectId()
+                                         : local_error;
         }
         return false;
     }
 
-    uint64_t inode_id = 0;
-    uint32_t chunk_index = 0;
-    if (!ParseChunkKey(*chunk_key, &inode_id, &chunk_index)) {
-        if (error) {
-            *error = "invalid chunk key " + *chunk_key;
+    if (has_object_key) {
+        std::string object_meta_data;
+        if (!store_->Get(*object_key, &object_meta_data, &local_error)) {
+            if (error) {
+                *error = local_error.empty() ? "failed to load object meta " + *object_key : local_error;
+            }
+            return false;
         }
-        return false;
-    }
+        zb::rpc::ObjectMeta meta;
+        if (!MetaCodec::DecodeObjectMeta(object_meta_data, &meta)) {
+            if (error) {
+                *error = "invalid object meta " + *object_key;
+            }
+            return false;
+        }
 
-    std::string chunk_meta_data;
-    if (!store_->Get(*chunk_key, &chunk_meta_data, &local_error)) {
-        if (error) {
-            *error = local_error.empty() ? "failed to load chunk meta " + *chunk_key : local_error;
+        const zb::rpc::ReplicaLocation* preferred = nullptr;
+        const zb::rpc::ReplicaLocation* fallback = nullptr;
+        for (const auto& replica : meta.replicas()) {
+            if (!IsDiskReplica(replica)) {
+                continue;
+            }
+            if (!fallback) {
+                fallback = &replica;
+            }
+            if (ReplicaObjectId(replica) == candidate.ArchiveObjectId() &&
+                MatchesCandidateNodeId(candidate.node_id, replica.node_id()) &&
+                (candidate.disk_id.empty() || replica.disk_id() == candidate.disk_id)) {
+                preferred = &replica;
+            }
         }
-        return false;
+        const zb::rpc::ReplicaLocation* chosen = preferred ? preferred : fallback;
+        if (!chosen) {
+            if (error) {
+                *error = "no disk replica available for " + candidate.ArchiveObjectId();
+            }
+            return false;
+        }
+        *source_disk = *chosen;
+    } else {
+        if (candidate.node_address.empty() || candidate.disk_id.empty()) {
+            if (error) {
+                *error = local_error.empty() ? "object key missing and candidate source is incomplete"
+                                             : local_error;
+            }
+            return false;
+        }
+        source_disk->set_node_id(candidate.node_id);
+        source_disk->set_node_address(candidate.node_address);
+        source_disk->set_disk_id(candidate.disk_id);
+        EnsureReplicaObjectId(source_disk, candidate.ArchiveObjectId());
+        source_disk->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+        source_disk->set_replica_state(zb::rpc::REPLICA_READY);
+        if (candidate.size_bytes > 0) {
+            source_disk->set_size(candidate.size_bytes);
+        }
     }
-    zb::rpc::ChunkMeta meta;
-    if (!MetaCodec::DecodeChunkMeta(chunk_meta_data, &meta)) {
-        if (error) {
-            *error = "invalid chunk meta " + *chunk_key;
-        }
-        return false;
-    }
-
-    const zb::rpc::ReplicaLocation* preferred = nullptr;
-    const zb::rpc::ReplicaLocation* fallback = nullptr;
-    for (const auto& replica : meta.replicas()) {
-        if (!IsDiskReplica(replica)) {
-            continue;
-        }
-        if (!fallback) {
-            fallback = &replica;
-        }
-        if (replica.chunk_id() == candidate.chunk_id &&
-            MatchesCandidateNodeId(candidate.node_id, replica.node_id()) &&
-            (candidate.disk_id.empty() || replica.disk_id() == candidate.disk_id)) {
-            preferred = &replica;
-        }
-    }
-    const zb::rpc::ReplicaLocation* chosen = preferred ? preferred : fallback;
-    if (!chosen) {
-        if (error) {
-            *error = "no disk replica available for " + candidate.chunk_id;
-        }
-        return false;
-    }
-    *source_disk = *chosen;
 
     zb::rpc::InodeAttr inode;
-    if (LoadInodeAttr(inode_id, &inode, &local_error)) {
-        *chunk_size = inode.chunk_size() ? inode.chunk_size() : options_.default_chunk_size;
+    if (LoadInodeAttr(*inode_id, &inode, &local_error)) {
+        *object_size = inode.object_unit_size() ? inode.object_unit_size() : options_.default_object_unit_size;
     } else {
         if (error) {
-            *error = local_error.empty() ? "failed to load inode for " + candidate.chunk_id : local_error;
+            *error = local_error.empty() ? "failed to load inode for " + candidate.ArchiveObjectId() : local_error;
         }
         return false;
     }
     return true;
 }
 
-bool OpticalArchiveManager::PersistOpticalReplica(const std::string& chunk_key,
+bool OpticalArchiveManager::PersistOpticalReplica(const std::string& object_key,
                                                   const NodeSelection& optical,
-                                                  const std::string& chunk_id,
+                                                  const std::string& object_id,
                                                   uint64_t data_size,
                                                   const zb::rpc::ReplicaLocation* optical_location,
                                                   rocksdb::WriteBatch* update_batch,
                                                   std::string* error) {
-    if (chunk_key.empty() || chunk_id.empty()) {
+    if (object_id.empty()) {
         if (error) {
-            *error = "chunk key or chunk id is empty";
+            *error = "object id is empty";
         }
         return false;
     }
 
     std::string local_error;
-    std::string chunk_data;
-    if (!store_->Get(chunk_key, &chunk_data, &local_error)) {
-        if (error) {
-            *error = local_error.empty() ? "failed to reload chunk meta " + chunk_key : local_error;
-        }
-        return false;
-    }
-    zb::rpc::ChunkMeta meta;
-    if (!MetaCodec::DecodeChunkMeta(chunk_data, &meta)) {
-        if (error) {
-            *error = "invalid chunk meta " + chunk_key;
-        }
-        return false;
-    }
-    bool exists_optical_ready = false;
+    bool has_object_key = !object_key.empty();
+    zb::rpc::ObjectMeta meta;
     const zb::rpc::ReplicaLocation* selected_optical = nullptr;
-    for (const auto& replica : meta.replicas()) {
-        if (replica.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL &&
-            replica.replica_state() == zb::rpc::REPLICA_READY) {
-            exists_optical_ready = true;
-            if (!selected_optical) {
-                selected_optical = &replica;
+    if (has_object_key) {
+        std::string object_data;
+        if (!store_->Get(object_key, &object_data, &local_error)) {
+            if (error) {
+                *error = local_error.empty() ? "failed to reload object meta " + object_key : local_error;
             }
-            break;
+            return false;
         }
-    }
-    if (!exists_optical_ready) {
-        zb::rpc::ReplicaLocation* new_replica = meta.add_replicas();
-        new_replica->set_node_id(optical.node_id);
-        new_replica->set_node_address(optical.address);
-        new_replica->set_disk_id(optical.disk_id);
-        new_replica->set_chunk_id(chunk_id);
-        new_replica->set_size(data_size);
-        new_replica->set_group_id(optical.group_id);
-        new_replica->set_epoch(optical.epoch);
-        new_replica->set_primary_node_id(optical.node_id);
-        new_replica->set_primary_address(optical.address);
-        new_replica->set_secondary_node_id(optical.secondary_node_id);
-        new_replica->set_secondary_address(optical.secondary_address);
-        new_replica->set_sync_ready(optical.sync_ready);
-        new_replica->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
-        new_replica->set_replica_state(zb::rpc::REPLICA_READY);
-        if (optical_location && !optical_location->image_id().empty()) {
-            new_replica->set_image_id(optical_location->image_id());
-            new_replica->set_image_offset(optical_location->image_offset());
-            new_replica->set_image_length(optical_location->image_length());
+        if (!MetaCodec::DecodeObjectMeta(object_data, &meta)) {
+            if (error) {
+                *error = "invalid object meta " + object_key;
+            }
+            return false;
         }
-        selected_optical = new_replica;
+        bool exists_optical_ready = false;
+        for (const auto& replica : meta.replicas()) {
+            if (replica.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL &&
+                replica.replica_state() == zb::rpc::REPLICA_READY) {
+                exists_optical_ready = true;
+                if (!selected_optical) {
+                    selected_optical = &replica;
+                }
+                break;
+            }
+        }
+        if (!exists_optical_ready) {
+            zb::rpc::ReplicaLocation* new_replica = meta.add_replicas();
+            new_replica->set_node_id(optical.node_id);
+            new_replica->set_node_address(optical.address);
+            new_replica->set_disk_id(optical.disk_id);
+            EnsureReplicaObjectId(new_replica, object_id);
+            new_replica->set_size(data_size);
+            new_replica->set_group_id(optical.group_id);
+            new_replica->set_epoch(optical.epoch);
+            new_replica->set_primary_node_id(optical.node_id);
+            new_replica->set_primary_address(optical.address);
+            new_replica->set_secondary_node_id(optical.secondary_node_id);
+            new_replica->set_secondary_address(optical.secondary_address);
+            new_replica->set_sync_ready(optical.sync_ready);
+            new_replica->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
+            new_replica->set_replica_state(zb::rpc::REPLICA_READY);
+            if (optical_location && !optical_location->image_id().empty()) {
+                new_replica->set_image_id(optical_location->image_id());
+                new_replica->set_image_offset(optical_location->image_offset());
+                new_replica->set_image_length(optical_location->image_length());
+            }
+            selected_optical = new_replica;
+        }
     }
 
     rocksdb::WriteBatch local_update;
     rocksdb::WriteBatch* target_batch = update_batch ? update_batch : &local_update;
-    target_batch->Put(chunk_key, MetaCodec::EncodeChunkMeta(meta));
-    target_batch->Put(ReverseChunkKey(chunk_id), chunk_key);
-    if (selected_optical &&
-        !selected_optical->node_id().empty() &&
-        !selected_optical->disk_id().empty() &&
-        !selected_optical->image_id().empty()) {
-        target_batch->Put(ArchiveImageChunkKey(selected_optical->node_id(),
-                                               selected_optical->disk_id(),
-                                               selected_optical->image_id(),
-                                               chunk_id),
-                          chunk_key);
+    if (has_object_key) {
+        target_batch->Put(object_key, MetaCodec::EncodeObjectMeta(meta));
+        target_batch->Put(ReverseObjectKey(object_id), object_key);
+    }
+    zb::rpc::ReplicaLocation fallback_optical;
+    const zb::rpc::ReplicaLocation* indexed_source = selected_optical;
+    if (!indexed_source && optical_location &&
+        !optical_location->node_id().empty() &&
+        !optical_location->disk_id().empty()) {
+        fallback_optical = *optical_location;
+        indexed_source = &fallback_optical;
+    }
+    if (indexed_source && !indexed_source->node_id().empty() && !indexed_source->disk_id().empty()) {
+        if (has_object_key && !indexed_source->image_id().empty()) {
+            target_batch->Put(ArchiveImageObjectKey(indexed_source->node_id(),
+                                                    indexed_source->disk_id(),
+                                                    indexed_source->image_id(),
+                                                    object_id),
+                              object_key);
+        }
+        zb::rpc::ReplicaLocation indexed_location = *indexed_source;
+        EnsureReplicaObjectId(&indexed_location, object_id);
+        std::string encoded_location;
+        if (indexed_location.SerializeToString(&encoded_location)) {
+            target_batch->Put(ArchiveObjectOpticalLocationKey(object_id), encoded_location);
+        }
     }
     if (!update_batch && !store_->WriteBatch(target_batch, &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "failed to persist chunk meta update" : local_error;
+            *error = local_error.empty() ? "failed to persist object meta update" : local_error;
         }
         return false;
     }
@@ -817,22 +907,22 @@ bool OpticalArchiveManager::PersistOpticalReplica(const std::string& chunk_key,
 
 bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
                                             uint32_t* archived_count,
-                                            std::unordered_set<std::string>* touched_chunk_keys,
+                                            std::unordered_set<std::string>* touched_object_keys,
                                             std::string* error) {
     if (!batch_stager_) {
         return true;
     }
     struct PreparedBurnTask {
-        StagedArchiveChunk staged;
+        StagedArchiveObject staged;
         std::string lease_id;
         std::string op_id;
         uint64_t version{0};
-        std::string chunk_key;
+        std::string object_key;
         uint64_t data_size{0};
         zb::rpc::ReplicaLocation optical_location;
     };
 
-    std::vector<StagedArchiveChunk> tasks = batch_stager_->SnapshotSealedBatch();
+    std::vector<StagedArchiveObject> tasks = batch_stager_->SnapshotSealedBatch();
     std::vector<PreparedBurnTask> prepared;
     prepared.reserve(tasks.size());
     bool batch_failed = false;
@@ -845,7 +935,7 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
         if (lease_manager_ && !lease_id.empty()) {
             zb::rpc::RenewArchiveLeaseRequest renew_req;
             renew_req.set_node_id(staged.candidate.node_id);
-            renew_req.set_chunk_id(staged.candidate.chunk_id);
+            SetArchiveObjectId(&renew_req, staged.candidate.ArchiveObjectId());
             renew_req.set_lease_id(lease_id);
             renew_req.set_requested_lease_ms(0);
             zb::rpc::RenewArchiveLeaseReply renew_reply;
@@ -854,16 +944,16 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
                 claim_req.set_node_id(staged.candidate.node_id);
                 claim_req.set_node_address(staged.candidate.node_address);
                 claim_req.set_disk_id(staged.candidate.disk_id);
-                claim_req.set_chunk_id(staged.candidate.chunk_id);
+                SetArchiveObjectId(&claim_req, staged.candidate.ArchiveObjectId());
                 claim_req.set_requested_lease_ms(0);
-                claim_req.set_request_id(staged.candidate.chunk_id + ":" + batch_stager_->CurrentBatchId());
+                claim_req.set_request_id(staged.candidate.ArchiveObjectId() + ":" + batch_stager_->CurrentBatchId());
                 zb::rpc::ClaimArchiveTaskReply claim_reply;
                 std::string claim_error;
                 if (!lease_manager_->Claim(claim_req, &claim_reply, &claim_error) || !claim_reply.granted()) {
                     if (claim_reply.record().state() == zb::rpc::ARCHIVE_STATE_ARCHIVED) {
                         std::string update_error;
                         (void)UpdateSourceArchiveState(staged.candidate, "archived", claim_reply.record().version(), &update_error);
-                        (void)batch_stager_->MarkChunkDone(staged.candidate.chunk_id, &claim_error);
+                        (void)batch_stager_->MarkObjectDone(staged.candidate.ArchiveObjectId(), &claim_error);
                         continue;
                     }
                     if (error && error->empty()) {
@@ -873,17 +963,25 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
                     break;
                 }
                 lease_id = claim_reply.record().lease_id();
-                op_id = !claim_reply.record().lease_id().empty() ? claim_reply.record().lease_id() : staged.candidate.chunk_id;
+                op_id = !claim_reply.record().lease_id().empty() ? claim_reply.record().lease_id() : staged.candidate.ArchiveObjectId();
                 version = claim_reply.record().version();
-                (void)batch_stager_->UpdateLease(staged.candidate.chunk_id, lease_id, op_id, version, nullptr);
+                (void)batch_stager_->UpdateObjectLease(staged.candidate.ArchiveObjectId(),
+                                                       lease_id,
+                                                       op_id,
+                                                       version,
+                                                       nullptr);
             } else {
                 version = renew_reply.record().version();
-                (void)batch_stager_->UpdateLease(staged.candidate.chunk_id, lease_id, op_id, version, nullptr);
+                (void)batch_stager_->UpdateObjectLease(staged.candidate.ArchiveObjectId(),
+                                                       lease_id,
+                                                       op_id,
+                                                       version,
+                                                       nullptr);
             }
         }
 
         std::string data;
-        if (!batch_stager_->ReadChunkData(staged, &data, &local_error)) {
+        if (!batch_stager_->ReadObjectData(staged, &data, &local_error)) {
             if (error && error->empty()) {
                 *error = local_error;
             }
@@ -891,23 +989,33 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
             break;
         }
 
-        std::string chunk_key = staged.chunk_key;
-        if (chunk_key.empty()) {
+        std::string object_key = staged.object_key;
+        uint64_t inode_id = 0;
+        uint32_t object_index = 0;
+        if (object_key.empty()) {
             zb::rpc::ReplicaLocation source_disk;
-            uint64_t chunk_size = options_.default_chunk_size;
-            if (!ResolveCandidateSource(staged.candidate, &chunk_key, &source_disk, &chunk_size, &local_error)) {
+            uint64_t object_size = options_.default_object_unit_size;
+            if (!ResolveCandidateSource(staged.candidate,
+                                        &object_key,
+                                        &source_disk,
+                                        &inode_id,
+                                        &object_index,
+                                        &object_size,
+                                        &local_error)) {
                 if (error && error->empty()) {
                     *error = local_error;
                 }
                 batch_failed = true;
                 break;
             }
-        }
-        uint64_t inode_id = 0;
-        uint32_t chunk_index = 0;
-        if (!ParseChunkKey(chunk_key, &inode_id, &chunk_index)) {
+        } else if (!ResolveObjectOwner(staged.candidate.ArchiveObjectId(),
+                                       &inode_id,
+                                       &object_index,
+                                       &local_error)) {
             if (error && error->empty()) {
-                *error = "invalid chunk key " + chunk_key;
+                *error = local_error.empty()
+                             ? "failed to resolve object owner for " + staged.candidate.ArchiveObjectId()
+                             : local_error;
             }
             batch_failed = true;
             break;
@@ -915,19 +1023,19 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
         zb::rpc::InodeAttr inode;
         if (!LoadInodeAttr(inode_id, &inode, &local_error)) {
             if (error && error->empty()) {
-                *error = local_error.empty() ? "failed to load inode for staged chunk" : local_error;
+                *error = local_error.empty() ? "failed to load inode for staged object" : local_error;
             }
             batch_failed = true;
             break;
         }
 
         zb::rpc::ReplicaLocation optical_location;
-        if (!WriteChunkToOptical(optical,
-                                 staged.candidate.chunk_id,
+        if (!WriteObjectToOptical(optical,
+                                 staged.candidate.ArchiveObjectId(),
                                  op_id,
                                  data,
                                  inode_id,
-                                 chunk_index,
+                                 object_index,
                                  &inode,
                                  &optical_location,
                                  &local_error)) {
@@ -942,7 +1050,7 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
         item.lease_id = lease_id;
         item.op_id = op_id;
         item.version = version;
-        item.chunk_key = chunk_key;
+        item.object_key = object_key;
         item.data_size = static_cast<uint64_t>(data.size());
         item.optical_location = optical_location;
         prepared.push_back(std::move(item));
@@ -956,9 +1064,9 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
         rocksdb::WriteBatch metadata_batch;
         std::string local_error;
         for (const auto& item : prepared) {
-            if (!PersistOpticalReplica(item.chunk_key,
+            if (!PersistOpticalReplica(item.object_key,
                                        optical,
-                                       item.staged.candidate.chunk_id,
+                                       item.staged.candidate.ArchiveObjectId(),
                                        item.data_size,
                                        &item.optical_location,
                                        &metadata_batch,
@@ -986,7 +1094,7 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
             }
             zb::rpc::CommitArchiveTaskRequest commit_req;
             commit_req.set_node_id(item.staged.candidate.node_id);
-            commit_req.set_chunk_id(item.staged.candidate.chunk_id);
+            SetArchiveObjectId(&commit_req, item.staged.candidate.ArchiveObjectId());
             commit_req.set_lease_id(item.lease_id);
             commit_req.set_op_id(item.op_id);
             commit_req.set_success(true);
@@ -1005,16 +1113,16 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
             return false;
         }
 
-        if (touched_chunk_keys) {
+        if (touched_object_keys) {
             for (const auto& item : prepared) {
-                touched_chunk_keys->insert(item.chunk_key);
+                touched_object_keys->insert(item.object_key);
             }
         }
         for (size_t i = 0; i < prepared.size(); ++i) {
             const auto& item = prepared[i];
             std::string update_error;
             (void)UpdateSourceArchiveState(item.staged.candidate, "archived", archived_versions[i], &update_error);
-            (void)batch_stager_->MarkChunkDone(item.staged.candidate.chunk_id, nullptr);
+            (void)batch_stager_->MarkObjectDone(item.staged.candidate.ArchiveObjectId(), nullptr);
             if (archived_count) {
                 ++(*archived_count);
             }
@@ -1033,85 +1141,107 @@ OpticalArchiveManager::ArchiveByCandidateResult OpticalArchiveManager::ArchiveBy
     const NodeSelection& optical,
     const std::string& lease_id,
     const std::string& op_id,
-    std::unordered_set<std::string>* touched_chunk_keys,
+    std::unordered_set<std::string>* touched_object_keys,
     std::string* error) {
-    if (!touched_chunk_keys) {
+    if (!touched_object_keys) {
         if (error) {
-            *error = "touched chunk set is null";
+            *error = "touched object set is null";
         }
         return ArchiveByCandidateResult::kFailed;
     }
-    if (candidate.chunk_id.empty()) {
+    if (candidate.ArchiveObjectId().empty()) {
         if (error) {
-            *error = "empty candidate chunk id";
+            *error = "empty candidate object id";
         }
         return ArchiveByCandidateResult::kFailed;
     }
 
     std::string local_error;
-    std::string chunk_key;
-    if (!FindChunkKeyByChunkId(candidate.chunk_id, &chunk_key, &local_error)) {
-        if (error) {
-            *error = local_error.empty() ? "chunk key not found for candidate " + candidate.chunk_id : local_error;
-        }
-        return ArchiveByCandidateResult::kFailed;
+    std::string object_key;
+    bool has_object_key = FindObjectKeyByObjectId(candidate.ArchiveObjectId(), &object_key, &local_error);
+    if (!has_object_key) {
+        object_key.clear();
     }
 
     uint64_t inode_id = 0;
-    uint32_t chunk_index = 0;
-    if (!ParseChunkKey(chunk_key, &inode_id, &chunk_index)) {
+    uint32_t object_index = 0;
+    if (!ResolveObjectOwner(candidate.ArchiveObjectId(), &inode_id, &object_index, &local_error)) {
         if (error) {
-            *error = "invalid chunk key " + chunk_key;
-        }
-        return ArchiveByCandidateResult::kFailed;
-    }
-    (void)chunk_index;
-
-    std::string chunk_data;
-    if (!store_->Get(chunk_key, &chunk_data, &local_error)) {
-        if (error) {
-            *error = local_error.empty() ? "failed to load chunk meta " + chunk_key : local_error;
+            *error = local_error.empty() ? "failed to resolve object owner for " + candidate.ArchiveObjectId()
+                                         : local_error;
         }
         return ArchiveByCandidateResult::kFailed;
     }
 
-    zb::rpc::ChunkMeta meta;
-    if (!MetaCodec::DecodeChunkMeta(chunk_data, &meta)) {
-        if (error) {
-            *error = "invalid chunk meta " + chunk_key;
-        }
-        return ArchiveByCandidateResult::kFailed;
-    }
-
+    zb::rpc::ObjectMeta meta;
     bool has_disk = false;
     bool has_optical_ready = false;
     const zb::rpc::ReplicaLocation* source_disk = nullptr;
     const zb::rpc::ReplicaLocation* preferred_source = nullptr;
-    for (const auto& replica : meta.replicas()) {
-        if (IsDiskReplica(replica)) {
-            has_disk = true;
-            if (!source_disk) {
-                source_disk = &replica;
+    zb::rpc::ReplicaLocation source_disk_fallback;
+    if (has_object_key) {
+        std::string object_data;
+        if (!store_->Get(object_key, &object_data, &local_error)) {
+            if (error) {
+                *error = local_error.empty() ? "failed to load object meta " + object_key : local_error;
             }
-            if (replica.chunk_id() == candidate.chunk_id &&
-                MatchesCandidateNodeId(candidate.node_id, replica.node_id()) &&
-                (candidate.disk_id.empty() || replica.disk_id() == candidate.disk_id)) {
-                preferred_source = &replica;
+            return ArchiveByCandidateResult::kFailed;
+        }
+        if (!MetaCodec::DecodeObjectMeta(object_data, &meta)) {
+            if (error) {
+                *error = "invalid object meta " + object_key;
+            }
+            return ArchiveByCandidateResult::kFailed;
+        }
+        for (const auto& replica : meta.replicas()) {
+            if (IsDiskReplica(replica)) {
+                has_disk = true;
+                if (!source_disk) {
+                    source_disk = &replica;
+                }
+                if (ReplicaObjectId(replica) == candidate.ArchiveObjectId() &&
+                    MatchesCandidateNodeId(candidate.node_id, replica.node_id()) &&
+                    (candidate.disk_id.empty() || replica.disk_id() == candidate.disk_id)) {
+                    preferred_source = &replica;
+                }
+            }
+            if (IsReadyOpticalReplica(replica)) {
+                has_optical_ready = true;
             }
         }
-        if (IsReadyOpticalReplica(replica)) {
-            has_optical_ready = true;
+        source_disk = preferred_source ? preferred_source : source_disk;
+    } else {
+        if (!HasReadyOpticalReplica(candidate.ArchiveObjectId(), &has_optical_ready, &local_error)) {
+            if (error) {
+                *error = local_error.empty() ? "failed to query optical index for " + candidate.ArchiveObjectId()
+                                             : local_error;
+            }
+            return ArchiveByCandidateResult::kFailed;
+        }
+        if (!has_optical_ready &&
+            (!candidate.node_address.empty() && !candidate.disk_id.empty())) {
+            source_disk_fallback.set_node_id(candidate.node_id);
+            source_disk_fallback.set_node_address(candidate.node_address);
+            source_disk_fallback.set_disk_id(candidate.disk_id);
+            EnsureReplicaObjectId(&source_disk_fallback, candidate.ArchiveObjectId());
+            source_disk_fallback.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+            source_disk_fallback.set_replica_state(zb::rpc::REPLICA_READY);
+            if (candidate.size_bytes > 0) {
+                source_disk_fallback.set_size(candidate.size_bytes);
+            }
+            source_disk = &source_disk_fallback;
+            has_disk = true;
         }
     }
-
-    source_disk = preferred_source ? preferred_source : source_disk;
     if (has_optical_ready) {
-        touched_chunk_keys->insert(chunk_key);
+        if (!object_key.empty()) {
+            touched_object_keys->insert(object_key);
+        }
         return ArchiveByCandidateResult::kArchived;
     }
     if (!has_disk || !source_disk) {
         if (error) {
-            *error = "no disk replica available for " + candidate.chunk_id;
+            *error = "no disk replica available for " + candidate.ArchiveObjectId();
         }
         return ArchiveByCandidateResult::kFailed;
     }
@@ -1119,23 +1249,23 @@ OpticalArchiveManager::ArchiveByCandidateResult OpticalArchiveManager::ArchiveBy
     zb::rpc::InodeAttr inode;
     if (!LoadInodeAttr(inode_id, &inode, &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "failed to load inode for " + candidate.chunk_id : local_error;
+            *error = local_error.empty() ? "failed to load inode for " + candidate.ArchiveObjectId() : local_error;
         }
         return ArchiveByCandidateResult::kFailed;
     }
 
     std::string data;
-    const uint64_t chunk_size = inode.chunk_size() ? inode.chunk_size() : options_.default_chunk_size;
-    if (!ReadChunkFromReplica(*source_disk, chunk_size, &data, &local_error)) {
+    const uint64_t object_size = inode.object_unit_size() ? inode.object_unit_size() : options_.default_object_unit_size;
+    if (!ReadObjectFromReplica(*source_disk, object_size, &data, &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "failed to read chunk from source replica" : local_error;
+            *error = local_error.empty() ? "failed to read object from source replica" : local_error;
         }
         return ArchiveByCandidateResult::kFailed;
     }
     if (lease_manager_ && !lease_id.empty()) {
         zb::rpc::RenewArchiveLeaseRequest renew_req;
         renew_req.set_node_id(candidate.node_id);
-        renew_req.set_chunk_id(candidate.chunk_id);
+        SetArchiveObjectId(&renew_req, candidate.ArchiveObjectId());
         renew_req.set_lease_id(lease_id);
         renew_req.set_requested_lease_ms(0);
         zb::rpc::RenewArchiveLeaseReply renew_reply;
@@ -1147,59 +1277,85 @@ OpticalArchiveManager::ArchiveByCandidateResult OpticalArchiveManager::ArchiveBy
         }
     }
     zb::rpc::ReplicaLocation optical_location;
-    if (!WriteChunkToOptical(optical,
-                             source_disk->chunk_id(),
+    const std::string source_object_id = ReplicaObjectId(*source_disk);
+    if (!WriteObjectToOptical(optical,
+                             source_object_id,
                              op_id,
                              data,
                              inode_id,
-                             chunk_index,
+                             object_index,
                              &inode,
                              &optical_location,
                              &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "failed to write chunk to optical node" : local_error;
+            *error = local_error.empty() ? "failed to write object to optical node" : local_error;
         }
         return ArchiveByCandidateResult::kFailed;
-    }
-
-    zb::rpc::ReplicaLocation* new_replica = meta.add_replicas();
-    new_replica->set_node_id(optical.node_id);
-    new_replica->set_node_address(optical.address);
-    new_replica->set_disk_id(optical.disk_id);
-    new_replica->set_chunk_id(source_disk->chunk_id());
-    new_replica->set_size(static_cast<uint64_t>(data.size()));
-    new_replica->set_group_id(optical.group_id);
-    new_replica->set_epoch(optical.epoch);
-    new_replica->set_primary_node_id(optical.node_id);
-    new_replica->set_primary_address(optical.address);
-    new_replica->set_secondary_node_id(optical.secondary_node_id);
-    new_replica->set_secondary_address(optical.secondary_address);
-    new_replica->set_sync_ready(optical.sync_ready);
-    new_replica->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
-    new_replica->set_replica_state(zb::rpc::REPLICA_READY);
-    if (!optical_location.image_id().empty()) {
-        new_replica->set_image_id(optical_location.image_id());
-        new_replica->set_image_offset(optical_location.image_offset());
-        new_replica->set_image_length(optical_location.image_length());
     }
 
     rocksdb::WriteBatch batch;
-    batch.Put(chunk_key, MetaCodec::EncodeChunkMeta(meta));
-    batch.Put(ReverseChunkKey(candidate.chunk_id), chunk_key);
-    if (!new_replica->image_id().empty()) {
-        batch.Put(ArchiveImageChunkKey(new_replica->node_id(),
-                                       new_replica->disk_id(),
-                                       new_replica->image_id(),
-                                       candidate.chunk_id),
-                  chunk_key);
+    if (has_object_key) {
+        zb::rpc::ReplicaLocation* new_replica = meta.add_replicas();
+        new_replica->set_node_id(optical.node_id);
+        new_replica->set_node_address(optical.address);
+        new_replica->set_disk_id(optical.disk_id);
+        {
+            const std::string object_id = ReplicaObjectId(*source_disk);
+            EnsureReplicaObjectId(new_replica, object_id);
+        }
+        new_replica->set_size(static_cast<uint64_t>(data.size()));
+        new_replica->set_group_id(optical.group_id);
+        new_replica->set_epoch(optical.epoch);
+        new_replica->set_primary_node_id(optical.node_id);
+        new_replica->set_primary_address(optical.address);
+        new_replica->set_secondary_node_id(optical.secondary_node_id);
+        new_replica->set_secondary_address(optical.secondary_address);
+        new_replica->set_sync_ready(optical.sync_ready);
+        new_replica->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
+        new_replica->set_replica_state(zb::rpc::REPLICA_READY);
+        if (!optical_location.image_id().empty()) {
+            new_replica->set_image_id(optical_location.image_id());
+            new_replica->set_image_offset(optical_location.image_offset());
+            new_replica->set_image_length(optical_location.image_length());
+        }
+
+        batch.Put(object_key, MetaCodec::EncodeObjectMeta(meta));
+        batch.Put(ReverseObjectKey(candidate.ArchiveObjectId()), object_key);
+        if (!new_replica->image_id().empty()) {
+            EnsureReplicaObjectId(new_replica, candidate.ArchiveObjectId());
+            batch.Put(ArchiveImageObjectKey(new_replica->node_id(),
+                                            new_replica->disk_id(),
+                                            new_replica->image_id(),
+                                            candidate.ArchiveObjectId()),
+                      object_key);
+            std::string encoded_location;
+            if (new_replica->SerializeToString(&encoded_location)) {
+                batch.Put(ArchiveObjectOpticalLocationKey(candidate.ArchiveObjectId()), encoded_location);
+            }
+        }
+    } else {
+        if (!PersistOpticalReplica(object_key,
+                                   optical,
+                                   candidate.ArchiveObjectId(),
+                                   static_cast<uint64_t>(data.size()),
+                                   &optical_location,
+                                   &batch,
+                                   &local_error)) {
+            if (error) {
+                *error = local_error.empty() ? "failed to persist optical location index" : local_error;
+            }
+            return ArchiveByCandidateResult::kFailed;
+        }
     }
     if (!store_->WriteBatch(&batch, &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "failed to persist chunk meta update" : local_error;
+            *error = local_error.empty() ? "failed to persist object meta update" : local_error;
         }
         return ArchiveByCandidateResult::kFailed;
     }
-    touched_chunk_keys->insert(chunk_key);
+    if (!object_key.empty()) {
+        touched_object_keys->insert(object_key);
+    }
     return ArchiveByCandidateResult::kArchived;
 }
 
@@ -1207,7 +1363,7 @@ bool OpticalArchiveManager::UpdateSourceArchiveState(const ArchiveCandidateEntry
                                                      const std::string& archive_state,
                                                      uint64_t version,
                                                      std::string* error) {
-    if (candidate.node_address.empty() || candidate.disk_id.empty() || candidate.chunk_id.empty() || archive_state.empty()) {
+    if (candidate.node_address.empty() || candidate.disk_id.empty() || candidate.ArchiveObjectId().empty() || archive_state.empty()) {
         return false;
     }
     brpc::Channel* channel = GetChannel(candidate.node_address, error);
@@ -1218,7 +1374,7 @@ bool OpticalArchiveManager::UpdateSourceArchiveState(const ArchiveCandidateEntry
     zb::rpc::RealNodeService_Stub stub(channel);
     zb::rpc::UpdateArchiveStateRequest req;
     req.set_disk_id(candidate.disk_id);
-    req.set_chunk_id(candidate.chunk_id);
+    req.set_object_id(candidate.ArchiveObjectId());
     req.set_archive_state(archive_state);
     req.set_version(version);
 
@@ -1253,9 +1409,9 @@ bool OpticalArchiveManager::ReconcileArchiveStates(uint32_t max_records, std::st
     std::vector<std::pair<ArchiveCandidateEntry, std::string>> source_updates;
     std::unique_ptr<rocksdb::Iterator> it(store_->db()->NewIterator(rocksdb::ReadOptions()));
     uint32_t visited = 0;
-    for (it->Seek(ArchiveStatePrefix()); it->Valid() && visited < max_records; it->Next()) {
+    for (it->Seek(ObjectArchiveStatePrefix()); it->Valid() && visited < max_records; it->Next()) {
         const std::string key = it->key().ToString();
-        if (key.rfind(ArchiveStatePrefix(), 0) != 0) {
+        if (key.rfind(ObjectArchiveStatePrefix(), 0) != 0) {
             break;
         }
         ++visited;
@@ -1279,10 +1435,9 @@ bool OpticalArchiveManager::ReconcileArchiveStates(uint32_t max_records, std::st
         }
 
         bool has_optical = false;
-        std::string chunk_key;
         std::string local_error;
-        if (FindChunkKeyByChunkId(record.chunk_id(), &chunk_key, &local_error) &&
-            HasReadyOpticalReplica(chunk_key, record.chunk_id(), &has_optical, &local_error)) {
+        const std::string object_id = ArchiveObjectId(record);
+        if (HasReadyOpticalReplica(object_id, &has_optical, &local_error)) {
             if (record.state() == zb::rpc::ARCHIVE_STATE_ARCHIVED && !has_optical) {
                 record.set_state(zb::rpc::ARCHIVE_STATE_PENDING);
                 record.clear_lease_id();
@@ -1309,13 +1464,13 @@ bool OpticalArchiveManager::ReconcileArchiveStates(uint32_t max_records, std::st
         if (!record.SerializeToString(&value)) {
             continue;
         }
-        batch.Put(ArchiveStateKey(record.chunk_id()), value);
+        batch.Put(ObjectArchiveStateKey(ArchiveObjectId(record)), value);
 
         ArchiveCandidateEntry source;
         source.node_id = record.owner_node_id();
         source.node_address = record.owner_node_address();
         source.disk_id = record.owner_disk_id();
-        source.chunk_id = record.chunk_id();
+        source.SetArchiveObjectId(ArchiveObjectId(record));
         source.version = record.version();
         if (!source.node_address.empty() && !source.disk_id.empty() && !state_to_push.empty()) {
             source_updates.push_back(std::make_pair(source, state_to_push));
@@ -1340,57 +1495,64 @@ bool OpticalArchiveManager::ReconcileArchiveStates(uint32_t max_records, std::st
     }
 
     std::string repair_error;
-    (void)ProcessReverseChunkRepairTasks(max_records, &repair_error);
+    (void)ProcessReverseObjectRepairTasks(max_records, &repair_error);
     if (error && error->empty() && !repair_error.empty()) {
         *error = repair_error;
     }
     return true;
 }
 
-bool OpticalArchiveManager::ProcessReverseChunkRepairTasks(uint32_t max_records, std::string* error) {
+bool OpticalArchiveManager::ProcessReverseObjectRepairTasks(uint32_t max_records, std::string* error) {
     if (!store_ || max_records == 0) {
         return true;
     }
 
-    std::vector<std::string> pending_chunk_ids;
-    pending_chunk_ids.reserve(max_records);
+    std::vector<std::string> pending_object_ids;
+    pending_object_ids.reserve(max_records);
     std::unique_ptr<rocksdb::Iterator> repair_it(store_->db()->NewIterator(rocksdb::ReadOptions()));
-    const std::string prefix = ArchiveReverseRepairPrefix();
-    for (repair_it->Seek(prefix); repair_it->Valid() && pending_chunk_ids.size() < max_records; repair_it->Next()) {
+    const std::string prefix = ArchiveReverseObjectRepairPrefix();
+    for (repair_it->Seek(prefix); repair_it->Valid() && pending_object_ids.size() < max_records; repair_it->Next()) {
         const std::string key = repair_it->key().ToString();
         if (key.rfind(prefix, 0) != 0) {
             break;
         }
-        const std::string chunk_id = key.substr(prefix.size());
-        if (!chunk_id.empty()) {
-            pending_chunk_ids.push_back(chunk_id);
+        const std::string object_id = key.substr(prefix.size());
+        if (!object_id.empty()) {
+            pending_object_ids.push_back(object_id);
         }
     }
-    if (pending_chunk_ids.empty()) {
+    if (pending_object_ids.empty()) {
         return true;
     }
 
-    std::unordered_set<std::string> pending_set(pending_chunk_ids.begin(), pending_chunk_ids.end());
+    std::unordered_set<std::string> pending_set(pending_object_ids.begin(), pending_object_ids.end());
     std::unordered_map<std::string, std::string> resolved;
-    std::unique_ptr<rocksdb::Iterator> chunk_it(store_->db()->NewIterator(rocksdb::ReadOptions()));
-    for (chunk_it->Seek("C/"); chunk_it->Valid() && !pending_set.empty(); chunk_it->Next()) {
-        const std::string chunk_key = chunk_it->key().ToString();
-        if (chunk_key.size() < 2 || chunk_key[0] != 'C' || chunk_key[1] != '/') {
+    const uint64_t scan_budget = std::max<uint64_t>(static_cast<uint64_t>(max_records) * 1024ULL, 4096ULL);
+    uint64_t scanned = 0;
+    const std::string object_prefix = ObjectGlobalPrefix();
+    std::unique_ptr<rocksdb::Iterator> object_it(store_->db()->NewIterator(rocksdb::ReadOptions()));
+    for (object_it->Seek(object_prefix);
+         object_it->Valid() && !pending_set.empty() && scanned < scan_budget;
+         object_it->Next()) {
+        const std::string object_key = object_it->key().ToString();
+        if (object_key.rfind(object_prefix, 0) != 0) {
             break;
         }
-        zb::rpc::ChunkMeta meta;
-        if (!MetaCodec::DecodeChunkMeta(chunk_it->value().ToString(), &meta)) {
+        ++scanned;
+        zb::rpc::ObjectMeta meta;
+        if (!MetaCodec::DecodeObjectMeta(object_it->value().ToString(), &meta)) {
             continue;
         }
         for (const auto& replica : meta.replicas()) {
-            if (replica.chunk_id().empty()) {
+            const std::string replica_id = ReplicaObjectId(replica);
+            if (replica_id.empty()) {
                 continue;
             }
-            auto pending_it = pending_set.find(replica.chunk_id());
+            auto pending_it = pending_set.find(replica_id);
             if (pending_it == pending_set.end()) {
                 continue;
             }
-            resolved[*pending_it] = chunk_key;
+            resolved[*pending_it] = object_key;
             pending_set.erase(pending_it);
             if (pending_set.empty()) {
                 break;
@@ -1399,13 +1561,13 @@ bool OpticalArchiveManager::ProcessReverseChunkRepairTasks(uint32_t max_records,
     }
 
     rocksdb::WriteBatch batch;
-    for (const auto& chunk_id : pending_chunk_ids) {
-        auto resolved_it = resolved.find(chunk_id);
+    for (const auto& object_id : pending_object_ids) {
+        auto resolved_it = resolved.find(object_id);
         if (resolved_it == resolved.end()) {
             continue;
         }
-        batch.Put(ReverseChunkKey(chunk_id), resolved_it->second);
-        batch.Delete(ArchiveReverseRepairKey(chunk_id));
+        batch.Put(ReverseObjectKey(object_id), resolved_it->second);
+        batch.Delete(ArchiveReverseObjectRepairKey(object_id));
     }
     if (batch.Count() == 0) {
         return true;
@@ -1421,25 +1583,73 @@ bool OpticalArchiveManager::ProcessReverseChunkRepairTasks(uint32_t max_records,
     return true;
 }
 
-bool OpticalArchiveManager::EnqueueReverseChunkRepair(const std::string& chunk_id, std::string* error) {
-    if (chunk_id.empty()) {
+bool OpticalArchiveManager::EnqueueReverseObjectRepair(const std::string& object_id, std::string* error) {
+    if (object_id.empty()) {
         return false;
     }
-    return store_->Put(ArchiveReverseRepairKey(chunk_id), "1", error);
+    return store_->Put(ArchiveReverseObjectRepairKey(object_id), "1", error);
 }
 
-bool OpticalArchiveManager::FindChunkKeyByChunkId(const std::string& chunk_id,
-                                                  std::string* chunk_key,
-                                                  std::string* error) {
-    if (!chunk_key || chunk_id.empty()) {
+bool OpticalArchiveManager::ResolveObjectOwner(const std::string& object_id,
+                                               uint64_t* inode_id,
+                                               uint32_t* object_index,
+                                               std::string* error) {
+    if (object_id.empty() || !inode_id || !object_index) {
         if (error) {
-            *error = "invalid chunk lookup args";
+            *error = "invalid object owner resolve args";
         }
         return false;
     }
-    chunk_key->clear();
+
+    std::string owner_data;
     std::string local_error;
-    if (store_->Get(ReverseChunkKey(chunk_id), chunk_key, &local_error)) {
+    if (store_->Get(ObjectOwnerKey(object_id), &owner_data, &local_error)) {
+        if (DecodeObjectOwnerValue(owner_data, inode_id, object_index)) {
+            return true;
+        }
+        if (error) {
+            *error = "invalid object owner index for " + object_id;
+        }
+        return false;
+    }
+    if (!local_error.empty()) {
+        if (error) {
+            *error = local_error;
+        }
+        return false;
+    }
+
+    // Fallback: derive owner from reverse index and backfill OO/<object_id>.
+    std::string object_key;
+    if (!FindObjectKeyByObjectId(object_id, &object_key, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "object key not found for " + object_id : local_error;
+        }
+        return false;
+    }
+    if (!ParseObjectKey(object_key, inode_id, object_index)) {
+        if (error) {
+            *error = "invalid object key " + object_key;
+        }
+        return false;
+    }
+    std::string put_error;
+    (void)store_->Put(ObjectOwnerKey(object_id), EncodeObjectOwnerValue(*inode_id, *object_index), &put_error);
+    return true;
+}
+
+bool OpticalArchiveManager::FindObjectKeyByObjectId(const std::string& object_id,
+                                                    std::string* object_key,
+                                                    std::string* error) {
+    if (!object_key || object_id.empty()) {
+        if (error) {
+            *error = "invalid object lookup args";
+        }
+        return false;
+    }
+    object_key->clear();
+    std::string local_error;
+    if (store_->Get(ReverseObjectKey(object_id), object_key, &local_error)) {
         return true;
     }
     if (!local_error.empty()) {
@@ -1449,17 +1659,16 @@ bool OpticalArchiveManager::FindChunkKeyByChunkId(const std::string& chunk_id,
         return false;
     }
     std::string enqueue_error;
-    (void)EnqueueReverseChunkRepair(chunk_id, &enqueue_error);
+    (void)EnqueueReverseObjectRepair(object_id, &enqueue_error);
     if (error) {
         *error = enqueue_error.empty()
-                     ? "reverse chunk index missing for " + chunk_id + ", queued for repair"
+                     ? "reverse object index missing for " + object_id + ", queued for repair"
                      : enqueue_error;
     }
     return false;
 }
 
-bool OpticalArchiveManager::HasReadyOpticalReplica(const std::string& chunk_key,
-                                                   const std::string& chunk_id,
+bool OpticalArchiveManager::HasReadyOpticalReplica(const std::string& object_id,
                                                    bool* has_ready,
                                                    std::string* error) {
     if (!has_ready) {
@@ -1469,41 +1678,37 @@ bool OpticalArchiveManager::HasReadyOpticalReplica(const std::string& chunk_key,
         return false;
     }
     *has_ready = false;
-    if (chunk_key.empty()) {
+    if (object_id.empty()) {
         return true;
     }
-    std::string chunk_data;
-    std::string local_error;
-    if (!store_->Get(chunk_key, &chunk_data, &local_error)) {
-        if (!local_error.empty()) {
+    std::string location_data;
+    std::string location_error;
+    if (store_->Get(ArchiveObjectOpticalLocationKey(object_id), &location_data, &location_error)) {
+        zb::rpc::ReplicaLocation location;
+        if (!location.ParseFromString(location_data)) {
             if (error) {
-                *error = local_error;
+                *error = "invalid optical location index for object " + object_id;
             }
             return false;
         }
+        if (location.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL &&
+            location.replica_state() == zb::rpc::REPLICA_READY &&
+            !location.node_address().empty() &&
+            !location.disk_id().empty()) {
+            *has_ready = true;
+        }
         return true;
     }
-    zb::rpc::ChunkMeta meta;
-    if (!MetaCodec::DecodeChunkMeta(chunk_data, &meta)) {
+    if (!location_error.empty()) {
         if (error) {
-            *error = "invalid chunk meta " + chunk_key;
+            *error = location_error;
         }
         return false;
-    }
-    for (const auto& replica : meta.replicas()) {
-        if (replica.storage_tier() != zb::rpc::STORAGE_TIER_OPTICAL ||
-            replica.replica_state() != zb::rpc::REPLICA_READY) {
-            continue;
-        }
-        if (chunk_id.empty() || replica.chunk_id() == chunk_id) {
-            *has_ready = true;
-            break;
-        }
     }
     return true;
 }
 
-bool OpticalArchiveManager::IsOpticalWriteCommitted(const std::string& chunk_id,
+bool OpticalArchiveManager::IsOpticalWriteCommitted(const std::string& object_id,
                                                     const std::string& op_id,
                                                     bool* committed,
                                                     std::string* error) {
@@ -1514,11 +1719,11 @@ bool OpticalArchiveManager::IsOpticalWriteCommitted(const std::string& chunk_id,
         return false;
     }
     *committed = false;
-    if (chunk_id.empty() || op_id.empty()) {
+    if (object_id.empty() || op_id.empty()) {
         return true;
     }
     std::string local_error;
-    *committed = store_->Exists(ArchiveOpticalWriteKey(chunk_id, op_id), &local_error);
+    *committed = store_->Exists(ArchiveOpticalWriteObjectKey(object_id, op_id), &local_error);
     if (!local_error.empty()) {
         if (error) {
             *error = local_error;
@@ -1528,13 +1733,13 @@ bool OpticalArchiveManager::IsOpticalWriteCommitted(const std::string& chunk_id,
     return true;
 }
 
-bool OpticalArchiveManager::MarkOpticalWriteCommitted(const std::string& chunk_id,
+bool OpticalArchiveManager::MarkOpticalWriteCommitted(const std::string& object_id,
                                                       const std::string& op_id,
                                                       std::string* error) {
-    if (chunk_id.empty() || op_id.empty()) {
+    if (object_id.empty() || op_id.empty()) {
         return true;
     }
-    return store_->Put(ArchiveOpticalWriteKey(chunk_id, op_id), "1", error);
+    return store_->Put(ArchiveOpticalWriteObjectKey(object_id, op_id), "1", error);
 }
 
 bool OpticalArchiveManager::ShouldArchiveNow(const std::vector<NodeInfo>& nodes) {
@@ -1587,7 +1792,7 @@ bool OpticalArchiveManager::LoadInodeAttr(uint64_t inode_id,
     return true;
 }
 
-bool OpticalArchiveManager::ReadChunkFromReplica(const zb::rpc::ReplicaLocation& source,
+bool OpticalArchiveManager::ReadObjectFromReplica(const zb::rpc::ReplicaLocation& source,
                                                  uint64_t read_size,
                                                  std::string* data,
                                                  std::string* error) {
@@ -1603,16 +1808,21 @@ bool OpticalArchiveManager::ReadChunkFromReplica(const zb::rpc::ReplicaLocation&
     }
 
     zb::rpc::RealNodeService_Stub stub(channel);
-    zb::rpc::ReadChunkRequest req;
-    req.set_disk_id(source.disk_id());
-    req.set_chunk_id(source.chunk_id());
-    req.set_offset(0);
-    req.set_size(read_size);
-
-    zb::rpc::ReadChunkReply resp;
     brpc::Controller cntl;
     cntl.set_timeout_ms(3000);
-    stub.ReadChunk(&cntl, &req, &resp, nullptr);
+    zb::rpc::ReadObjectRequest req;
+    req.set_disk_id(source.disk_id());
+    req.set_object_id(ReplicaObjectId(source));
+    req.set_offset(0);
+    req.set_size(read_size);
+    if (!source.image_id().empty()) {
+        req.set_image_id(source.image_id());
+        req.set_image_offset(source.image_offset());
+        req.set_image_length(source.image_length());
+    }
+
+    zb::rpc::ReadObjectReply resp;
+    stub.ReadObject(&cntl, &req, &resp, nullptr);
     if (cntl.Failed()) {
         if (error) {
             *error = cntl.ErrorText();
@@ -1629,18 +1839,18 @@ bool OpticalArchiveManager::ReadChunkFromReplica(const zb::rpc::ReplicaLocation&
     return true;
 }
 
-bool OpticalArchiveManager::WriteChunkToOptical(const NodeSelection& optical,
-                                                const std::string& chunk_id,
-                                                const std::string& op_id,
-                                                const std::string& data,
-                                                uint64_t inode_id,
-                                                uint32_t chunk_index,
-                                                const zb::rpc::InodeAttr* inode_attr,
-                                                zb::rpc::ReplicaLocation* optical_location,
-                                                std::string* error) {
-    const std::string effective_op_id = !op_id.empty() ? op_id : chunk_id;
+bool OpticalArchiveManager::WriteObjectToOptical(const NodeSelection& optical,
+                                                 const std::string& object_id,
+                                                 const std::string& op_id,
+                                                 const std::string& data,
+                                                 uint64_t inode_id,
+                                                 uint32_t object_index,
+                                                 const zb::rpc::InodeAttr* inode_attr,
+                                                 zb::rpc::ReplicaLocation* optical_location,
+                                                 std::string* error) {
+    const std::string effective_op_id = !op_id.empty() ? op_id : object_id;
     bool already_committed = false;
-    if (!IsOpticalWriteCommitted(chunk_id, effective_op_id, &already_committed, error)) {
+    if (!IsOpticalWriteCommitted(object_id, effective_op_id, &already_committed, error)) {
         return false;
     }
     if (already_committed) {
@@ -1656,33 +1866,34 @@ bool OpticalArchiveManager::WriteChunkToOptical(const NodeSelection& optical,
     }
 
     zb::rpc::RealNodeService_Stub stub(channel);
-    zb::rpc::WriteChunkRequest req;
+    zb::rpc::WriteObjectRequest req;
     req.set_disk_id(optical.disk_id);
-    req.set_chunk_id(chunk_id);
+    req.set_object_id(object_id);
     req.set_offset(0);
     req.set_data(data);
     req.set_epoch(optical.epoch);
     req.set_archive_op_id(effective_op_id);
     req.set_inode_id(inode_id);
-    req.set_file_chunk_index(chunk_index);
+    req.set_file_object_index(object_index);
     if (inode_attr) {
         req.set_file_size(inode_attr->size());
         req.set_file_mode(inode_attr->mode());
         req.set_file_uid(inode_attr->uid());
         req.set_file_gid(inode_attr->gid());
         req.set_file_mtime(inode_attr->mtime());
-        const uint64_t chunk_size = inode_attr->chunk_size() > 0 ? inode_attr->chunk_size() : options_.default_chunk_size;
-        req.set_file_offset(static_cast<uint64_t>(chunk_index) * chunk_size);
+        const uint64_t object_unit_size =
+            inode_attr->object_unit_size() > 0 ? inode_attr->object_unit_size() : options_.default_object_unit_size;
+        req.set_file_offset(static_cast<uint64_t>(object_index) * object_unit_size);
     }
     if (inode_id != 0) {
         req.set_file_id("inode-" + std::to_string(inode_id));
         req.set_file_path("/inode/" + std::to_string(inode_id));
     }
 
-    zb::rpc::WriteChunkReply resp;
+    zb::rpc::WriteObjectReply resp;
     brpc::Controller cntl;
     cntl.set_timeout_ms(5000);
-    stub.WriteChunk(&cntl, &req, &resp, nullptr);
+    stub.WriteObject(&cntl, &req, &resp, nullptr);
     if (cntl.Failed()) {
         if (error) {
             *error = cntl.ErrorText();
@@ -1699,14 +1910,14 @@ bool OpticalArchiveManager::WriteChunkToOptical(const NodeSelection& optical,
         optical_location->set_node_id(optical.node_id);
         optical_location->set_node_address(optical.address);
         optical_location->set_disk_id(optical.disk_id);
-        optical_location->set_chunk_id(chunk_id);
+        EnsureReplicaObjectId(optical_location, object_id);
         optical_location->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
         optical_location->set_replica_state(zb::rpc::REPLICA_READY);
         optical_location->set_image_id(resp.image_id());
         optical_location->set_image_offset(resp.image_offset());
         optical_location->set_image_length(resp.image_length());
     }
-    return MarkOpticalWriteCommitted(chunk_id, effective_op_id, error);
+    return MarkOpticalWriteCommitted(object_id, effective_op_id, error);
 }
 
 bool OpticalArchiveManager::DeleteDiskReplica(const zb::rpc::ReplicaLocation& replica, std::string* error) {
@@ -1716,14 +1927,13 @@ bool OpticalArchiveManager::DeleteDiskReplica(const zb::rpc::ReplicaLocation& re
     }
 
     zb::rpc::RealNodeService_Stub stub(channel);
-    zb::rpc::DeleteChunkRequest req;
-    req.set_disk_id(replica.disk_id());
-    req.set_chunk_id(replica.chunk_id());
-
-    zb::rpc::DeleteChunkReply resp;
     brpc::Controller cntl;
     cntl.set_timeout_ms(3000);
-    stub.DeleteChunk(&cntl, &req, &resp, nullptr);
+    zb::rpc::DeleteObjectRequest req;
+    req.set_disk_id(replica.disk_id());
+    req.set_object_id(ReplicaObjectId(replica));
+    zb::rpc::DeleteObjectReply resp;
+    stub.DeleteObject(&cntl, &req, &resp, nullptr);
     if (cntl.Failed()) {
         if (error) {
             *error = cntl.ErrorText();

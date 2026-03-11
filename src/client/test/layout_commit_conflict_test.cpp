@@ -39,7 +39,7 @@ bool EnsureFile(MdsService_Stub* stub, const std::string& path) {
     req.set_uid(0);
     req.set_gid(0);
     req.set_replica(1);
-    req.set_chunk_size(4 * 1024 * 1024);
+    req.set_object_unit_size(4 * 1024 * 1024);
 
     zb::rpc::CreateReply resp;
     brpc::Controller cntl;
