@@ -104,7 +104,7 @@ bool ObjectAllocator::AllocateObjectByPgWithType(uint32_t replica,
         for (const auto& member : pg_set.members) {
             bool exists = false;
             for (const auto& current : *out) {
-                if (current.node_id() == member.node_id() && current.disk_id() == member.disk_id()) {
+                if (current.node_id() == member.node_id && current.disk_id() == member.disk_id) {
                     exists = true;
                     break;
                 }
