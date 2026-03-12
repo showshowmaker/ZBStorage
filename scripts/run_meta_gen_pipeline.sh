@@ -34,6 +34,14 @@ SST_MAX_KV="${SST_MAX_KV:-1000000}"
 MIN_FREE_SPACE_TB="${MIN_FREE_SPACE_TB:-10}"
 SPACE_CHECK_INTERVAL_SEC="${SPACE_CHECK_INTERVAL_SEC:-30}"
 ENABLE_SPACE_GUARD="${ENABLE_SPACE_GUARD:-1}"
+STEP_PROGRESS_INTERVAL_SEC="${STEP_PROGRESS_INTERVAL_SEC:-30}"
+
+MDS_PROGRESS_INTERVAL_FILES="${MDS_PROGRESS_INTERVAL_FILES:-1000000}"
+MDS_PROGRESS_INTERVAL_SEC="${MDS_PROGRESS_INTERVAL_SEC:-30}"
+DISK_PROGRESS_INTERVAL_FILES="${DISK_PROGRESS_INTERVAL_FILES:-1000000}"
+DISK_PROGRESS_INTERVAL_SEC="${DISK_PROGRESS_INTERVAL_SEC:-30}"
+OPTICAL_PROGRESS_INTERVAL_FILES="${OPTICAL_PROGRESS_INTERVAL_FILES:-1000000}"
+OPTICAL_PROGRESS_INTERVAL_SEC="${OPTICAL_PROGRESS_INTERVAL_SEC:-30}"
 
 # Rough size estimation knobs.
 EST_MDS_BYTES_PER_FILE="${EST_MDS_BYTES_PER_FILE:-230}"
@@ -48,6 +56,12 @@ OPTICAL_META_BIN="${BUILD_DIR}/optical_meta_gen_tool"
 
 mkdir -p "${OUT_DIR}" "${LOG_DIR}"
 touch "${LOG_FILE}"
+
+STEP_KEYS=("planning" "mds_sst_generation" "disk_meta_generation" "optical_meta_generation")
+declare -A STEP_STATUS
+for __k in "${STEP_KEYS[@]}"; do
+  STEP_STATUS["${__k}"]="PENDING"
+done
 
 log() {
   local msg="$1"
@@ -75,6 +89,102 @@ free_bytes_under_out_dir() {
   df -PB1 "${OUT_DIR}" | awk 'NR==2 {print $4}'
 }
 
+format_duration() {
+  local total_sec="$1"
+  if [[ -z "${total_sec}" || ! "${total_sec}" =~ ^[0-9]+$ ]]; then
+    echo "0s"
+    return
+  fi
+  local h=$((total_sec / 3600))
+  local m=$(((total_sec % 3600) / 60))
+  local s=$((total_sec % 60))
+  if (( h > 0 )); then
+    echo "${h}h${m}m${s}s"
+  elif (( m > 0 )); then
+    echo "${m}m${s}s"
+  else
+    echo "${s}s"
+  fi
+}
+
+print_stage_board() {
+  local board="Pipeline stages:"
+  local k
+  for k in "${STEP_KEYS[@]}"; do
+    board="${board} ${k}=${STEP_STATUS[${k}]}"
+  done
+  log "${board}"
+}
+
+count_remaining_steps() {
+  local key="$1"
+  local found=0
+  local count=0
+  local k
+  for k in "${STEP_KEYS[@]}"; do
+    if [[ "${k}" == "${key}" ]]; then
+      found=1
+      continue
+    fi
+    if (( found == 1 )) && [[ "${STEP_STATUS[${k}]}" == "PENDING" ]]; then
+      count=$((count + 1))
+    fi
+  done
+  echo "${count}"
+}
+
+step_progress_snapshot() {
+  local step_key="$1"
+  local elapsed_sec="$2"
+  local free_bytes
+  free_bytes="$(free_bytes_under_out_dir)"
+  case "${step_key}" in
+    planning)
+      local report_file="${OUT_DIR}/plan/meta_plan_report.md"
+      if [[ -f "${report_file}" ]]; then
+        local report_size
+        report_size="$(wc -c < "${report_file}" 2>/dev/null || echo 0)"
+        log "[PROGRESS][planning] elapsed=$(format_duration "${elapsed_sec}") report_size=$(human_bytes "${report_size}") free_space=$(human_bytes "${free_bytes}")"
+      else
+        log "[PROGRESS][planning] elapsed=$(format_duration "${elapsed_sec}") report=not_created free_space=$(human_bytes "${free_bytes}")"
+      fi
+      ;;
+    mds_sst_generation)
+      local sst_count
+      local mds_size
+      sst_count="$(find "${OUT_DIR}/mds_sst" -maxdepth 1 -name '*.sst' 2>/dev/null | wc -l)"
+      mds_size="$(du -sb "${OUT_DIR}/mds_sst" 2>/dev/null | awk '{print $1}')"
+      if [[ -z "${mds_size}" ]]; then
+        mds_size=0
+      fi
+      log "[PROGRESS][mds_sst_generation] elapsed=$(format_duration "${elapsed_sec}") sst_count=${sst_count} mds_sst_size=$(human_bytes "${mds_size}") free_space=$(human_bytes "${free_bytes}")"
+      ;;
+    disk_meta_generation)
+      local disk_size
+      local node_files
+      disk_size="$(du -sb "${OUT_DIR}/disk_meta" 2>/dev/null | awk '{print $1}')"
+      if [[ -z "${disk_size}" ]]; then
+        disk_size=0
+      fi
+      node_files="$(find "${OUT_DIR}/disk_meta" -name 'file_meta.tsv' 2>/dev/null | wc -l)"
+      log "[PROGRESS][disk_meta_generation] elapsed=$(format_duration "${elapsed_sec}") file_meta_files=${node_files} disk_meta_size=$(human_bytes "${disk_size}") free_space=$(human_bytes "${free_bytes}")"
+      ;;
+    optical_meta_generation)
+      local optical_size
+      local manifest_size
+      optical_size="$(du -sb "${OUT_DIR}/optical_meta" 2>/dev/null | awk '{print $1}')"
+      manifest_size="$(wc -c < "${OUT_DIR}/optical_meta/optical_manifest.tsv" 2>/dev/null || echo 0)"
+      if [[ -z "${optical_size}" ]]; then
+        optical_size=0
+      fi
+      log "[PROGRESS][optical_meta_generation] elapsed=$(format_duration "${elapsed_sec}") optical_manifest_size=$(human_bytes "${manifest_size}") optical_meta_size=$(human_bytes "${optical_size}") free_space=$(human_bytes "${free_bytes}")"
+      ;;
+    *)
+      log "[PROGRESS][${step_key}] elapsed=$(format_duration "${elapsed_sec}") free_space=$(human_bytes "${free_bytes}")"
+      ;;
+  esac
+}
+
 monitor_space_for_pid() {
   local target_pid="$1"
   local threshold_bytes="$2"
@@ -95,9 +205,31 @@ monitor_space_for_pid() {
   done
 }
 
+monitor_step_progress_for_pid() {
+  local target_pid="$1"
+  local step_key="$2"
+  local interval_sec="$3"
+  local start_ts
+  start_ts="$(date +%s)"
+  while kill -0 "${target_pid}" >/dev/null 2>&1; do
+    local now_ts elapsed_sec
+    now_ts="$(date +%s)"
+    elapsed_sec=$((now_ts - start_ts))
+    step_progress_snapshot "${step_key}" "${elapsed_sec}"
+    sleep "${interval_sec}"
+  done
+}
+
 run_step() {
-  local step_name="$1"
+  local step_key="$1"
+  local step_name="$2"
   shift
+  shift
+  STEP_STATUS["${step_key}"]="RUNNING"
+  print_stage_board
+  local remaining
+  remaining="$(count_remaining_steps "${step_key}")"
+  log "Current step=${step_name}, remaining_steps=${remaining}"
   log "=== [${step_name}] ==="
   log "CMD: $*"
   rm -f "${ABORT_FLAG}"
@@ -106,11 +238,16 @@ run_step() {
   "$@" 2>&1 | tee -a "${LOG_FILE}" &
   local cmd_pid=$!
   local mon_pid=""
+  local progress_pid=""
   if [[ "${ENABLE_SPACE_GUARD}" == "1" ]]; then
     local threshold_bytes
     threshold_bytes="$(echo "${MIN_FREE_SPACE_TB}*1000000000000" | bc)"
     monitor_space_for_pid "${cmd_pid}" "${threshold_bytes}" "${SPACE_CHECK_INTERVAL_SEC}" &
     mon_pid=$!
+  fi
+  if [[ "${STEP_PROGRESS_INTERVAL_SEC}" =~ ^[0-9]+$ ]] && (( STEP_PROGRESS_INTERVAL_SEC > 0 )); then
+    monitor_step_progress_for_pid "${cmd_pid}" "${step_key}" "${STEP_PROGRESS_INTERVAL_SEC}" &
+    progress_pid=$!
   fi
 
   wait "${cmd_pid}"
@@ -119,16 +256,26 @@ run_step() {
     kill "${mon_pid}" >/dev/null 2>&1 || true
     wait "${mon_pid}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${progress_pid}" ]]; then
+    kill "${progress_pid}" >/dev/null 2>&1 || true
+    wait "${progress_pid}" >/dev/null 2>&1 || true
+  fi
   set -e
 
   if [[ -f "${ABORT_FLAG}" ]]; then
+    STEP_STATUS["${step_key}"]="FAILED"
+    print_stage_board
     log "[FAIL] ${step_name} aborted by free-space guard: $(cat "${ABORT_FLAG}")"
     exit 11
   fi
   if [[ ${rc} -ne 0 ]]; then
+    STEP_STATUS["${step_key}"]="FAILED"
+    print_stage_board
     log "[FAIL] ${step_name} exited with ${rc}"
     exit ${rc}
   fi
+  STEP_STATUS["${step_key}"]="DONE"
+  print_stage_board
   log "[OK] ${step_name}"
 }
 
@@ -183,6 +330,9 @@ optical_disc_count_est="$((OPTICAL_NODE_COUNT * DISCS_PER_OPTICAL_NODE))"
 log "Pipeline log file: ${LOG_FILE}"
 log "OUT_DIR=${OUT_DIR}, BUILD_DIR=${BUILD_DIR}"
 log "Free space guard: ENABLE=${ENABLE_SPACE_GUARD}, threshold=${MIN_FREE_SPACE_TB}TB, interval=${SPACE_CHECK_INTERVAL_SEC}s"
+log "Step progress monitor interval: ${STEP_PROGRESS_INTERVAL_SEC}s"
+log "Tool progress intervals: mds(files=${MDS_PROGRESS_INTERVAL_FILES},sec=${MDS_PROGRESS_INTERVAL_SEC}) disk(files=${DISK_PROGRESS_INTERVAL_FILES},sec=${DISK_PROGRESS_INTERVAL_SEC}) optical(files=${OPTICAL_PROGRESS_INTERVAL_FILES},sec=${OPTICAL_PROGRESS_INTERVAL_SEC})"
+print_stage_board
 estimate_meta_size "${TOTAL_FILES}" \
                    "${EST_MDS_BYTES_PER_FILE}" \
                    "${EST_OPTICAL_MANIFEST_BYTES_PER_FILE}" \
@@ -192,7 +342,7 @@ estimate_meta_size "${TOTAL_FILES}" \
                    "${DISK_REPLICA_RATIO}" \
                    "${optical_disc_count_est}"
 
-run_step "1/4 planning" "${META_PLAN_BIN}" \
+run_step "planning" "1/4 planning" "${META_PLAN_BIN}" \
   --output="${OUT_DIR}/plan/meta_plan_report.md" \
   --total_files="${TOTAL_FILES}" \
   --namespace_count="${NAMESPACE_COUNT}" \
@@ -209,7 +359,7 @@ run_step "1/4 planning" "${META_PLAN_BIN}" \
   --max_files_per_leaf="${MAX_FILES_PER_LEAF}" \
   --seed="${SIZE_SEED}"
 
-run_step "2/4 mds_sst_generation" "${MDS_SST_GEN_BIN}" \
+run_step "mds_sst_generation" "2/4 mds_sst_generation" "${MDS_SST_GEN_BIN}" \
   --output_dir="${OUT_DIR}/mds_sst" \
   --total_files="${TOTAL_FILES}" \
   --namespace_count="${NAMESPACE_COUNT}" \
@@ -224,9 +374,11 @@ run_step "2/4 mds_sst_generation" "${MDS_SST_GEN_BIN}" \
   --max_depth="${MAX_DEPTH}" \
   --max_files_per_leaf="${MAX_FILES_PER_LEAF}" \
   --seed="${SIZE_SEED}" \
-  --max_kv_per_sst="${SST_MAX_KV}"
+  --max_kv_per_sst="${SST_MAX_KV}" \
+  --progress_interval_files="${MDS_PROGRESS_INTERVAL_FILES}" \
+  --progress_interval_sec="${MDS_PROGRESS_INTERVAL_SEC}"
 
-run_step "3/4 disk_meta_generation" "${DISK_META_BIN}" \
+run_step "disk_meta_generation" "3/4 disk_meta_generation" "${DISK_META_BIN}" \
   --output_dir="${OUT_DIR}/disk_meta" \
   --total_files="${TOTAL_FILES}" \
   --namespace_count="${NAMESPACE_COUNT}" \
@@ -238,9 +390,11 @@ run_step "3/4 disk_meta_generation" "${DISK_META_BIN}" \
   --branch_factor="${BRANCH_FACTOR}" \
   --max_depth="${MAX_DEPTH}" \
   --max_files_per_leaf="${MAX_FILES_PER_LEAF}" \
-  --seed="${SIZE_SEED}"
+  --seed="${SIZE_SEED}" \
+  --progress_interval_files="${DISK_PROGRESS_INTERVAL_FILES}" \
+  --progress_interval_sec="${DISK_PROGRESS_INTERVAL_SEC}"
 
-run_step "4/4 optical_meta_generation" "${OPTICAL_META_BIN}" \
+run_step "optical_meta_generation" "4/4 optical_meta_generation" "${OPTICAL_META_BIN}" \
   --output_dir="${OUT_DIR}/optical_meta" \
   --total_files="${TOTAL_FILES}" \
   --namespace_count="${NAMESPACE_COUNT}" \
@@ -250,7 +404,9 @@ run_step "4/4 optical_meta_generation" "${OPTICAL_META_BIN}" \
   --branch_factor="${BRANCH_FACTOR}" \
   --max_depth="${MAX_DEPTH}" \
   --max_files_per_leaf="${MAX_FILES_PER_LEAF}" \
-  --seed="${SIZE_SEED}"
+  --seed="${SIZE_SEED}" \
+  --progress_interval_files="${OPTICAL_PROGRESS_INTERVAL_FILES}" \
+  --progress_interval_sec="${OPTICAL_PROGRESS_INTERVAL_SEC}"
 
 log "=== [stats] writing generation summary ==="
 

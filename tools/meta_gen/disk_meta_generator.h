@@ -12,6 +12,8 @@ struct DiskMetaGenConfig {
     uint64_t object_unit_size{4ULL * 1024ULL * 1024ULL};
     uint64_t now_seconds{0};
     std::string txid_prefix{"seed"};
+    uint64_t progress_interval_files{1000000};
+    uint64_t progress_interval_sec{30};
 };
 
 struct DiskMetaGenStats {

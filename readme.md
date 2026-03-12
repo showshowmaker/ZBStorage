@@ -19,10 +19,22 @@ cmake --build build --target zb_fuse_client -j
 使用脚本：[run_meta_gen_pipeline.sh](c:\Users\w1j2h\Desktop\AllZB\ZBPro\ZBStorage\scripts\run_meta_gen_pipeline.sh)
 
 ```bash
+# OUT_DIR=/mnt/md0/wjh/zb_meta_out \
+# MIN_FREE_SPACE_TB=10 \
+# SPACE_CHECK_INTERVAL_SEC=30 \
+# ENABLE_SPACE_GUARD=1 \
+# bash scripts/run_meta_gen_pipeline.sh
 OUT_DIR=/mnt/md0/wjh/zb_meta_out \
 MIN_FREE_SPACE_TB=10 \
 SPACE_CHECK_INTERVAL_SEC=30 \
 ENABLE_SPACE_GUARD=1 \
+STEP_PROGRESS_INTERVAL_SEC=30 \
+MDS_PROGRESS_INTERVAL_FILES=1000000 \
+MDS_PROGRESS_INTERVAL_SEC=30 \
+DISK_PROGRESS_INTERVAL_FILES=1000000 \
+DISK_PROGRESS_INTERVAL_SEC=30 \
+OPTICAL_PROGRESS_INTERVAL_FILES=1000000 \
+OPTICAL_PROGRESS_INTERVAL_SEC=30 \
 bash scripts/run_meta_gen_pipeline.sh
 ```
 

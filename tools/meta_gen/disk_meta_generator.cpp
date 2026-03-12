@@ -2,6 +2,9 @@
 
 #include <chrono>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -20,6 +23,62 @@ uint64_t NowSeconds() {
 
 uint64_t BuildPreloadSeed(uint64_t inode_id, uint64_t file_size) {
     return (inode_id * 11400714819323198485ULL) ^ (file_size + 0x9e3779b97f4a7c15ULL);
+}
+
+void MaybeLogProgress(const char* stage,
+                      uint64_t done_files,
+                      uint64_t total_files,
+                      uint64_t files_with_meta,
+                      uint64_t progress_interval_files,
+                      uint64_t progress_interval_sec,
+                      uint64_t* next_progress_files,
+                      std::chrono::steady_clock::time_point start_tp,
+                      std::chrono::steady_clock::time_point* last_progress_tp,
+                      bool force = false) {
+    if (!stage || !next_progress_files || !last_progress_tp) {
+        return;
+    }
+    if (done_files == 0) {
+        return;
+    }
+    const auto now_tp = std::chrono::steady_clock::now();
+    bool should_log = force;
+    if (!should_log && progress_interval_files > 0 && done_files >= *next_progress_files) {
+        should_log = true;
+    }
+    if (!should_log && progress_interval_sec > 0) {
+        const auto elapsed_since_last =
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now_tp - *last_progress_tp).count());
+        if (elapsed_since_last >= progress_interval_sec) {
+            should_log = true;
+        }
+    }
+    if (!should_log) {
+        return;
+    }
+    const uint64_t elapsed_sec =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now_tp - start_tp).count());
+    const uint64_t safe_elapsed_sec = elapsed_sec == 0 ? 1 : elapsed_sec;
+    const long double pct = total_files == 0
+                                ? 0.0L
+                                : (100.0L * static_cast<long double>(done_files) /
+                                   static_cast<long double>(total_files));
+    const uint64_t files_per_sec = done_files / safe_elapsed_sec;
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3) << pct;
+    std::cout << "[progress][" << stage << "] files=" << done_files << "/" << total_files
+              << " (" << oss.str() << "%)"
+              << " files_with_disk_meta=" << files_with_meta
+              << " elapsed_sec=" << elapsed_sec
+              << " throughput_files_per_sec=" << files_per_sec
+              << std::endl;
+
+    *last_progress_tp = now_tp;
+    if (progress_interval_files > 0) {
+        while (*next_progress_files <= done_files) {
+            *next_progress_files += progress_interval_files;
+        }
+    }
 }
 
 struct NodeSink {
@@ -116,6 +175,11 @@ bool DiskMetaGenerator::Generate(const ClusterScaleConfig& cluster,
 
     DiskMetaGenStats stats;
     stats.disk_budget_bytes = budget_bytes;
+    const uint64_t progress_interval_files = gen_cfg.progress_interval_files;
+    const uint64_t progress_interval_sec = gen_cfg.progress_interval_sec;
+    uint64_t next_progress_files = progress_interval_files > 0 ? progress_interval_files : UINT64_MAX;
+    const auto progress_start_tp = std::chrono::steady_clock::now();
+    auto progress_last_tp = progress_start_tp;
 
     bool ok = WorkloadEnumerator::EnumerateFiles(
         cluster,
@@ -123,6 +187,16 @@ bool DiskMetaGenerator::Generate(const ClusterScaleConfig& cluster,
         file_cfg,
         [&](const FileWorkItem& item) -> bool {
             ++stats.total_files;
+            MaybeLogProgress("disk_meta_generation",
+                             stats.total_files,
+                             cluster.total_files,
+                             stats.files_with_disk_meta,
+                             progress_interval_files,
+                             progress_interval_sec,
+                             &next_progress_files,
+                             progress_start_tp,
+                             &progress_last_tp,
+                             false);
             if (remaining < static_cast<long double>(item.file_size)) {
                 return true;
             }
@@ -198,6 +272,16 @@ bool DiskMetaGenerator::Generate(const ClusterScaleConfig& cluster,
     }
 
     stats.disk_used_bytes = budget_bytes - remaining;
+    MaybeLogProgress("disk_meta_generation",
+                     stats.total_files,
+                     cluster.total_files,
+                     stats.files_with_disk_meta,
+                     progress_interval_files,
+                     progress_interval_sec,
+                     &next_progress_files,
+                     progress_start_tp,
+                     &progress_last_tp,
+                     true);
     *out = std::move(stats);
     return true;
 }

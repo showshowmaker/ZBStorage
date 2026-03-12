@@ -70,6 +70,8 @@ void PrintUsage(std::ostream& os) {
           "  --virtual_disks_per_node=<u64>       Virtual disks per node (default: 16)\n"
           "  --real_node_count=<u64>              Real nodes (default: 1)\n"
           "  --real_disks_per_node=<u64>          Real disks per node (default: 24)\n"
+          "  --progress_interval_files=<u64>      Progress log interval by file count (default: 1000000)\n"
+          "  --progress_interval_sec=<u64>        Progress log interval by seconds (default: 30)\n"
           "  --seed=<u64>                         File size sampler seed\n"
           "  --now_seconds=<u64>                  Override inode timestamp\n"
           "  --help                               Show this help\n";
@@ -140,6 +142,10 @@ int RunMdsSstGenTool(int argc, char** argv) {
             ok = ParseU64(value, &cluster.real_node_count);
         } else if (key == "real_disks_per_node") {
             ok = ParseU64(value, &cluster.real_disks_per_node);
+        } else if (key == "progress_interval_files") {
+            ok = ParseU64(value, &gen_cfg.progress_interval_files);
+        } else if (key == "progress_interval_sec") {
+            ok = ParseU64(value, &gen_cfg.progress_interval_sec);
         } else if (key == "seed") {
             ok = ParseU64(value, &file_cfg.seed);
         } else if (key == "now_seconds") {

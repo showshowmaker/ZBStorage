@@ -12,6 +12,8 @@ struct MdsSstGenConfig {
     std::string output_dir;
     std::string sst_prefix{"mds_meta"};
     uint64_t max_kv_per_sst{1000000};
+    uint64_t progress_interval_files{1000000};
+    uint64_t progress_interval_sec{30};
 
     uint64_t object_unit_size{4ULL * 1024ULL * 1024ULL};
     uint64_t now_seconds{0};

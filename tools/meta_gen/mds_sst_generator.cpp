@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -300,7 +302,69 @@ struct GeneratorRuntime {
     uint64_t next_inode{2};
     long double disk_budget_bytes{0.0L};
     long double disk_remaining_bytes{0.0L};
+    uint64_t files_emitted{0};
+    uint64_t next_progress_files{0};
+    uint64_t progress_interval_files{1000000};
+    uint64_t progress_interval_sec{30};
+    std::chrono::steady_clock::time_point start_tp{};
+    std::chrono::steady_clock::time_point last_progress_tp{};
 };
+
+bool ShouldLogProgress(const GeneratorRuntime* rt,
+                       const std::chrono::steady_clock::time_point& now_tp) {
+    if (!rt) {
+        return false;
+    }
+    if (rt->files_emitted == 0) {
+        return false;
+    }
+    if (rt->progress_interval_files > 0 && rt->files_emitted >= rt->next_progress_files) {
+        return true;
+    }
+    if (rt->progress_interval_sec > 0) {
+        const auto elapsed_sec =
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now_tp - rt->last_progress_tp).count());
+        if (elapsed_sec >= rt->progress_interval_sec) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MaybeLogProgress(GeneratorRuntime* rt, bool force = false) {
+    if (!rt || !rt->stats || !rt->cluster || !rt->writer) {
+        return;
+    }
+    const auto now_tp = std::chrono::steady_clock::now();
+    if (!force && !ShouldLogProgress(rt, now_tp)) {
+        return;
+    }
+    const uint64_t elapsed_sec =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now_tp - rt->start_tp).count());
+    const uint64_t safe_elapsed_sec = elapsed_sec == 0 ? 1 : elapsed_sec;
+    const uint64_t total_files = rt->cluster->total_files;
+    const long double pct = total_files == 0
+                                ? 0.0L
+                                : (100.0L * static_cast<long double>(rt->files_emitted) /
+                                   static_cast<long double>(total_files));
+    const uint64_t files_per_sec = rt->files_emitted / safe_elapsed_sec;
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3) << pct;
+    std::cout << "[progress][mds_sst_generation] files=" << rt->files_emitted
+              << "/" << total_files
+              << " (" << oss.str() << "%)"
+              << " kv=" << rt->stats->kv_count
+              << " sst=" << rt->writer->shard_count()
+              << " elapsed_sec=" << elapsed_sec
+              << " throughput_files_per_sec=" << files_per_sec
+              << std::endl;
+    rt->last_progress_tp = now_tp;
+    if (rt->progress_interval_files > 0) {
+        while (rt->next_progress_files <= rt->files_emitted) {
+            rt->next_progress_files += rt->progress_interval_files;
+        }
+    }
+}
 
 bool EmitKv(GeneratorRuntime* rt, std::string key, std::string value) {
     if (!rt || !rt->writer || !rt->stats) {
@@ -489,6 +553,8 @@ bool EmitFileMeta(GeneratorRuntime* rt,
     ++rt->stats->anchor_count;
 
     rt->stats->sampled_total_bytes += static_cast<long double>(file_size);
+    ++rt->files_emitted;
+    MaybeLogProgress(rt, false);
     return true;
 }
 
@@ -606,6 +672,11 @@ bool MdsSstGenerator::Generate(const ClusterScaleConfig& cluster,
     rt.next_inode = next_inode;
     rt.disk_budget_bytes = disk_budget_bytes;
     rt.disk_remaining_bytes = disk_budget_bytes;
+    rt.progress_interval_files = gen_cfg.progress_interval_files;
+    rt.progress_interval_sec = gen_cfg.progress_interval_sec;
+    rt.next_progress_files = rt.progress_interval_files > 0 ? rt.progress_interval_files : UINT64_MAX;
+    rt.start_tp = std::chrono::steady_clock::now();
+    rt.last_progress_tp = rt.start_tp;
 
     if (!EmitDirInode(&rt, 1, now_sec)) {
         return false;
@@ -645,6 +716,7 @@ bool MdsSstGenerator::Generate(const ClusterScaleConfig& cluster,
     stats.next_inode = rt.next_inode;
     stats.disk_budget_bytes = rt.disk_budget_bytes;
     stats.disk_used_bytes = rt.disk_budget_bytes - rt.disk_remaining_bytes;
+    MaybeLogProgress(&rt, true);
     *out = std::move(stats);
     return true;
 }

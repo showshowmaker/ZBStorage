@@ -14,6 +14,8 @@ struct OpticalMetaGenConfig {
     uint64_t min_100gb_discs{0};
     uint64_t min_1tb_discs{0};
     uint64_t min_10tb_discs{0};
+    uint64_t progress_interval_files{1000000};
+    uint64_t progress_interval_sec{30};
 };
 
 struct OpticalMetaGenStats {

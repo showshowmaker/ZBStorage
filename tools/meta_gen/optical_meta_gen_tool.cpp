@@ -41,6 +41,8 @@ void PrintUsage(std::ostream& os) {
           "  --branch_factor=<u64>                Dir branch factor\n"
           "  --max_depth=<u64>                    Dir max depth\n"
           "  --max_files_per_leaf=<u64>           Max files per leaf\n"
+          "  --progress_interval_files=<u64>      Progress log interval by file count (default: 1000000)\n"
+          "  --progress_interval_sec=<u64>        Progress log interval by seconds (default: 30)\n"
           "  --seed=<u64>                         Size sampler seed\n"
           "  --now_seconds=<u64>                  Timestamp override\n";
 }
@@ -104,6 +106,10 @@ int RunOpticalMetaGenTool(int argc, char** argv) {
             uint64_t tmp = 0;
             ok = ParseU64(value, &tmp);
             dir_cfg.max_files_per_leaf = static_cast<uint32_t>(tmp);
+        } else if (key == "progress_interval_files") {
+            ok = ParseU64(value, &gen_cfg.progress_interval_files);
+        } else if (key == "progress_interval_sec") {
+            ok = ParseU64(value, &gen_cfg.progress_interval_sec);
         } else if (key == "seed") {
             ok = ParseU64(value, &file_cfg.seed);
         } else if (key == "now_seconds") {
