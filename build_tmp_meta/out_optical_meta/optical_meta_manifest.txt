@@ -1,0 +1,7 @@
+total_files=5000
+manifest_records=5000
+total_discs=1000
+used_discs=1000
+count_100gb=0
+count_1tb=0
+count_10tb=1000

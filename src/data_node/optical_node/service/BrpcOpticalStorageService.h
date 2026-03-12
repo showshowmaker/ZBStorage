@@ -39,6 +39,26 @@ public:
                        zb::rpc::DiskReportReply* response,
                        google::protobuf::Closure* done) override;
 
+    void DeleteFileMeta(google::protobuf::RpcController* cntl_base,
+                        const zb::rpc::DeleteFileMetaRequest* request,
+                        zb::rpc::DeleteFileMetaReply* response,
+                        google::protobuf::Closure* done) override;
+
+    void ResolveFileRead(google::protobuf::RpcController* cntl_base,
+                         const zb::rpc::ResolveFileReadRequest* request,
+                         zb::rpc::ResolveFileReadReply* response,
+                         google::protobuf::Closure* done) override;
+
+    void AllocateFileWrite(google::protobuf::RpcController* cntl_base,
+                           const zb::rpc::AllocateFileWriteRequest* request,
+                           zb::rpc::AllocateFileWriteReply* response,
+                           google::protobuf::Closure* done) override;
+
+    void CommitFileWrite(google::protobuf::RpcController* cntl_base,
+                         const zb::rpc::CommitFileWriteRequest* request,
+                         zb::rpc::CommitFileWriteReply* response,
+                         google::protobuf::Closure* done) override;
+
 private:
     OpticalStorageServiceImpl* service_{};
 };

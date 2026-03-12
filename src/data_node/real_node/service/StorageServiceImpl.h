@@ -90,6 +90,11 @@ public:
     zb::data_node::ObjectReadResult GetObject(const zb::data_node::ObjectReadRequest& request);
     zb::msg::Status DeleteObject(const zb::data_node::ObjectDeleteRequest& request);
     zb::msg::DiskReportReply GetDiskReport() const;
+    zb::msg::DeleteFileMetaReply DeleteFileMeta(const zb::msg::DeleteFileMetaRequest& request);
+    zb::msg::ResolveFileReadReply ResolveFileRead(const zb::msg::ResolveFileReadRequest& request) const;
+    zb::msg::AllocateFileWriteReply AllocateFileWrite(const zb::msg::AllocateFileWriteRequest& request) const;
+    zb::msg::CommitFileWriteReply CommitFileWrite(const zb::msg::CommitFileWriteRequest& request);
+    void SetFileMetaStoreDir(const std::string& dir_path);
 
     bool InitArchiveMetaStore(const std::string& meta_dir,
                               size_t max_objects,
@@ -105,6 +110,10 @@ public:
     std::vector<ArchiveCandidateStat> CollectArchiveCandidates(uint32_t max_candidates, uint64_t min_age_ms) const;
 
 private:
+    bool ApplyFileMetaInternal(const zb::msg::ApplyFileMetaRequest& request,
+                                const std::string* txid,
+                                zb::msg::ApplyFileMetaReply* reply);
+
     struct ReplicationRepairTask {
         std::string key;
         zb::msg::WriteObjectRequest request;
@@ -126,6 +135,16 @@ private:
     void RemoveObjectTracking(const std::string& disk_id, const std::string& object_id);
     static uint64_t FastChecksum64(const std::string& data);
     static uint64_t NowMilliseconds();
+    static std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index);
+    static void BuildObjectSlices(uint64_t inode_id,
+                                  uint64_t offset,
+                                  uint64_t size,
+                                  uint64_t object_unit_size,
+                                  const std::string& disk_id,
+                                  std::vector<zb::msg::FileObjectSlice>* slices);
+    bool InitFileMetaStorePath() const;
+    bool LoadFileMetaStoreLocked(std::string* error) const;
+    bool PersistFileMetaStoreLocked(std::string* error) const;
 
     DiskManager* disk_manager_{};
     LocalPathResolver* path_resolver_{};
@@ -146,6 +165,11 @@ private:
 
     ArchiveObjectMetaStore archive_meta_store_;
     size_t archive_tracking_max_objects_{500000};
+    mutable std::mutex file_meta_mu_;
+    mutable std::unordered_map<uint64_t, zb::msg::FileMeta> file_meta_by_inode_;
+    mutable std::unordered_map<uint64_t, std::string> last_commit_txid_by_inode_;
+    mutable std::string file_meta_store_path_;
+    mutable bool file_meta_loaded_{false};
 };
 
 } // namespace zb::real_node

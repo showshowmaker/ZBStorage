@@ -75,9 +75,16 @@ bool ArchiveLeaseManager::Claim(const zb::rpc::ClaimArchiveTaskRequest& request,
 
     const uint64_t now_ms = NowMilliseconds();
     reply->set_granted(false);
-    if (record.state() == zb::rpc::ARCHIVE_STATE_ARCHIVED) {
-        *reply->mutable_record() = record;
-        return true;
+    if (record.state() != zb::rpc::ARCHIVE_STATE_PENDING &&
+        record.state() != zb::rpc::ARCHIVE_STATE_ARCHIVING) {
+        record.set_state(zb::rpc::ARCHIVE_STATE_PENDING);
+        record.clear_lease_id();
+        record.set_lease_expire_ts_ms(0);
+        record.set_update_ts_ms(now_ms);
+        record.set_version(record.version() + 1);
+        if (!PersistRecordLocked(record, error)) {
+            return false;
+        }
     }
     if (record.state() == zb::rpc::ARCHIVE_STATE_ARCHIVING && record.lease_expire_ts_ms() > now_ms) {
         if (record.owner_node_id() == request.node_id() &&
@@ -91,7 +98,6 @@ bool ArchiveLeaseManager::Claim(const zb::rpc::ClaimArchiveTaskRequest& request,
     const uint64_t lease_ms = NormalizeLeaseMs(request.requested_lease_ms());
     record.set_state(zb::rpc::ARCHIVE_STATE_ARCHIVING);
     record.set_owner_node_id(request.node_id());
-    record.set_owner_node_address(request.node_address());
     record.set_owner_disk_id(request.disk_id());
     record.set_lease_id(GenerateLeaseId());
     record.set_lease_expire_ts_ms(now_ms + lease_ms);
@@ -189,15 +195,6 @@ bool ArchiveLeaseManager::Commit(const zb::rpc::CommitArchiveTaskRequest& reques
 
     reply->set_committed(false);
     reply->set_idempotent(false);
-    if (record.state() == zb::rpc::ARCHIVE_STATE_ARCHIVED) {
-        if (!request.op_id().empty() && record.last_op_id() == request.op_id()) {
-            reply->set_committed(true);
-            reply->set_idempotent(true);
-        }
-        *reply->mutable_record() = record;
-        return true;
-    }
-
     const uint64_t now_ms = NowMilliseconds();
     if (record.state() != zb::rpc::ARCHIVE_STATE_ARCHIVING ||
         record.lease_id() != request.lease_id() ||
@@ -206,11 +203,9 @@ bool ArchiveLeaseManager::Commit(const zb::rpc::CommitArchiveTaskRequest& reques
         return true;
     }
 
-    if (!request.success() && record.lease_expire_ts_ms() <= now_ms) {
+    const bool success = request.success();
+    if (!success && record.lease_expire_ts_ms() <= now_ms) {
         record.set_state(zb::rpc::ARCHIVE_STATE_PENDING);
-    } else if (request.success()) {
-        record.set_state(zb::rpc::ARCHIVE_STATE_ARCHIVED);
-        record.set_archive_ts_ms(now_ms);
     } else {
         record.set_state(zb::rpc::ARCHIVE_STATE_PENDING);
     }
@@ -221,8 +216,18 @@ bool ArchiveLeaseManager::Commit(const zb::rpc::CommitArchiveTaskRequest& reques
     record.set_update_ts_ms(now_ms);
     record.set_version(record.version() + 1);
 
-    if (!PersistRecordLocked(record, error)) {
-        return false;
+    if (success) {
+        record.set_state(zb::rpc::ARCHIVE_STATE_PENDING);
+        record.set_archive_ts_ms(now_ms);
+        rocksdb::WriteBatch batch;
+        batch.Delete(ObjectArchiveStateKey(object_id));
+        if (!store_->WriteBatch(&batch, error)) {
+            return false;
+        }
+    } else {
+        if (!PersistRecordLocked(record, error)) {
+            return false;
+        }
     }
 
     reply->set_committed(true);

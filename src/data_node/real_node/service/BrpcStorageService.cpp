@@ -33,6 +33,40 @@ void FillStatus(const zb::msg::Status& status, zb::rpc::Status* out) {
     out->set_message(status.message);
 }
 
+void FillFileMeta(const zb::msg::FileMeta& in, zb::rpc::FileMeta* out) {
+    if (!out) {
+        return;
+    }
+    out->set_inode_id(in.inode_id);
+    out->set_file_size(in.file_size);
+    out->set_object_unit_size(in.object_unit_size);
+    out->set_version(in.version);
+    out->set_mtime_sec(in.mtime_sec);
+    out->set_update_ts_ms(in.update_ts_ms);
+}
+
+zb::msg::FileMeta ToInternalFileMeta(const zb::rpc::FileMeta& in) {
+    zb::msg::FileMeta out;
+    out.inode_id = in.inode_id();
+    out.file_size = in.file_size();
+    out.object_unit_size = in.object_unit_size();
+    out.version = in.version();
+    out.mtime_sec = in.mtime_sec();
+    out.update_ts_ms = in.update_ts_ms();
+    return out;
+}
+
+void FillFileObjectSlice(const zb::msg::FileObjectSlice& in, zb::rpc::FileObjectSlice* out) {
+    if (!out) {
+        return;
+    }
+    out->set_object_index(in.object_index);
+    out->set_object_id(in.object_id);
+    out->set_disk_id(in.disk_id);
+    out->set_object_offset(in.object_offset);
+    out->set_length(in.length);
+}
+
 } // namespace
 
 BrpcStorageService::BrpcStorageService(StorageServiceImpl* service) : service_(service) {}
@@ -192,6 +226,122 @@ void BrpcStorageService::GetDiskReport(google::protobuf::RpcController* cntl_bas
         item->set_capacity_bytes(report.capacity_bytes);
         item->set_free_bytes(report.free_bytes);
         item->set_is_healthy(report.is_healthy);
+    }
+}
+
+void BrpcStorageService::DeleteFileMeta(google::protobuf::RpcController* cntl_base,
+                                        const zb::rpc::DeleteFileMetaRequest* request,
+                                        zb::rpc::DeleteFileMetaReply* response,
+                                        google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!service_ || !request || !response) {
+        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
+        if (status) {
+            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            status->set_message("Service not initialized");
+        }
+        return;
+    }
+
+    zb::msg::DeleteFileMetaRequest internal_req;
+    internal_req.inode_id = request->inode_id();
+    internal_req.disk_id = request->disk_id();
+    internal_req.purge_objects = request->purge_objects();
+    const zb::msg::DeleteFileMetaReply internal_reply = service_->DeleteFileMeta(internal_req);
+    FillStatus(internal_reply.status, response->mutable_status());
+}
+
+void BrpcStorageService::ResolveFileRead(google::protobuf::RpcController* cntl_base,
+                                         const zb::rpc::ResolveFileReadRequest* request,
+                                         zb::rpc::ResolveFileReadReply* response,
+                                         google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!service_ || !request || !response) {
+        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
+        if (status) {
+            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            status->set_message("Service not initialized");
+        }
+        return;
+    }
+
+    zb::msg::ResolveFileReadRequest internal_req;
+    internal_req.inode_id = request->inode_id();
+    internal_req.offset = request->offset();
+    internal_req.size = request->size();
+    internal_req.disk_id = request->disk_id();
+    internal_req.object_unit_size_hint = request->object_unit_size_hint();
+    const zb::msg::ResolveFileReadReply internal_reply = service_->ResolveFileRead(internal_req);
+    FillStatus(internal_reply.status, response->mutable_status());
+    if (internal_reply.status.ok()) {
+        FillFileMeta(internal_reply.meta, response->mutable_meta());
+        for (const auto& s : internal_reply.slices) {
+            FillFileObjectSlice(s, response->add_slices());
+        }
+    }
+}
+
+void BrpcStorageService::AllocateFileWrite(google::protobuf::RpcController* cntl_base,
+                                           const zb::rpc::AllocateFileWriteRequest* request,
+                                           zb::rpc::AllocateFileWriteReply* response,
+                                           google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!service_ || !request || !response) {
+        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
+        if (status) {
+            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            status->set_message("Service not initialized");
+        }
+        return;
+    }
+
+    zb::msg::AllocateFileWriteRequest internal_req;
+    internal_req.inode_id = request->inode_id();
+    internal_req.offset = request->offset();
+    internal_req.size = request->size();
+    internal_req.disk_id = request->disk_id();
+    internal_req.object_unit_size_hint = request->object_unit_size_hint();
+    const zb::msg::AllocateFileWriteReply internal_reply = service_->AllocateFileWrite(internal_req);
+    FillStatus(internal_reply.status, response->mutable_status());
+    if (internal_reply.status.ok()) {
+        FillFileMeta(internal_reply.meta, response->mutable_meta());
+        response->set_txid(internal_reply.txid);
+        for (const auto& s : internal_reply.slices) {
+            FillFileObjectSlice(s, response->add_slices());
+        }
+    }
+}
+
+void BrpcStorageService::CommitFileWrite(google::protobuf::RpcController* cntl_base,
+                                         const zb::rpc::CommitFileWriteRequest* request,
+                                         zb::rpc::CommitFileWriteReply* response,
+                                         google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!service_ || !request || !response) {
+        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
+        if (status) {
+            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            status->set_message("Service not initialized");
+        }
+        return;
+    }
+
+    zb::msg::CommitFileWriteRequest internal_req;
+    internal_req.inode_id = request->inode_id();
+    internal_req.txid = request->txid();
+    internal_req.file_size = request->file_size();
+    internal_req.object_unit_size = request->object_unit_size();
+    internal_req.expected_version = request->expected_version();
+    internal_req.allow_create = request->allow_create();
+    internal_req.mtime_sec = request->mtime_sec();
+    const zb::msg::CommitFileWriteReply internal_reply = service_->CommitFileWrite(internal_req);
+    FillStatus(internal_reply.status, response->mutable_status());
+    if (internal_reply.status.ok()) {
+        FillFileMeta(internal_reply.meta, response->mutable_meta());
     }
 }
 

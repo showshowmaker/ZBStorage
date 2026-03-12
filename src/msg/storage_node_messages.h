@@ -112,4 +112,86 @@ struct DiskReportReply {
     std::vector<DiskReport> reports;
 };
 
+struct FileMeta {
+    uint64_t inode_id{0};
+    uint64_t file_size{0};
+    uint64_t object_unit_size{0};
+    uint64_t version{0};
+    uint64_t mtime_sec{0};
+    uint64_t update_ts_ms{0};
+};
+
+struct FileObjectSlice {
+    uint32_t object_index{0};
+    std::string object_id;
+    std::string disk_id;
+    uint64_t object_offset{0};
+    uint64_t length{0};
+};
+
+struct ApplyFileMetaRequest {
+    FileMeta meta;
+    uint64_t expected_version{0};
+    bool allow_create{false};
+};
+
+struct ApplyFileMetaReply {
+    Status status;
+    FileMeta meta;
+};
+
+struct DeleteFileMetaRequest {
+    uint64_t inode_id{0};
+    std::string disk_id;
+    bool purge_objects{false};
+};
+
+struct DeleteFileMetaReply {
+    Status status;
+};
+
+struct ResolveFileReadRequest {
+    uint64_t inode_id{0};
+    uint64_t offset{0};
+    uint64_t size{0};
+    std::string disk_id;
+    uint64_t object_unit_size_hint{0};
+};
+
+struct ResolveFileReadReply {
+    Status status;
+    FileMeta meta;
+    std::vector<FileObjectSlice> slices;
+};
+
+struct AllocateFileWriteRequest {
+    uint64_t inode_id{0};
+    uint64_t offset{0};
+    uint64_t size{0};
+    std::string disk_id;
+    uint64_t object_unit_size_hint{0};
+};
+
+struct AllocateFileWriteReply {
+    Status status;
+    FileMeta meta;
+    std::string txid;
+    std::vector<FileObjectSlice> slices;
+};
+
+struct CommitFileWriteRequest {
+    uint64_t inode_id{0};
+    std::string txid;
+    uint64_t file_size{0};
+    uint64_t object_unit_size{0};
+    uint64_t expected_version{0};
+    bool allow_create{false};
+    uint64_t mtime_sec{0};
+};
+
+struct CommitFileWriteReply {
+    Status status;
+    FileMeta meta;
+};
+
 } // namespace zb::msg

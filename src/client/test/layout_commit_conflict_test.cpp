@@ -6,12 +6,17 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "mds.pb.h"
+#include "real_node.pb.h"
+#include "scheduler.pb.h"
 
 DEFINE_string(mds, "127.0.0.1:9000", "MDS endpoint");
-DEFINE_string(path, "/e2e_layout_conflict_test", "Test file path");
+DEFINE_string(scheduler, "127.0.0.1:9100", "Scheduler endpoint");
+DEFINE_string(path, "/e2e_file_meta_conflict_test", "Test file path");
 DEFINE_uint64(new_size, 16, "Committed file size");
+DEFINE_uint64(object_unit_size, 4 * 1024 * 1024, "Object unit size for file meta");
 DEFINE_int32(timeout_ms, 3000, "RPC timeout(ms)");
 DEFINE_int32(max_retry, 0, "RPC max retry");
 
@@ -24,6 +29,11 @@ uint64_t NowMilliseconds() {
     return static_cast<uint64_t>(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
 }
 
+uint64_t NowSeconds() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
+}
+
 bool RpcOk(const brpc::Controller& cntl, const char* name) {
     if (cntl.Failed()) {
         std::cerr << name << " rpc failed: " << cntl.ErrorText() << std::endl;
@@ -32,14 +42,17 @@ bool RpcOk(const brpc::Controller& cntl, const char* name) {
     return true;
 }
 
-bool EnsureFile(MdsService_Stub* stub, const std::string& path) {
+bool EnsureFile(MdsService_Stub* stub, const std::string& path, uint64_t* inode_id) {
+    if (!stub) {
+        return false;
+    }
     zb::rpc::CreateRequest req;
     req.set_path(path);
     req.set_mode(0644);
     req.set_uid(0);
     req.set_gid(0);
     req.set_replica(1);
-    req.set_object_unit_size(4 * 1024 * 1024);
+    req.set_object_unit_size(FLAGS_object_unit_size);
 
     zb::rpc::CreateReply resp;
     brpc::Controller cntl;
@@ -47,91 +60,160 @@ bool EnsureFile(MdsService_Stub* stub, const std::string& path) {
     if (!RpcOk(cntl, "Create")) {
         return false;
     }
-    if (resp.status().code() == zb::rpc::MDS_OK || resp.status().code() == zb::rpc::MDS_ALREADY_EXISTS) {
+    if (resp.status().code() == zb::rpc::MDS_OK) {
+        if (inode_id) {
+            *inode_id = resp.attr().inode_id();
+        }
         return true;
     }
-    std::cerr << "Create failed code=" << resp.status().code()
-              << " msg=" << resp.status().message() << std::endl;
-    return false;
-}
-
-bool LookupInode(MdsService_Stub* stub, const std::string& path, uint64_t* inode_id) {
-    if (!inode_id) {
-        return false;
-    }
-    zb::rpc::LookupRequest req;
-    req.set_path(path);
-    zb::rpc::LookupReply resp;
-    brpc::Controller cntl;
-    stub->Lookup(&cntl, &req, &resp, nullptr);
-    if (!RpcOk(cntl, "Lookup")) {
-        return false;
-    }
-    if (resp.status().code() != zb::rpc::MDS_OK) {
-        std::cerr << "Lookup failed code=" << resp.status().code()
+    if (resp.status().code() != zb::rpc::MDS_ALREADY_EXISTS) {
+        std::cerr << "Create failed code=" << resp.status().code()
                   << " msg=" << resp.status().message() << std::endl;
         return false;
     }
-    *inode_id = resp.attr().inode_id();
-    return *inode_id != 0;
-}
 
-bool GetLayoutRoot(MdsService_Stub* stub, uint64_t inode_id, zb::rpc::LayoutRoot* out) {
-    if (!out || inode_id == 0) {
+    zb::rpc::LookupRequest lookup_req;
+    lookup_req.set_path(path);
+    zb::rpc::LookupReply lookup_resp;
+    brpc::Controller lookup_cntl;
+    stub->Lookup(&lookup_cntl, &lookup_req, &lookup_resp, nullptr);
+    if (!RpcOk(lookup_cntl, "Lookup")) {
         return false;
     }
-    zb::rpc::GetLayoutRootRequest req;
-    req.set_inode_id(inode_id);
-    zb::rpc::GetLayoutRootReply resp;
-    brpc::Controller cntl;
-    stub->GetLayoutRoot(&cntl, &req, &resp, nullptr);
-    if (!RpcOk(cntl, "GetLayoutRoot")) {
+    if (lookup_resp.status().code() != zb::rpc::MDS_OK) {
+        std::cerr << "Lookup failed code=" << lookup_resp.status().code()
+                  << " msg=" << lookup_resp.status().message() << std::endl;
         return false;
     }
-    if (resp.status().code() != zb::rpc::MDS_OK) {
-        std::cerr << "GetLayoutRoot failed code=" << resp.status().code()
-                  << " msg=" << resp.status().message() << std::endl;
-        return false;
+    if (inode_id) {
+        *inode_id = lookup_resp.attr().inode_id();
     }
-    *out = resp.root();
     return true;
 }
 
-bool CommitRoot(MdsService_Stub* stub,
-                uint64_t inode_id,
-                uint64_t expected_version,
-                uint64_t new_size,
-                uint64_t epoch,
-                const std::string& layout_root_id,
-                zb::rpc::MdsStatus* out_status) {
-    zb::rpc::CommitLayoutRootRequest req;
-    req.set_inode_id(inode_id);
-    req.set_expected_layout_version(expected_version);
-    req.set_update_inode_size(true);
-    req.set_new_size(new_size);
-
-    zb::rpc::LayoutRoot* root = req.mutable_root();
-    root->set_inode_id(inode_id);
-    root->set_layout_root_id(layout_root_id);
-    root->set_layout_version(expected_version + 1);
-    root->set_file_size(new_size);
-    root->set_epoch(epoch);
-    root->set_update_ts(NowMilliseconds());
-
-    zb::rpc::CommitLayoutRootReply resp;
-    brpc::Controller cntl;
-    stub->CommitLayoutRoot(&cntl, &req, &resp, nullptr);
-    if (!RpcOk(cntl, "CommitLayoutRoot")) {
-        if (out_status) {
-            out_status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
-            out_status->set_message(cntl.ErrorText());
-        }
+bool GetFileAnchor(MdsService_Stub* stub, uint64_t inode_id, zb::rpc::ReplicaLocation* anchor) {
+    if (!stub || !anchor || inode_id == 0) {
         return false;
     }
-    if (out_status) {
-        *out_status = resp.status();
+    zb::rpc::GetFileAnchorRequest req;
+    req.set_inode_id(inode_id);
+    zb::rpc::GetFileAnchorReply resp;
+    brpc::Controller cntl;
+    stub->GetFileAnchor(&cntl, &req, &resp, nullptr);
+    if (!RpcOk(cntl, "GetFileAnchor")) {
+        return false;
     }
-    return resp.status().code() == zb::rpc::MDS_OK;
+    if (resp.status().code() != zb::rpc::MDS_OK) {
+        std::cerr << "GetFileAnchor failed code=" << resp.status().code()
+                  << " msg=" << resp.status().message() << std::endl;
+        return false;
+    }
+    const auto& set = resp.anchor();
+    if (!set.disk_anchor().node_id().empty() && !set.disk_anchor().disk_id().empty()) {
+        anchor->set_node_id(set.disk_anchor().node_id());
+        anchor->set_disk_id(set.disk_anchor().disk_id());
+        anchor->set_object_id(set.disk_anchor().object_id());
+        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+        anchor->set_replica_state(set.disk_anchor().replica_state());
+    } else if (!set.optical_anchor().node_id().empty() && !set.optical_anchor().disk_id().empty()) {
+        anchor->set_node_id(set.optical_anchor().node_id());
+        anchor->set_disk_id(set.optical_anchor().disk_id());
+        anchor->set_object_id(set.optical_anchor().object_id());
+        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
+        anchor->set_replica_state(set.optical_anchor().replica_state());
+    } else {
+        return false;
+    }
+    return !anchor->node_id().empty();
+}
+
+bool ResolveNodeAddress(const std::string& scheduler_endpoint,
+                        const std::string& node_id,
+                        std::string* address) {
+    if (node_id.empty() || !address) {
+        return false;
+    }
+    brpc::Channel channel;
+    brpc::ChannelOptions options;
+    options.protocol = "baidu_std";
+    options.timeout_ms = FLAGS_timeout_ms;
+    options.max_retry = FLAGS_max_retry;
+    if (channel.Init(scheduler_endpoint.c_str(), &options) != 0) {
+        std::cerr << "Init scheduler channel failed: " << scheduler_endpoint << std::endl;
+        return false;
+    }
+    zb::rpc::SchedulerService_Stub stub(&channel);
+    zb::rpc::GetClusterViewRequest req;
+    req.set_min_generation(0);
+    zb::rpc::GetClusterViewReply resp;
+    brpc::Controller cntl;
+    stub.GetClusterView(&cntl, &req, &resp, nullptr);
+    if (!RpcOk(cntl, "GetClusterView")) {
+        return false;
+    }
+    if (resp.status().code() != zb::rpc::SCHED_OK) {
+        std::cerr << "GetClusterView failed code=" << resp.status().code()
+                  << " msg=" << resp.status().message() << std::endl;
+        return false;
+    }
+    for (const auto& node : resp.nodes()) {
+        if (node.node_id() == node_id && !node.address().empty()) {
+            *address = node.address();
+            return true;
+        }
+    }
+    const size_t pos = node_id.rfind("-v");
+    if (pos != std::string::npos && pos + 2 < node_id.size()) {
+        const std::string base_id = node_id.substr(0, pos);
+        for (const auto& node : resp.nodes()) {
+            if (node.node_id() == base_id && !node.address().empty()) {
+                *address = node.address();
+                return true;
+            }
+        }
+    }
+    std::cerr << "node not found in scheduler view: " << node_id << std::endl;
+    return false;
+}
+
+bool CommitFileWrite(const std::string& node_address,
+                     uint64_t inode_id,
+                     const std::string& txid,
+                     uint64_t file_size,
+                     uint64_t object_unit_size,
+                     uint64_t expected_version,
+                     bool allow_create,
+                     zb::rpc::CommitFileWriteReply* out_reply) {
+    if (node_address.empty() || inode_id == 0 || object_unit_size == 0 || txid.empty() || !out_reply) {
+        return false;
+    }
+    brpc::Channel channel;
+    brpc::ChannelOptions options;
+    options.protocol = "baidu_std";
+    options.timeout_ms = FLAGS_timeout_ms;
+    options.max_retry = FLAGS_max_retry;
+    if (channel.Init(node_address.c_str(), &options) != 0) {
+        std::cerr << "Init data node channel failed: " << node_address << std::endl;
+        return false;
+    }
+
+    zb::rpc::RealNodeService_Stub stub(&channel);
+    zb::rpc::CommitFileWriteRequest req;
+    req.set_inode_id(inode_id);
+    req.set_txid(txid);
+    req.set_file_size(file_size);
+    req.set_object_unit_size(object_unit_size);
+    req.set_expected_version(expected_version);
+    req.set_allow_create(allow_create);
+    req.set_mtime_sec(NowSeconds());
+
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(FLAGS_timeout_ms);
+    stub.CommitFileWrite(&cntl, &req, out_reply, nullptr);
+    if (!RpcOk(cntl, "CommitFileWrite")) {
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -150,56 +232,75 @@ int main(int argc, char* argv[]) {
     }
     MdsService_Stub stub(&channel);
 
-    if (!EnsureFile(&stub, FLAGS_path)) {
+    uint64_t inode_id = 0;
+    if (!EnsureFile(&stub, FLAGS_path, &inode_id) || inode_id == 0) {
         return 2;
     }
 
-    uint64_t inode_id = 0;
-    if (!LookupInode(&stub, FLAGS_path, &inode_id)) {
+    zb::rpc::ReplicaLocation anchor;
+    if (!GetFileAnchor(&stub, inode_id, &anchor)) {
         return 3;
     }
+    std::string anchor_address;
+    if (!ResolveNodeAddress(FLAGS_scheduler, anchor.node_id(), &anchor_address)) {
+        return 10;
+    }
 
-    zb::rpc::LayoutRoot base_root;
-    if (!GetLayoutRoot(&stub, inode_id, &base_root)) {
+    zb::rpc::CommitFileWriteReply first;
+    if (!CommitFileWrite(anchor_address,
+                         inode_id,
+                         "tx-first-" + std::to_string(NowMilliseconds()),
+                         FLAGS_new_size,
+                         FLAGS_object_unit_size,
+                         0,
+                         true,
+                         &first)) {
         return 4;
     }
-    const uint64_t expected_version = base_root.layout_version();
-    const uint64_t epoch = base_root.epoch();
-    std::string root_id = base_root.layout_root_id();
-    if (root_id.empty()) {
-        root_id = "lr-" + std::to_string(inode_id) + "-" + std::to_string(NowMilliseconds());
-    }
-
-    zb::rpc::MdsStatus commit_status;
-    if (!CommitRoot(&stub,
-                    inode_id,
-                    expected_version,
-                    FLAGS_new_size,
-                    epoch,
-                    root_id,
-                    &commit_status)) {
-        std::cerr << "first commit failed code=" << commit_status.code()
-                  << " msg=" << commit_status.message() << std::endl;
+    if (first.status().code() != zb::rpc::STATUS_OK) {
+        std::cerr << "first CommitFileWrite failed code=" << first.status().code()
+                  << " msg=" << first.status().message() << std::endl;
         return 5;
     }
+    const uint64_t stale_version = first.meta().version();
 
-    zb::rpc::MdsStatus stale_status;
-    (void)CommitRoot(&stub,
-                     inode_id,
-                     expected_version,
-                     FLAGS_new_size + 1,
-                     epoch,
-                     root_id,
-                     &stale_status);
-    if (stale_status.code() != zb::rpc::MDS_STALE_EPOCH) {
-        std::cerr << "expect stale-epoch, got code=" << stale_status.code()
-                  << " msg=" << stale_status.message() << std::endl;
+    zb::rpc::CommitFileWriteReply second;
+    if (!CommitFileWrite(anchor_address,
+                         inode_id,
+                         "tx-second-" + std::to_string(NowMilliseconds()),
+                         FLAGS_new_size + 1,
+                         FLAGS_object_unit_size,
+                         stale_version,
+                         true,
+                         &second)) {
         return 6;
+    }
+    if (second.status().code() != zb::rpc::STATUS_OK) {
+        std::cerr << "second CommitFileWrite failed code=" << second.status().code()
+                  << " msg=" << second.status().message() << std::endl;
+        return 7;
+    }
+
+    zb::rpc::CommitFileWriteReply stale;
+    if (!CommitFileWrite(anchor_address,
+                         inode_id,
+                         "tx-stale-" + std::to_string(NowMilliseconds()),
+                         FLAGS_new_size + 2,
+                         FLAGS_object_unit_size,
+                         stale_version,
+                         true,
+                         &stale)) {
+        return 8;
+    }
+    if (stale.status().code() != zb::rpc::STATUS_IO_ERROR ||
+        stale.status().message() != "VERSION_MISMATCH") {
+        std::cerr << "expect VERSION_MISMATCH, got code=" << stale.status().code()
+                  << " msg=" << stale.status().message() << std::endl;
+        return 9;
     }
 
     std::cout << "PASS inode=" << inode_id
-              << " expected_version=" << expected_version
-              << " stale_code=" << stale_status.code()
-              << std::endl;
+              << " stale_version=" << stale_version
+              << " conflict_status=" << stale.status().message() << std::endl;
     return 0;
 }

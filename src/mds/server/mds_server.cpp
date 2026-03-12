@@ -16,7 +16,6 @@
 #include "../archive/ArchiveLeaseManager.h"
 #include "../archive/OpticalArchiveManager.h"
 #include "../config/MdsConfig.h"
-#include "../gc/GcManager.h"
 #include "../service/MdsServiceImpl.h"
 #include "../storage/RocksMetaStore.h"
 #include "scheduler.pb.h"
@@ -67,11 +66,6 @@ int main(int argc, char* argv[]) {
     zb::mds::ArchiveLeaseManager lease_manager(&store, lease_options);
     zb::mds::ArchiveBatchStager batch_stager;
     zb::mds::MdsServiceImpl service(&store, &allocator, cfg.object_unit_size, &candidate_queue, &lease_manager);
-    zb::mds::MdsServiceImpl::LayoutObjectOptions layout_options;
-    layout_options.replica_count = cfg.layout_object_replica_count;
-    layout_options.scrub_on_load = cfg.layout_object_scrub_on_load;
-    service.SetLayoutObjectOptions(layout_options);
-    service.SetSimplifiedAnchorMetadataMode(cfg.enable_simplified_anchor_metadata);
     std::unique_ptr<zb::mds::OpticalArchiveManager> archive_manager;
     if (cfg.enable_optical_archive) {
         zb::mds::ArchiveBatchStager::Options stager_options;
@@ -105,8 +99,6 @@ int main(int argc, char* argv[]) {
     std::atomic<bool> stop_sync{false};
     std::thread sync_thread;
     std::thread archive_thread;
-    std::thread layout_gc_thread;
-    std::unique_ptr<zb::mds::GcManager> gc_manager;
     if (!cfg.scheduler_address.empty()) {
         sync_thread = std::thread([&]() {
             uint64_t min_generation = 0;
@@ -246,26 +238,6 @@ int main(int argc, char* argv[]) {
             }
         });
     }
-    if (cfg.enable_layout_gc) {
-        zb::mds::GcManager::Options gc_options;
-        gc_options.orphan_grace_ms = cfg.layout_gc_orphan_grace_ms;
-        gc_options.max_delete_per_round = cfg.layout_gc_max_delete_per_round;
-        gc_options.dry_run = cfg.layout_gc_dry_run;
-        gc_options.paused = cfg.layout_gc_paused;
-        gc_manager = std::make_unique<zb::mds::GcManager>(&store, gc_options);
-        layout_gc_thread = std::thread([&]() {
-            const uint32_t interval_ms = cfg.layout_gc_interval_ms > 0 ? cfg.layout_gc_interval_ms : 30000;
-            while (!stop_sync.load()) {
-                std::string gc_error;
-                gc_manager->RunOnce(&gc_error);
-                if (!gc_error.empty()) {
-                    std::cerr << "layout gc round warning: " << gc_error << std::endl;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-            }
-        });
-    }
-
     brpc::Server server;
     if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
         std::cerr << "Failed to add MDS service" << std::endl;
@@ -284,9 +256,6 @@ int main(int argc, char* argv[]) {
         if (archive_thread.joinable()) {
             archive_thread.join();
         }
-        if (layout_gc_thread.joinable()) {
-            layout_gc_thread.join();
-        }
         return 1;
     }
 
@@ -297,9 +266,6 @@ int main(int argc, char* argv[]) {
     }
     if (archive_thread.joinable()) {
         archive_thread.join();
-    }
-    if (layout_gc_thread.joinable()) {
-        layout_gc_thread.join();
     }
     return 0;
 }

@@ -20,6 +20,33 @@ std::vector<NodeInfo> NodeStateCache::Snapshot() const {
     return nodes_;
 }
 
+bool NodeStateCache::ResolveNodeAddress(const std::string& node_id, std::string* address) const {
+    if (node_id.empty() || !address) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& node : nodes_) {
+        if (node.node_id == node_id) {
+            if (node.address.empty()) {
+                return false;
+            }
+            *address = node.address;
+            return true;
+        }
+    }
+    for (const auto& node : nodes_) {
+        const std::string prefix = node.node_id + "-v";
+        if (node_id.size() > prefix.size() && node_id.rfind(prefix, 0) == 0) {
+            if (node.address.empty()) {
+                return false;
+            }
+            *address = node.address;
+            return true;
+        }
+    }
+    return false;
+}
+
 void NodeStateCache::ReplaceNodes(std::vector<NodeInfo> nodes) {
     std::lock_guard<std::mutex> lock(mu_);
     nodes_ = std::move(nodes);
@@ -157,9 +184,18 @@ std::string NodeStateCache::PickDiskLocked(NodeInfo* node, uint64_t virtual_inde
 
     size_t base = node->next_disk_index % node->disks.size();
     size_t shift = static_cast<size_t>(virtual_index % node->disks.size());
-    size_t index = (base + shift) % node->disks.size();
-    node->next_disk_index = (node->next_disk_index + 1) % node->disks.size();
-    return node->disks[index].disk_id;
+    for (size_t i = 0; i < node->disks.size(); ++i) {
+        size_t index = (base + shift + i) % node->disks.size();
+        const auto& disk = node->disks[index];
+        const bool free_known = disk.capacity_bytes > 0 || disk.free_bytes > 0;
+        const bool writable = disk.free_bytes > 0 || !free_known;
+        if (!disk.is_healthy || !writable || disk.disk_id.empty()) {
+            continue;
+        }
+        node->next_disk_index = (index + 1) % node->disks.size();
+        return disk.disk_id;
+    }
+    return {};
 }
 
 std::string NodeStateCache::BuildVirtualNodeId(const std::string& base_node_id, uint64_t virtual_index) {
@@ -194,6 +230,18 @@ size_t NodeStateCache::EstimateWeightSumLocked(NodeType type_filter, bool strict
 
 bool NodeStateCache::IsNodeAllocatable(const NodeInfo& node, NodeType type_filter, bool strict_type_filter) {
     if (!node.allocatable || !node.is_primary) {
+        return false;
+    }
+    bool has_writable_disk = false;
+    for (const auto& disk : node.disks) {
+        const bool free_known = disk.capacity_bytes > 0 || disk.free_bytes > 0;
+        const bool writable = disk.free_bytes > 0 || !free_known;
+        if (disk.is_healthy && writable && !disk.disk_id.empty()) {
+            has_writable_disk = true;
+            break;
+        }
+    }
+    if (!has_writable_disk) {
         return false;
     }
     if (strict_type_filter) {

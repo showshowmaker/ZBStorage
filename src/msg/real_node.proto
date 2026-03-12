@@ -111,6 +111,77 @@ message DiskReportReply {
   repeated DiskReport reports = 2;
 }
 
+message FileMeta {
+  uint64 inode_id = 1;
+  uint64 file_size = 2;
+  uint64 object_unit_size = 3;
+  uint64 version = 4;
+  uint64 mtime_sec = 5;
+  uint64 update_ts_ms = 6;
+}
+
+message FileObjectSlice {
+  uint32 object_index = 1;
+  string object_id = 2;
+  string disk_id = 3;
+  uint64 object_offset = 4;
+  uint64 length = 5;
+}
+
+message DeleteFileMetaRequest {
+  uint64 inode_id = 1;
+  string disk_id = 2;
+  bool purge_objects = 3;
+}
+
+message DeleteFileMetaReply {
+  Status status = 1;
+}
+
+message ResolveFileReadRequest {
+  uint64 inode_id = 1;
+  uint64 offset = 2;
+  uint64 size = 3;
+  string disk_id = 4;
+  uint64 object_unit_size_hint = 5;
+}
+
+message ResolveFileReadReply {
+  Status status = 1;
+  FileMeta meta = 2;
+  repeated FileObjectSlice slices = 3;
+}
+
+message AllocateFileWriteRequest {
+  uint64 inode_id = 1;
+  uint64 offset = 2;
+  uint64 size = 3;
+  string disk_id = 4;
+  uint64 object_unit_size_hint = 5;
+}
+
+message AllocateFileWriteReply {
+  Status status = 1;
+  FileMeta meta = 2;
+  string txid = 3;
+  repeated FileObjectSlice slices = 4;
+}
+
+message CommitFileWriteRequest {
+  uint64 inode_id = 1;
+  string txid = 2;
+  uint64 file_size = 3;
+  uint64 object_unit_size = 4;
+  uint64 expected_version = 5;
+  bool allow_create = 6;
+  uint64 mtime_sec = 7;
+}
+
+message CommitFileWriteReply {
+  Status status = 1;
+  FileMeta meta = 2;
+}
+
 service RealNodeService {
   rpc WriteObject(WriteObjectRequest) returns (WriteObjectReply);
   rpc ReadObject(ReadObjectRequest) returns (ReadObjectReply);
@@ -118,4 +189,8 @@ service RealNodeService {
   rpc ReadArchivedFile(ReadArchivedFileRequest) returns (ReadArchivedFileReply);
   rpc UpdateArchiveState(UpdateArchiveStateRequest) returns (UpdateArchiveStateReply);
   rpc GetDiskReport(google.protobuf.Empty) returns (DiskReportReply);
+  rpc DeleteFileMeta(DeleteFileMetaRequest) returns (DeleteFileMetaReply);
+  rpc ResolveFileRead(ResolveFileReadRequest) returns (ResolveFileReadReply);
+  rpc AllocateFileWrite(AllocateFileWriteRequest) returns (AllocateFileWriteReply);
+  rpc CommitFileWrite(CommitFileWriteRequest) returns (CommitFileWriteReply);
 }

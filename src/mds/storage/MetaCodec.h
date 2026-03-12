@@ -8,35 +8,6 @@
 
 namespace zb::mds {
 
-struct LayoutRootRecord {
-    uint64_t inode_id{0};
-    std::string layout_root_id;
-    uint64_t layout_version{0};
-    uint64_t file_size{0};
-    uint64_t epoch{0};
-    uint64_t update_ts{0};
-};
-
-struct LayoutExtentRecord {
-    uint64_t logical_offset{0};
-    uint64_t length{0};
-    std::string object_id;
-    uint64_t object_offset{0};
-    uint64_t object_length{0};
-    uint64_t object_version{0};
-    uint32_t object_index{0};
-    uint32_t pg_id{0};
-    uint64_t placement_epoch{0};
-    uint32_t storage_tier{0};
-};
-
-struct LayoutNodeRecord {
-    std::string node_id;
-    uint32_t level{0};
-    std::vector<LayoutExtentRecord> extents;
-    std::vector<std::string> child_layout_ids;
-};
-
 struct PgViewMemberRecord {
     std::string node_id;
     std::string node_address;
@@ -66,12 +37,6 @@ public:
 
     static std::string EncodeObjectMeta(const zb::rpc::ObjectMeta& meta);
     static bool DecodeObjectMeta(const std::string& data, zb::rpc::ObjectMeta* meta);
-
-    static std::string EncodeLayoutRoot(const LayoutRootRecord& root);
-    static bool DecodeLayoutRoot(const std::string& data, LayoutRootRecord* root);
-
-    static std::string EncodeLayoutNode(const LayoutNodeRecord& node);
-    static bool DecodeLayoutNode(const std::string& data, LayoutNodeRecord* node);
 
     static std::string EncodePgView(const PgViewRecord& view);
     static bool DecodePgView(const std::string& data, PgViewRecord* view);

@@ -205,4 +205,64 @@ void BrpcOpticalStorageService::GetDiskReport(google::protobuf::RpcController* c
     }
 }
 
+void BrpcOpticalStorageService::DeleteFileMeta(google::protobuf::RpcController* cntl_base,
+                                               const zb::rpc::DeleteFileMetaRequest* request,
+                                               zb::rpc::DeleteFileMetaReply* response,
+                                               google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    (void)request;
+    if (!response) {
+        return;
+    }
+    zb::rpc::Status* status = response->mutable_status();
+    status->set_code(zb::rpc::STATUS_NOT_FOUND);
+    status->set_message("optical node does not host file metadata");
+}
+
+void BrpcOpticalStorageService::ResolveFileRead(google::protobuf::RpcController* cntl_base,
+                                                const zb::rpc::ResolveFileReadRequest* request,
+                                                zb::rpc::ResolveFileReadReply* response,
+                                                google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    (void)request;
+    if (!response) {
+        return;
+    }
+    zb::rpc::Status* status = response->mutable_status();
+    status->set_code(zb::rpc::STATUS_INVALID_ARGUMENT);
+    status->set_message("optical node does not support ResolveFileRead");
+}
+
+void BrpcOpticalStorageService::AllocateFileWrite(google::protobuf::RpcController* cntl_base,
+                                                  const zb::rpc::AllocateFileWriteRequest* request,
+                                                  zb::rpc::AllocateFileWriteReply* response,
+                                                  google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    (void)request;
+    if (!response) {
+        return;
+    }
+    zb::rpc::Status* status = response->mutable_status();
+    status->set_code(zb::rpc::STATUS_INVALID_ARGUMENT);
+    status->set_message("optical node does not support AllocateFileWrite");
+}
+
+void BrpcOpticalStorageService::CommitFileWrite(google::protobuf::RpcController* cntl_base,
+                                                const zb::rpc::CommitFileWriteRequest* request,
+                                                zb::rpc::CommitFileWriteReply* response,
+                                                google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    (void)request;
+    if (!response) {
+        return;
+    }
+    zb::rpc::Status* status = response->mutable_status();
+    status->set_code(zb::rpc::STATUS_INVALID_ARGUMENT);
+    status->set_message("optical node does not support CommitFileWrite");
+}
+
 } // namespace zb::optical_node

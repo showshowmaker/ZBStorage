@@ -253,8 +253,95 @@ if(BRPC_DYNAMIC_LIB)
     target_link_libraries(scheduler_control_test PRIVATE ${BRPC_DYNAMIC_LIB})
 endif()
 
+add_executable(meta_plan_tool
+    tools/meta_gen/capacity_planner.cpp
+    tools/meta_gen/namespace_layout_planner.cpp
+    tools/meta_gen/file_size_sampler.cpp
+    tools/meta_gen/meta_plan_tool.cpp
+)
+target_include_directories(meta_plan_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/meta_gen
+)
+
+add_executable(disk_meta_gen_tool
+    tools/meta_gen/namespace_layout_planner.cpp
+    tools/meta_gen/file_size_sampler.cpp
+    tools/meta_gen/workload_enumerator.cpp
+    tools/meta_gen/disk_meta_generator.cpp
+    tools/meta_gen/disk_meta_gen_tool.cpp
+)
+set_target_properties(disk_meta_gen_tool PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(disk_meta_gen_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/meta_gen
+)
+
+add_executable(optical_meta_gen_tool
+    tools/meta_gen/capacity_planner.cpp
+    tools/meta_gen/namespace_layout_planner.cpp
+    tools/meta_gen/file_size_sampler.cpp
+    tools/meta_gen/workload_enumerator.cpp
+    tools/meta_gen/optical_meta_generator.cpp
+    tools/meta_gen/optical_meta_gen_tool.cpp
+)
+set_target_properties(optical_meta_gen_tool PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(optical_meta_gen_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/meta_gen
+)
+
+add_executable(mds_sst_gen_tool
+    tools/meta_gen/namespace_layout_planner.cpp
+    tools/meta_gen/file_size_sampler.cpp
+    tools/meta_gen/mds_sst_generator.cpp
+    tools/meta_gen/mds_sst_gen_tool.cpp
+)
+set_target_properties(mds_sst_gen_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(mds_sst_gen_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/meta_gen
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${ROCKSDB_ROOT}/include
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(mds_sst_gen_tool
+    PRIVATE
+        zb_proto
+        ${ROCKSDB_TARGET}
+)
+
+add_executable(mds_sst_ingest_tool
+    tools/meta_gen/mds_sst_ingest_tool.cpp
+)
+set_target_properties(mds_sst_ingest_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(mds_sst_ingest_tool
+    PRIVATE
+        ${ROCKSDB_ROOT}/include
+)
+target_link_libraries(mds_sst_ingest_tool
+    PRIVATE
+        ${ROCKSDB_TARGET}
+)
+
 add_executable(module_io_smoke_test
-    test/module_io_smoke_test.cpp
+    tests/module_io_smoke_test.cpp
 )
 target_include_directories(module_io_smoke_test
     PRIVATE
@@ -320,7 +407,6 @@ add_executable(mds_server
     src/mds/archive/ArchiveBatchStager.cpp
     src/mds/archive/ArchiveLeaseManager.cpp
     src/mds/archive/OpticalArchiveManager.cpp
-    src/mds/gc/GcManager.cpp
     src/mds/service/MdsServiceImpl.cpp
     src/mds/server/mds_server.cpp
 )
@@ -407,52 +493,3 @@ if(UNIX)
     endif()
 endif()
 
-add_executable(layout_gc_probe
-    src/mds/storage/MetaCodec.cpp
-    src/mds/storage/RocksMetaStore.cpp
-    src/mds/tools/layout_gc_probe.cpp
-)
-set_target_properties(layout_gc_probe PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF
-)
-target_include_directories(layout_gc_probe
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${GFLAGS_INCLUDE_PATH}
-        ${ROCKSDB_ROOT}/include
-        ${CMAKE_CURRENT_BINARY_DIR}
-)
-target_link_libraries(layout_gc_probe
-    PRIVATE
-        zb_proto
-        ${GFLAGS_LIBRARY}
-        ${CMAKE_THREAD_LIBS_INIT}
-        ${ROCKSDB_TARGET}
-)
-
-add_executable(layout_consistency_check
-    src/mds/storage/MetaCodec.cpp
-    src/mds/storage/RocksMetaStore.cpp
-    src/mds/tools/layout_consistency_check.cpp
-)
-set_target_properties(layout_consistency_check PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF
-)
-target_include_directories(layout_consistency_check
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${GFLAGS_INCLUDE_PATH}
-        ${ROCKSDB_ROOT}/include
-        ${CMAKE_CURRENT_BINARY_DIR}
-)
-target_link_libraries(layout_consistency_check
-    PRIVATE
-        zb_proto
-        ${GFLAGS_LIBRARY}
-        ${CMAKE_THREAD_LIBS_INIT}
-        ${ROCKSDB_TARGET}
-)

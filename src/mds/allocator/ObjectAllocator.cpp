@@ -24,6 +24,22 @@ bool ObjectAllocator::AllocateObjectByPg(uint32_t replica,
                                          uint64_t epoch,
                                          std::vector<zb::rpc::ReplicaLocation>* out,
                                          std::string* error) {
+    return AllocateObjectByPgWithType(replica,
+                                      object_id,
+                                      epoch,
+                                      NodeType::kReal,
+                                      false,
+                                      out,
+                                      error);
+}
+
+bool ObjectAllocator::AllocateObjectByPgWithType(uint32_t replica,
+                                                 const std::string& object_id,
+                                                 uint64_t epoch,
+                                                 NodeType required_type,
+                                                 bool strict_type,
+                                                 std::vector<zb::rpc::ReplicaLocation>* out,
+                                                 std::string* error) {
     if (!out || replica == 0) {
         if (error) {
             *error = "invalid allocate arguments";
@@ -61,8 +77,10 @@ bool ObjectAllocator::AllocateObjectByPg(uint32_t replica,
 
     out->clear();
     out->reserve(replica);
-    for (size_t i = 0; i < replica; ++i) {
-        const auto& member = pg_set.members[i];
+    for (const auto& member : pg_set.members) {
+        if (strict_type && member.node_type != required_type) {
+            continue;
+        }
         zb::rpc::ReplicaLocation location;
         location.set_node_id(member.node_id);
         location.set_node_address(member.node_address);
@@ -78,8 +96,60 @@ bool ObjectAllocator::AllocateObjectByPg(uint32_t replica,
         location.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
         location.set_replica_state(zb::rpc::REPLICA_READY);
         out->push_back(std::move(location));
+        if (out->size() >= replica) {
+            break;
+        }
+    }
+    if (!strict_type && out->size() < replica) {
+        for (const auto& member : pg_set.members) {
+            bool exists = false;
+            for (const auto& current : *out) {
+                if (current.node_id() == member.node_id() && current.disk_id() == member.disk_id()) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (exists) {
+                continue;
+            }
+            zb::rpc::ReplicaLocation location;
+            location.set_node_id(member.node_id);
+            location.set_node_address(member.node_address);
+            location.set_disk_id(member.disk_id);
+            location.set_object_id(object_id);
+            location.set_group_id(member.group_id);
+            location.set_epoch(member.epoch);
+            location.set_primary_node_id(member.primary_node_id);
+            location.set_primary_address(member.primary_address);
+            location.set_secondary_node_id(member.secondary_node_id);
+            location.set_secondary_address(member.secondary_address);
+            location.set_sync_ready(member.sync_ready);
+            location.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+            location.set_replica_state(zb::rpc::REPLICA_READY);
+            out->push_back(std::move(location));
+            if (out->size() >= replica) {
+                break;
+            }
+        }
+    }
+    if (out->size() < replica) {
+        if (error) {
+            if (strict_type) {
+                *error = "insufficient replicas for required node type";
+            } else {
+                *error = "insufficient replicas after placement filter";
+            }
+        }
+        return false;
     }
     return true;
+}
+
+bool ObjectAllocator::ResolveNodeAddress(const std::string& node_id, std::string* address) const {
+    if (!cache_ || node_id.empty() || !address) {
+        return false;
+    }
+    return cache_->ResolveNodeAddress(node_id, address);
 }
 
 void ObjectAllocator::SetPgManager(PGManager* pg_manager) {

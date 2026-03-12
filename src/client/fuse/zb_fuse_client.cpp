@@ -7,58 +7,52 @@
 #include <brpc/controller.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <condition_variable>
 #include <cctype>
 #include <cstring>
-#include <deque>
+#include <ctime>
+#include <fcntl.h>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "mds.pb.h"
 #include "real_node.pb.h"
+#include "scheduler.pb.h"
 
 DEFINE_string(mds, "127.0.0.1:9000", "MDS endpoint");
+DEFINE_string(scheduler, "127.0.0.1:9100", "Scheduler endpoint for node-id address resolution");
+DEFINE_uint32(cluster_view_refresh_ms, 2000, "Scheduler cluster-view refresh interval in ms");
+DEFINE_uint32(cluster_view_ttl_ms, 10000, "Max tolerated staleness of scheduler view in ms");
 DEFINE_uint32(default_replica, 1, "Default replica for create");
 DEFINE_uint64(default_object_unit_size, 4194304, "Default object unit size for create");
 DEFINE_int32(timeout_ms, 3000, "RPC timeout in ms");
 DEFINE_int32(max_retry, 0, "RPC max retry");
-DEFINE_int32(repair_max_retry, 8, "Max retry count for asynchronous replica repair");
-DEFINE_int32(repair_retry_interval_ms, 500, "Base retry interval(ms) for asynchronous replica repair");
-DEFINE_int32(repair_max_queue, 10000, "Max in-memory queue size for asynchronous replica repair");
 
 namespace zb::client::fuse_client {
 
 namespace {
 
-std::atomic<uint64_t> g_layout_plan_source_layout{0};
-std::atomic<uint64_t> g_layout_plan_source_optical{0};
-
-void RecordPlanSource(zb::rpc::ReadPlanSource source) {
-    switch (source) {
-        case zb::rpc::READ_PLAN_SOURCE_LAYOUT:
-            g_layout_plan_source_layout.fetch_add(1, std::memory_order_relaxed);
-            break;
-        case zb::rpc::READ_PLAN_SOURCE_OPTICAL:
-            g_layout_plan_source_optical.fetch_add(1, std::memory_order_relaxed);
-            break;
-        default:
-            break;
-    }
-}
+constexpr const char* kReadOnlyOpticalMessage = "READ_ONLY_OPTICAL";
+constexpr const char* kNoSpaceRealPolicyMessage = "NO_SPACE_REAL_POLICY";
 
 int StatusToErrno(const zb::rpc::MdsStatus& status) {
+    if (status.message() == kNoSpaceRealPolicyMessage) {
+        return ENOSPC;
+    }
     switch (status.code()) {
         case zb::rpc::MDS_OK:
             return 0;
         case zb::rpc::MDS_INVALID_ARGUMENT:
+            if (status.message() == kReadOnlyOpticalMessage) {
+                return EROFS;
+            }
             return EINVAL;
         case zb::rpc::MDS_NOT_FOUND:
             return ENOENT;
@@ -73,27 +67,23 @@ int StatusToErrno(const zb::rpc::MdsStatus& status) {
     }
 }
 
-std::string BuildWriteOpId(uint64_t inode_id, uint64_t offset, uint64_t size, const char* tag) {
-    static std::atomic<uint64_t> seq{0};
-    const uint64_t now_ms = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count());
-    const uint64_t id = seq.fetch_add(1, std::memory_order_relaxed) + 1;
-    std::string op_id = "op";
-    op_id.append("-");
-    op_id.append(tag ? tag : "write");
-    op_id.append("-");
-    op_id.append(std::to_string(inode_id));
-    op_id.append("-");
-    op_id.append(std::to_string(offset));
-    op_id.append("-");
-    op_id.append(std::to_string(size));
-    op_id.append("-");
-    op_id.append(std::to_string(now_ms));
-    op_id.append("-");
-    op_id.append(std::to_string(id));
-    return op_id;
+int StatusToErrno(const zb::rpc::Status& status) {
+    switch (status.code()) {
+        case zb::rpc::STATUS_OK:
+            return 0;
+        case zb::rpc::STATUS_INVALID_ARGUMENT:
+            return EINVAL;
+        case zb::rpc::STATUS_NOT_FOUND:
+            return ENOENT;
+        case zb::rpc::STATUS_IO_ERROR:
+            if (status.message() == "VERSION_MISMATCH") {
+                return EAGAIN;
+            }
+            return EIO;
+        case zb::rpc::STATUS_INTERNAL_ERROR:
+        default:
+            return EIO;
+    }
 }
 
 void FillStat(const zb::rpc::InodeAttr& attr, struct stat* st) {
@@ -116,6 +106,162 @@ void FillStat(const zb::rpc::InodeAttr& attr, struct stat* st) {
 
 std::string ReplicaObjectId(const zb::rpc::ReplicaLocation& replica) {
     return replica.object_id();
+}
+
+constexpr uint32_t kAnchorMaskDisk = 1U << 0U;
+constexpr uint32_t kAnchorMaskOptical = 1U << 1U;
+
+bool IsWriteOpenFlags(uint32_t flags) {
+    const int access_mode = static_cast<int>(flags) & O_ACCMODE;
+    if (access_mode == O_WRONLY || access_mode == O_RDWR) {
+        return true;
+    }
+#ifdef O_TRUNC
+    if ((flags & static_cast<uint32_t>(O_TRUNC)) != 0U) {
+        return true;
+    }
+#endif
+#ifdef O_APPEND
+    if ((flags & static_cast<uint32_t>(O_APPEND)) != 0U) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+bool HasOpticalAnchor(const zb::rpc::FileAnchorSet& anchors) {
+    const bool mask_has_optical = (anchors.anchor_mask() & kAnchorMaskOptical) != 0U;
+    const auto& optical = anchors.optical_anchor();
+    const bool lite_has_optical = !optical.node_id().empty() && !optical.disk_id().empty();
+    return mask_has_optical || lite_has_optical;
+}
+
+zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::FileAnchorLite& lite) {
+    zb::rpc::ReplicaLocation replica;
+    replica.set_node_id(lite.node_id());
+    replica.set_disk_id(lite.disk_id());
+    replica.set_object_id(lite.object_id());
+    replica.set_size(lite.size());
+    replica.set_storage_tier(lite.storage_tier());
+    replica.set_replica_state(lite.replica_state());
+    replica.set_image_id(lite.image_id());
+    replica.set_image_offset(lite.image_offset());
+    replica.set_image_length(lite.image_length());
+    return replica;
+}
+
+bool SelectAnchorForIo(const zb::rpc::FileAnchorSet& anchors, zb::rpc::ReplicaLocation* anchor) {
+    if (!anchor) {
+        return false;
+    }
+
+    auto usable = [](const zb::rpc::FileAnchorLite& lite) {
+        return !lite.node_id().empty() && !lite.disk_id().empty();
+    };
+
+    const bool has_disk = ((anchors.anchor_mask() & kAnchorMaskDisk) != 0U && usable(anchors.disk_anchor())) ||
+                          usable(anchors.disk_anchor());
+    const bool has_optical = ((anchors.anchor_mask() & kAnchorMaskOptical) != 0U && usable(anchors.optical_anchor())) ||
+                             usable(anchors.optical_anchor());
+
+    if (has_disk) {
+        *anchor = ToReplicaLocation(anchors.disk_anchor());
+        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+        if (anchor->replica_state() == zb::rpc::REPLICA_PENDING ||
+            anchor->replica_state() == zb::rpc::REPLICA_DEGRADED) {
+            anchor->set_replica_state(zb::rpc::REPLICA_READY);
+        }
+        return true;
+    }
+    if (anchors.primary_tier() == zb::rpc::STORAGE_TIER_OPTICAL && has_optical) {
+        *anchor = ToReplicaLocation(anchors.optical_anchor());
+        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
+        if (anchor->replica_state() == zb::rpc::REPLICA_PENDING ||
+            anchor->replica_state() == zb::rpc::REPLICA_DEGRADED) {
+            anchor->set_replica_state(zb::rpc::REPLICA_READY);
+        }
+        return true;
+    }
+    if (has_optical) {
+        *anchor = ToReplicaLocation(anchors.optical_anchor());
+        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
+        if (anchor->replica_state() == zb::rpc::REPLICA_PENDING ||
+            anchor->replica_state() == zb::rpc::REPLICA_DEGRADED) {
+            anchor->set_replica_state(zb::rpc::REPLICA_READY);
+        }
+        return true;
+    }
+    return false;
+}
+
+std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index) {
+    return "obj-" + std::to_string(inode_id) + "-" + std::to_string(object_index);
+}
+
+std::string BaseNodeIdFromVirtual(const std::string& node_id) {
+    const size_t pos = node_id.rfind("-v");
+    if (pos == std::string::npos || pos + 2 >= node_id.size()) {
+        return node_id;
+    }
+    for (size_t i = pos + 2; i < node_id.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(node_id[i]))) {
+            return node_id;
+        }
+    }
+    return node_id.substr(0, pos);
+}
+
+zb::rpc::ReplicaLocation BuildObjectReplicaFromAnchor(const zb::rpc::ReplicaLocation& anchor,
+                                                      uint64_t inode_id,
+                                                      uint32_t object_index) {
+    zb::rpc::ReplicaLocation replica = anchor;
+    replica.set_object_id(BuildStableObjectId(inode_id, object_index));
+    if (replica.storage_tier() != zb::rpc::STORAGE_TIER_OPTICAL) {
+        replica.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+    }
+    replica.set_replica_state(zb::rpc::REPLICA_READY);
+    return replica;
+}
+
+zb::rpc::ReplicaLocation BuildObjectReplicaFromAnchor(const zb::rpc::ReplicaLocation& anchor,
+                                                      const std::string& object_id) {
+    zb::rpc::ReplicaLocation replica = anchor;
+    replica.set_object_id(object_id);
+    if (replica.storage_tier() != zb::rpc::STORAGE_TIER_OPTICAL) {
+        replica.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+    }
+    replica.set_replica_state(zb::rpc::REPLICA_READY);
+    return replica;
+}
+
+void BuildObjectSlices(uint64_t inode_id,
+                       uint64_t file_offset,
+                       uint64_t length,
+                       uint64_t object_unit_size,
+                       const std::string& disk_id,
+                       std::vector<zb::rpc::FileObjectSlice>* slices) {
+    if (!slices || object_unit_size == 0 || length == 0) {
+        return;
+    }
+    const uint64_t start_index = file_offset / object_unit_size;
+    const uint64_t end_index = (file_offset + length - 1) / object_unit_size;
+    slices->reserve(slices->size() + static_cast<size_t>(end_index - start_index + 1));
+    for (uint64_t index = start_index; index <= end_index; ++index) {
+        const uint64_t object_begin = index * object_unit_size;
+        const uint64_t object_end = object_begin + object_unit_size;
+        const uint64_t slice_begin = std::max<uint64_t>(file_offset, object_begin);
+        const uint64_t slice_end = std::min<uint64_t>(file_offset + length, object_end);
+        if (slice_begin >= slice_end) {
+            continue;
+        }
+        zb::rpc::FileObjectSlice slice;
+        slice.set_object_index(static_cast<uint32_t>(index));
+        slice.set_object_id(BuildStableObjectId(inode_id, static_cast<uint32_t>(index)));
+        slice.set_disk_id(disk_id);
+        slice.set_object_offset(slice_begin - object_begin);
+        slice.set_length(slice_end - slice_begin);
+        slices->push_back(std::move(slice));
+    }
 }
 
 class MdsClient {
@@ -178,7 +324,12 @@ public:
         return true;
     }
 
-    bool Open(const char* path, uint32_t flags, uint64_t* handle, zb::rpc::InodeAttr* attr, zb::rpc::MdsStatus* status) {
+    bool Open(const char* path,
+              uint32_t flags,
+              uint64_t* handle,
+              zb::rpc::InodeAttr* attr,
+              zb::rpc::ReplicaLocation* file_anchor,
+              zb::rpc::MdsStatus* status) {
         zb::rpc::OpenRequest request;
         request.set_path(path);
         request.set_flags(flags);
@@ -204,6 +355,15 @@ public:
         if (attr) {
             *attr = reply.attr();
         }
+        if (file_anchor) {
+            if (!SelectAnchorForIo(reply.file_anchor(), file_anchor)) {
+                if (status) {
+                    status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+                    status->set_message("Open returned empty file_anchor set");
+                }
+                return false;
+            }
+        }
         return true;
     }
 
@@ -226,8 +386,13 @@ public:
         return reply.status().code() == zb::rpc::MDS_OK;
     }
 
-    bool Create(const char* path, uint32_t mode, uint32_t uid, uint32_t gid,
-                zb::rpc::InodeAttr* attr, zb::rpc::MdsStatus* status) {
+    bool Create(const char* path,
+                uint32_t mode,
+                uint32_t uid,
+                uint32_t gid,
+                zb::rpc::InodeAttr* attr,
+                zb::rpc::ReplicaLocation* file_anchor,
+                zb::rpc::MdsStatus* status) {
         zb::rpc::CreateRequest request;
         request.set_path(path);
         request.set_mode(mode);
@@ -253,6 +418,15 @@ public:
         }
         if (attr) {
             *attr = reply.attr();
+        }
+        if (file_anchor) {
+            if (!SelectAnchorForIo(reply.file_anchor(), file_anchor)) {
+                if (status) {
+                    status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+                    status->set_message("Create returned empty file_anchor set");
+                }
+                return false;
+            }
         }
         return true;
     }
@@ -369,200 +543,14 @@ public:
         return reply.status().code() == zb::rpc::MDS_OK;
     }
 
-    bool AllocateWrite(uint64_t inode_id, uint64_t offset, uint64_t size, zb::rpc::FileLayout* layout,
-                       zb::rpc::MdsStatus* status) {
-        zb::rpc::AllocateWriteRequest request;
-        request.set_inode_id(inode_id);
-        request.set_offset(offset);
-        request.set_size(size);
-        zb::rpc::AllocateWriteReply reply;
-        brpc::Controller cntl;
-        stub_.AllocateWrite(&cntl, &request, &reply, nullptr);
-        if (cntl.Failed()) {
-            if (status) {
-                status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
-                status->set_message(cntl.ErrorText());
-            }
-            return false;
-        }
-        if (status) {
-            *status = reply.status();
-        }
-        if (reply.status().code() != zb::rpc::MDS_OK) {
-            return false;
-        }
-        if (layout) {
-            *layout = reply.layout();
-        }
-        return true;
-    }
-
-    bool GetLayout(uint64_t inode_id,
-                   uint64_t offset,
-                   uint64_t size,
-                   zb::rpc::FileLayout* layout,
-                   zb::rpc::OpticalReadPlan* optical_plan,
-                   zb::rpc::ReadPlanSource* plan_source,
-                   zb::rpc::MdsStatus* status) {
-        zb::rpc::GetLayoutRequest request;
-        request.set_inode_id(inode_id);
-        request.set_offset(offset);
-        request.set_size(size);
-        zb::rpc::GetLayoutReply reply;
-        brpc::Controller cntl;
-        stub_.GetLayout(&cntl, &request, &reply, nullptr);
-        if (cntl.Failed()) {
-            if (status) {
-                status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
-                status->set_message(cntl.ErrorText());
-            }
-            return false;
-        }
-        if (status) {
-            *status = reply.status();
-        }
-        if (reply.status().code() != zb::rpc::MDS_OK) {
-            return false;
-        }
-        if (layout) {
-            *layout = reply.layout();
-        }
-        if (optical_plan) {
-            *optical_plan = reply.optical_plan();
-        }
-        if (plan_source) {
-            *plan_source = reply.plan_source();
-        }
-        return true;
-    }
-
-    bool GetLayoutRoot(uint64_t inode_id,
-                       zb::rpc::LayoutRoot* root,
-                       zb::rpc::MdsStatus* status) {
-        zb::rpc::GetLayoutRootRequest request;
-        request.set_inode_id(inode_id);
-        zb::rpc::GetLayoutRootReply reply;
-        brpc::Controller cntl;
-        stub_.GetLayoutRoot(&cntl, &request, &reply, nullptr);
-        if (cntl.Failed()) {
-            SetRpcFailureStatus(cntl, status);
-            return false;
-        }
-        if (status) {
-            *status = reply.status();
-        }
-        if (reply.status().code() != zb::rpc::MDS_OK) {
-            return false;
-        }
-        if (root) {
-            *root = reply.root();
-        }
-        if (reply.root().inode_id() != 0) {
-            UpdateCachedEpoch(reply.root().inode_id(), reply.root().epoch());
-        }
-        return true;
-    }
-
-    bool ResolveLayout(uint64_t inode_id,
-                       uint64_t offset,
-                       uint64_t size,
-                       zb::rpc::ResolveLayoutReply* out,
-                       zb::rpc::MdsStatus* status) {
-        if (!out) {
-            if (status) {
-                status->set_code(zb::rpc::MDS_INVALID_ARGUMENT);
-                status->set_message("ResolveLayout output is null");
-            }
-            return false;
-        }
-        zb::rpc::ResolveLayoutRequest request;
-        request.set_inode_id(inode_id);
-        request.set_offset(offset);
-        request.set_size(size);
-        if (uint64_t cached_epoch = GetCachedEpoch(inode_id); cached_epoch > 0) {
-            (void)cached_epoch;
-        }
-
-        zb::rpc::ResolveLayoutReply reply;
-        brpc::Controller cntl;
-        stub_.ResolveLayout(&cntl, &request, &reply, nullptr);
-        if (cntl.Failed()) {
-            SetRpcFailureStatus(cntl, status);
-            return false;
-        }
-        if (reply.status().code() == zb::rpc::MDS_OK) {
-            *out = reply;
-            if (status) {
-                *status = reply.status();
-            }
-            UpdateCachedEpoch(inode_id, reply.root().epoch());
-            return true;
-        }
-
-        if (IsStaleEpochStatus(reply.status())) {
-            InvalidateCachedEpoch(inode_id);
-            zb::rpc::LayoutRoot refreshed_root;
-            zb::rpc::MdsStatus refresh_status;
-            if (GetLayoutRoot(inode_id, &refreshed_root, &refresh_status)) {
-                zb::rpc::ResolveLayoutReply retry_reply;
-                brpc::Controller retry_cntl;
-                stub_.ResolveLayout(&retry_cntl, &request, &retry_reply, nullptr);
-                if (!retry_cntl.Failed()) {
-                    if (status) {
-                        *status = retry_reply.status();
-                    }
-                    if (retry_reply.status().code() == zb::rpc::MDS_OK) {
-                        *out = retry_reply;
-                        UpdateCachedEpoch(inode_id, retry_reply.root().epoch());
-                        return true;
-                    }
-                } else {
-                    SetRpcFailureStatus(retry_cntl, status);
-                    return false;
-                }
-            }
-        }
-
-        if (status) {
-            *status = reply.status();
-        }
-        return false;
-    }
-
-    bool CommitLayoutRoot(uint64_t inode_id,
-                          uint64_t expected_layout_version,
-                          uint64_t new_size,
-                          const std::string& op_id,
-                          const zb::rpc::LayoutRoot* base_root,
-                          zb::rpc::LayoutRoot* committed_root,
+    bool GetFileAnchorSet(uint64_t inode_id,
+                          zb::rpc::FileAnchorSet* anchor_set,
                           zb::rpc::MdsStatus* status) {
-        zb::rpc::CommitLayoutRootRequest request;
+        zb::rpc::GetFileAnchorRequest request;
         request.set_inode_id(inode_id);
-        request.set_expected_layout_version(expected_layout_version);
-        request.set_update_inode_size(true);
-        request.set_new_size(new_size);
-        request.set_op_id(op_id);
-
-        zb::rpc::LayoutRoot* root = request.mutable_root();
-        root->set_inode_id(inode_id);
-        root->set_layout_version(expected_layout_version > 0 ? expected_layout_version + 1 : 1);
-        root->set_file_size(new_size);
-        root->set_update_ts(static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count()));
-        if (base_root) {
-            if (!base_root->layout_root_id().empty()) {
-                root->set_layout_root_id(base_root->layout_root_id());
-            }
-            root->set_epoch(base_root->epoch());
-        } else {
-            root->set_epoch(GetCachedEpoch(inode_id));
-        }
-
-        zb::rpc::CommitLayoutRootReply reply;
+        zb::rpc::GetFileAnchorReply reply;
         brpc::Controller cntl;
-        stub_.CommitLayoutRoot(&cntl, &request, &reply, nullptr);
+        stub_.GetFileAnchor(&cntl, &request, &reply, nullptr);
         if (cntl.Failed()) {
             SetRpcFailureStatus(cntl, status);
             return false;
@@ -571,36 +559,63 @@ public:
             *status = reply.status();
         }
         if (reply.status().code() != zb::rpc::MDS_OK) {
-            if (IsStaleEpochStatus(reply.status())) {
-                InvalidateCachedEpoch(inode_id);
-            }
             return false;
         }
-        if (committed_root) {
-            *committed_root = reply.root();
+        if (anchor_set) {
+            *anchor_set = reply.anchor();
         }
-        UpdateCachedEpoch(inode_id, reply.root().epoch());
         return true;
     }
 
-    bool CommitWrite(uint64_t inode_id, uint64_t new_size, zb::rpc::MdsStatus* status) {
-        zb::rpc::CommitWriteRequest request;
-        request.set_inode_id(inode_id);
-        request.set_new_size(new_size);
-        zb::rpc::CommitWriteReply reply;
-        brpc::Controller cntl;
-        stub_.CommitWrite(&cntl, &request, &reply, nullptr);
-        if (cntl.Failed()) {
-            if (status) {
-                status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
-                status->set_message(cntl.ErrorText());
+    bool GetFileAnchor(uint64_t inode_id,
+                       zb::rpc::ReplicaLocation* anchor,
+                       zb::rpc::MdsStatus* status) {
+        zb::rpc::FileAnchorSet anchor_set;
+        if (!GetFileAnchorSet(inode_id, &anchor_set, status)) {
+            return false;
+        }
+        if (anchor) {
+            if (!SelectAnchorForIo(anchor_set, anchor)) {
+                if (status) {
+                    status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+                    status->set_message("GetFileAnchor returned empty anchor set");
+                }
+                return false;
             }
+        }
+        return true;
+    }
+
+    bool UpdateInodeStat(uint64_t inode_id,
+                         uint64_t file_size,
+                         uint64_t object_unit_size,
+                         uint64_t version,
+                         uint64_t mtime_sec,
+                         zb::rpc::InodeAttr* attr,
+                         zb::rpc::MdsStatus* status) {
+        zb::rpc::UpdateInodeStatRequest request;
+        request.set_inode_id(inode_id);
+        request.set_file_size(file_size);
+        request.set_object_unit_size(object_unit_size);
+        request.set_version(version);
+        request.set_mtime(mtime_sec);
+        zb::rpc::UpdateInodeStatReply reply;
+        brpc::Controller cntl;
+        stub_.UpdateInodeStat(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            SetRpcFailureStatus(cntl, status);
             return false;
         }
         if (status) {
             *status = reply.status();
         }
-        return reply.status().code() == zb::rpc::MDS_OK;
+        if (reply.status().code() != zb::rpc::MDS_OK) {
+            return false;
+        }
+        if (attr) {
+            *attr = reply.attr();
+        }
+        return true;
     }
 
 private:
@@ -612,64 +627,65 @@ private:
         status->set_message(cntl.ErrorText());
     }
 
-    static bool IsStaleEpochStatus(const zb::rpc::MdsStatus& status) {
-        if (status.code() == zb::rpc::MDS_STALE_EPOCH) {
-            return true;
-        }
-        std::string lower = status.message();
-        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-        });
-        return lower.find("stale epoch") != std::string::npos ||
-               lower.find("layout version mismatch") != std::string::npos;
-    }
-
-    void UpdateCachedEpoch(uint64_t inode_id, uint64_t epoch) {
-        if (inode_id == 0 || epoch == 0) {
-            return;
-        }
-        std::lock_guard<std::mutex> lock(epoch_mu_);
-        inode_epoch_cache_[inode_id] = epoch;
-    }
-
-    void InvalidateCachedEpoch(uint64_t inode_id) {
-        if (inode_id == 0) {
-            return;
-        }
-        std::lock_guard<std::mutex> lock(epoch_mu_);
-        inode_epoch_cache_.erase(inode_id);
-    }
-
-    uint64_t GetCachedEpoch(uint64_t inode_id) const {
-        if (inode_id == 0) {
-            return 0;
-        }
-        std::lock_guard<std::mutex> lock(epoch_mu_);
-        auto it = inode_epoch_cache_.find(inode_id);
-        return it == inode_epoch_cache_.end() ? 0 : it->second;
-    }
-
     brpc::Channel channel_;
     zb::rpc::MdsService_Stub stub_{&channel_};
-    mutable std::mutex epoch_mu_;
-    std::unordered_map<uint64_t, uint64_t> inode_epoch_cache_;
+};
+
+class SchedulerClient {
+public:
+    bool Init(const std::string& endpoint) {
+        brpc::ChannelOptions options;
+        options.protocol = "baidu_std";
+        options.timeout_ms = FLAGS_timeout_ms;
+        options.max_retry = FLAGS_max_retry;
+        return channel_.Init(endpoint.c_str(), &options) == 0;
+    }
+
+    bool GetClusterView(uint64_t min_generation,
+                        std::vector<zb::rpc::NodeView>* nodes,
+                        uint64_t* generation,
+                        std::string* error) {
+        zb::rpc::GetClusterViewRequest request;
+        request.set_min_generation(min_generation);
+        zb::rpc::GetClusterViewReply reply;
+        brpc::Controller cntl;
+        stub_.GetClusterView(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            if (error) {
+                *error = cntl.ErrorText();
+            }
+            return false;
+        }
+        if (reply.status().code() != zb::rpc::SCHED_OK) {
+            if (error) {
+                *error = reply.status().message();
+            }
+            return false;
+        }
+        if (nodes) {
+            nodes->assign(reply.nodes().begin(), reply.nodes().end());
+        }
+        if (generation) {
+            *generation = reply.generation();
+        }
+        return true;
+    }
+
+private:
+    brpc::Channel channel_;
+    zb::rpc::SchedulerService_Stub stub_{&channel_};
 };
 
 class DataNodeClient {
 public:
+    using NodeAddressResolver = std::function<bool(const std::string&, std::string*)>;
+
+    void SetNodeAddressResolver(NodeAddressResolver resolver) {
+        resolver_ = std::move(resolver);
+    }
+
     bool Write(const zb::rpc::ReplicaLocation& replica, uint64_t offset, const std::string& data, std::string* error) {
-        std::vector<std::string> addresses;
-        if (!replica.primary_address().empty()) {
-            addresses.push_back(replica.primary_address());
-        }
-        if (!replica.node_address().empty() &&
-            std::find(addresses.begin(), addresses.end(), replica.node_address()) == addresses.end()) {
-            addresses.push_back(replica.node_address());
-        }
-        if (!replica.secondary_address().empty() &&
-            std::find(addresses.begin(), addresses.end(), replica.secondary_address()) == addresses.end()) {
-            addresses.push_back(replica.secondary_address());
-        }
+        std::vector<std::string> addresses = CollectAddresses(replica, resolver_);
         if (addresses.empty()) {
             if (error) {
                 *error = "No data node address in replica";
@@ -711,18 +727,7 @@ public:
 
     bool Read(const zb::rpc::ReplicaLocation& replica, uint64_t offset, uint64_t size, std::string* out,
               std::string* error) {
-        std::vector<std::string> addresses;
-        if (!replica.primary_address().empty()) {
-            addresses.push_back(replica.primary_address());
-        }
-        if (!replica.node_address().empty() &&
-            std::find(addresses.begin(), addresses.end(), replica.node_address()) == addresses.end()) {
-            addresses.push_back(replica.node_address());
-        }
-        if (!replica.secondary_address().empty() &&
-            std::find(addresses.begin(), addresses.end(), replica.secondary_address()) == addresses.end()) {
-            addresses.push_back(replica.secondary_address());
-        }
+        std::vector<std::string> addresses = CollectAddresses(replica, resolver_);
         if (addresses.empty()) {
             if (error) {
                 *error = "No data node address in replica";
@@ -743,6 +748,11 @@ public:
             request.set_object_id(ReplicaObjectId(replica));
             request.set_offset(offset);
             request.set_size(size);
+            if (!replica.image_id().empty()) {
+                request.set_image_id(replica.image_id());
+                request.set_image_offset(replica.image_offset());
+                request.set_image_length(replica.image_length());
+            }
             zb::rpc::ReadObjectReply reply;
             brpc::Controller cntl;
             stub.ReadObject(&cntl, &request, &reply, nullptr);
@@ -764,55 +774,225 @@ public:
         return false;
     }
 
-    bool ReadArchivedFile(const zb::rpc::OpticalReadPlan& plan,
-                          uint64_t offset,
-                          uint64_t size,
-                          std::string* out,
-                          std::string* error) {
-        if (!plan.enabled() || plan.node_address().empty() || plan.disc_id().empty()) {
-            if (error) {
-                *error = "invalid optical read plan";
-            }
-            return false;
-        }
-        brpc::Channel* channel = GetChannel(plan.node_address());
-        if (!channel) {
-            if (error) {
-                *error = "Failed to init channel: " + plan.node_address();
+    bool ResolveFileRead(const zb::rpc::ReplicaLocation& replica,
+                         uint64_t inode_id,
+                         uint64_t offset,
+                         uint64_t size,
+                         uint64_t object_unit_size_hint,
+                         zb::rpc::FileMeta* meta,
+                         std::vector<zb::rpc::FileObjectSlice>* slices,
+                         zb::rpc::Status* status) {
+        std::vector<std::string> addresses = CollectAddresses(replica, resolver_);
+        if (addresses.empty()) {
+            if (status) {
+                status->set_code(zb::rpc::STATUS_INVALID_ARGUMENT);
+                status->set_message("No data node address in replica");
             }
             return false;
         }
 
-        zb::rpc::RealNodeService_Stub stub(channel);
-        zb::rpc::ReadArchivedFileRequest request;
-        request.set_disc_id(plan.disc_id());
-        request.set_inode_id(plan.inode_id());
-        request.set_file_id(plan.file_id());
-        request.set_offset(offset);
-        request.set_size(size);
+        zb::rpc::Status last_status;
+        last_status.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+        last_status.set_message("Unknown ResolveFileRead error");
+        for (const auto& address : addresses) {
+            brpc::Channel* channel = GetChannel(address);
+            if (!channel) {
+                last_status.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+                last_status.set_message("Failed to init channel: " + address);
+                continue;
+            }
+            zb::rpc::RealNodeService_Stub stub(channel);
+            zb::rpc::ResolveFileReadRequest request;
+            request.set_inode_id(inode_id);
+            request.set_offset(offset);
+            request.set_size(size);
+            request.set_disk_id(replica.disk_id());
+            request.set_object_unit_size_hint(object_unit_size_hint);
+            zb::rpc::ResolveFileReadReply reply;
+            brpc::Controller cntl;
+            stub.ResolveFileRead(&cntl, &request, &reply, nullptr);
+            if (cntl.Failed()) {
+                last_status.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+                last_status.set_message(cntl.ErrorText());
+                continue;
+            }
+            if (reply.status().code() == zb::rpc::STATUS_OK) {
+                if (meta) {
+                    *meta = reply.meta();
+                }
+                if (slices) {
+                    slices->assign(reply.slices().begin(), reply.slices().end());
+                }
+                if (status) {
+                    *status = reply.status();
+                }
+                return true;
+            }
+            last_status = reply.status();
+        }
+        if (status) {
+            *status = last_status;
+        }
+        return false;
+    }
 
-        zb::rpc::ReadArchivedFileReply reply;
-        brpc::Controller cntl;
-        stub.ReadArchivedFile(&cntl, &request, &reply, nullptr);
-        if (cntl.Failed()) {
-            if (error) {
-                *error = cntl.ErrorText();
+    bool AllocateFileWrite(const zb::rpc::ReplicaLocation& replica,
+                           uint64_t inode_id,
+                           uint64_t offset,
+                           uint64_t size,
+                           uint64_t object_unit_size_hint,
+                           zb::rpc::FileMeta* meta,
+                           std::string* txid,
+                           std::vector<zb::rpc::FileObjectSlice>* slices,
+                           zb::rpc::Status* status) {
+        std::vector<std::string> addresses = CollectAddresses(replica, resolver_);
+        if (addresses.empty()) {
+            if (status) {
+                status->set_code(zb::rpc::STATUS_INVALID_ARGUMENT);
+                status->set_message("No data node address in replica");
             }
             return false;
         }
-        if (reply.status().code() != zb::rpc::STATUS_OK) {
-            if (error) {
-                *error = reply.status().message();
+
+        zb::rpc::Status last_status;
+        last_status.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+        last_status.set_message("Unknown AllocateFileWrite error");
+        for (const auto& address : addresses) {
+            brpc::Channel* channel = GetChannel(address);
+            if (!channel) {
+                last_status.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+                last_status.set_message("Failed to init channel: " + address);
+                continue;
+            }
+            zb::rpc::RealNodeService_Stub stub(channel);
+            zb::rpc::AllocateFileWriteRequest request;
+            request.set_inode_id(inode_id);
+            request.set_offset(offset);
+            request.set_size(size);
+            request.set_disk_id(replica.disk_id());
+            request.set_object_unit_size_hint(object_unit_size_hint);
+            zb::rpc::AllocateFileWriteReply reply;
+            brpc::Controller cntl;
+            stub.AllocateFileWrite(&cntl, &request, &reply, nullptr);
+            if (cntl.Failed()) {
+                last_status.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+                last_status.set_message(cntl.ErrorText());
+                continue;
+            }
+            if (reply.status().code() == zb::rpc::STATUS_OK) {
+                if (meta) {
+                    *meta = reply.meta();
+                }
+                if (txid) {
+                    *txid = reply.txid();
+                }
+                if (slices) {
+                    slices->assign(reply.slices().begin(), reply.slices().end());
+                }
+                if (status) {
+                    *status = reply.status();
+                }
+                return true;
+            }
+            last_status = reply.status();
+        }
+        if (status) {
+            *status = last_status;
+        }
+        return false;
+    }
+
+    bool CommitFileWrite(const zb::rpc::ReplicaLocation& replica,
+                         uint64_t inode_id,
+                         const std::string& txid,
+                         uint64_t file_size,
+                         uint64_t object_unit_size,
+                         uint64_t expected_version,
+                         bool allow_create,
+                         uint64_t mtime_sec,
+                         zb::rpc::FileMeta* meta,
+                         zb::rpc::Status* status) {
+        std::vector<std::string> addresses = CollectAddresses(replica, resolver_);
+        if (addresses.empty()) {
+            if (status) {
+                status->set_code(zb::rpc::STATUS_INVALID_ARGUMENT);
+                status->set_message("No data node address in replica");
             }
             return false;
         }
-        if (out) {
-            *out = reply.data();
+
+        zb::rpc::Status last_status;
+        last_status.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+        last_status.set_message("Unknown CommitFileWrite error");
+        for (const auto& address : addresses) {
+            brpc::Channel* channel = GetChannel(address);
+            if (!channel) {
+                last_status.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+                last_status.set_message("Failed to init channel: " + address);
+                continue;
+            }
+            zb::rpc::RealNodeService_Stub stub(channel);
+            zb::rpc::CommitFileWriteRequest request;
+            request.set_inode_id(inode_id);
+            request.set_txid(txid);
+            request.set_file_size(file_size);
+            request.set_object_unit_size(object_unit_size);
+            request.set_expected_version(expected_version);
+            request.set_allow_create(allow_create);
+            request.set_mtime_sec(mtime_sec);
+            zb::rpc::CommitFileWriteReply reply;
+            brpc::Controller cntl;
+            stub.CommitFileWrite(&cntl, &request, &reply, nullptr);
+            if (cntl.Failed()) {
+                last_status.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+                last_status.set_message(cntl.ErrorText());
+                continue;
+            }
+            if (reply.status().code() == zb::rpc::STATUS_OK) {
+                if (meta) {
+                    *meta = reply.meta();
+                }
+                if (status) {
+                    *status = reply.status();
+                }
+                return true;
+            }
+            last_status = reply.status();
         }
-        return true;
+        if (status) {
+            *status = last_status;
+        }
+        return false;
     }
 
 private:
+    static std::vector<std::string> CollectAddresses(const zb::rpc::ReplicaLocation& replica,
+                                                     const NodeAddressResolver& resolver) {
+        std::vector<std::string> addresses;
+        auto push_unique = [&addresses](const std::string& address) {
+            if (address.empty()) {
+                return;
+            }
+            if (std::find(addresses.begin(), addresses.end(), address) == addresses.end()) {
+                addresses.push_back(address);
+            }
+        };
+        auto resolve_and_push = [&resolver, &push_unique](const std::string& node_id) {
+            if (!resolver || node_id.empty()) {
+                return;
+            }
+            std::string address;
+            if (resolver(node_id, &address)) {
+                push_unique(address);
+            }
+        };
+        resolve_and_push(replica.primary_node_id());
+        resolve_and_push(replica.node_id());
+        resolve_and_push(replica.secondary_node_id());
+
+        return addresses;
+    }
+
     brpc::Channel* GetChannel(const std::string& address) {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = channels_.find(address);
@@ -834,236 +1014,381 @@ private:
 
     std::mutex mu_;
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> channels_;
-};
-
-struct ReplicaRepairTask {
-    std::string key;
-    zb::rpc::ReplicaLocation replica;
-    uint64_t offset{0};
-    std::string data;
-    uint32_t attempts{0};
-    uint64_t generation{0};
+    NodeAddressResolver resolver_;
 };
 
 struct FuseState {
-    struct LayoutCacheEntry {
+    struct InodeCacheEntry {
         uint64_t inode_id{0};
-        uint64_t layout_version{0};
+        uint64_t object_unit_size{0};
         uint64_t file_size{0};
-        zb::rpc::FileLayout layout;
+        uint64_t file_meta_version{0};
+        zb::rpc::ReplicaLocation anchor;
+        bool has_anchor{false};
     };
 
     MdsClient mds;
+    SchedulerClient scheduler;
+    bool scheduler_enabled{false};
     DataNodeClient data_nodes;
     std::mutex mu;
     std::unordered_map<uint64_t, uint64_t> handle_to_inode;
-    std::unordered_map<uint64_t, LayoutCacheEntry> inode_layout_cache;
-    std::mutex repair_mu;
-    std::condition_variable repair_cv;
-    std::deque<ReplicaRepairTask> repair_queue;
-    std::unordered_map<std::string, uint64_t> repair_generation;
-    std::atomic<bool> stop_repair{false};
-    std::thread repair_thread;
+    std::unordered_map<uint64_t, InodeCacheEntry> inode_cache;
+    std::unordered_map<std::string, std::string> node_address_cache;
+    uint64_t cluster_view_generation{0};
+    uint64_t cluster_view_update_ms{0};
 };
 
 FuseState* GetState() {
     return static_cast<FuseState*>(fuse_get_context()->private_data);
 }
 
-void InvalidateLayoutCache(FuseState* state, uint64_t inode_id) {
-    if (!state || inode_id == 0) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(state->mu);
-    state->inode_layout_cache.erase(inode_id);
+uint64_t NowMilliseconds() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
 }
 
-void UpdateLayoutCache(FuseState* state,
-                       uint64_t inode_id,
-                       const zb::rpc::LayoutRoot& root,
-                       const zb::rpc::FileLayout& layout) {
-    if (!state || inode_id == 0) {
-        return;
+bool RefreshNodeAddressCache(FuseState* state, bool force, std::string* error) {
+    if (!state || !state->scheduler_enabled) {
+        return false;
     }
-    FuseState::LayoutCacheEntry entry;
-    entry.inode_id = inode_id;
-    entry.layout_version = root.layout_version();
-    entry.file_size = root.file_size();
-    entry.layout = layout;
-    std::lock_guard<std::mutex> lock(state->mu);
-    state->inode_layout_cache[inode_id] = std::move(entry);
-}
+    const uint64_t now_ms = NowMilliseconds();
+    {
+        std::lock_guard<std::mutex> lock(state->mu);
+        const uint64_t refresh_ms = std::max<uint64_t>(1, FLAGS_cluster_view_refresh_ms);
+        if (!force && state->cluster_view_update_ms > 0 &&
+            now_ms - state->cluster_view_update_ms < refresh_ms) {
+            return !state->node_address_cache.empty();
+        }
+    }
 
-bool TryGetLayoutCache(FuseState* state,
-                       uint64_t inode_id,
-                       uint64_t offset,
-                       uint64_t requested_size,
-                       zb::rpc::FileLayout* out_layout,
-                       uint64_t* file_size) {
-    if (!state || inode_id == 0 || !out_layout || !file_size) {
+    std::vector<zb::rpc::NodeView> nodes;
+    uint64_t generation = 0;
+    std::string local_error;
+    if (!state->scheduler.GetClusterView(0, &nodes, &generation, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "GetClusterView failed" : local_error;
+        }
         return false;
     }
-    std::lock_guard<std::mutex> lock(state->mu);
-    auto it = state->inode_layout_cache.find(inode_id);
-    if (it == state->inode_layout_cache.end()) {
-        return false;
-    }
-    const auto& entry = it->second;
-    if (entry.file_size == 0 || offset >= entry.file_size) {
-        *file_size = entry.file_size;
-        *out_layout = entry.layout;
-        return true;
-    }
-    uint64_t object_unit_size = entry.layout.object_unit_size();
-    if (object_unit_size == 0) {
-        return false;
-    }
-    uint64_t end = std::min(entry.file_size, offset + requested_size);
-    if (end <= offset) {
-        *file_size = entry.file_size;
-        *out_layout = entry.layout;
-        return true;
-    }
-    uint32_t start_idx = static_cast<uint32_t>(offset / object_unit_size);
-    uint32_t end_idx = static_cast<uint32_t>((end - 1) / object_unit_size);
-    for (uint32_t idx = start_idx; idx <= end_idx; ++idx) {
-        bool found = false;
-        for (const auto& object : entry.layout.objects()) {
-            if (object.index() == idx) {
-                found = true;
-                break;
+
+    {
+        std::lock_guard<std::mutex> lock(state->mu);
+        state->node_address_cache.clear();
+        for (const auto& node : nodes) {
+            if (node.node_id().empty() || node.address().empty()) {
+                continue;
             }
+            state->node_address_cache[node.node_id()] = node.address();
         }
-        if (!found) {
-            return false;
-        }
+        state->cluster_view_generation = generation;
+        state->cluster_view_update_ms = now_ms;
     }
-    *file_size = entry.file_size;
-    *out_layout = entry.layout;
     return true;
 }
 
-std::string BuildRepairKey(const zb::rpc::ReplicaLocation& replica, uint64_t offset, size_t size) {
-    return replica.disk_id() + "|" + ReplicaObjectId(replica) + "|" + std::to_string(offset) + "|" + std::to_string(size);
-}
-
-uint64_t BumpRepairGeneration(FuseState* state, const std::string& key) {
-    if (!state || key.empty()) {
-        return 0;
+bool ResolveNodeAddress(FuseState* state, const std::string& node_id, std::string* address) {
+    if (!state || node_id.empty() || !address) {
+        return false;
     }
-    std::lock_guard<std::mutex> lock(state->repair_mu);
-    uint64_t& generation = state->repair_generation[key];
-    generation += 1;
-    return generation;
+    const std::string base_node_id = BaseNodeIdFromVirtual(node_id);
+    const uint64_t now_ms = NowMilliseconds();
+    const uint64_t ttl_ms = std::max<uint64_t>(1, FLAGS_cluster_view_ttl_ms);
+    {
+        std::lock_guard<std::mutex> lock(state->mu);
+        auto it = state->node_address_cache.find(node_id);
+        if (it == state->node_address_cache.end() && base_node_id != node_id) {
+            it = state->node_address_cache.find(base_node_id);
+        }
+        if (it != state->node_address_cache.end() &&
+            state->cluster_view_update_ms > 0 &&
+            now_ms - state->cluster_view_update_ms <= ttl_ms) {
+            *address = it->second;
+            return true;
+        }
+    }
+
+    std::string error;
+    if (!RefreshNodeAddressCache(state, true, &error)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto it = state->node_address_cache.find(node_id);
+    if (it == state->node_address_cache.end() && base_node_id != node_id) {
+        it = state->node_address_cache.find(base_node_id);
+    }
+    if (it == state->node_address_cache.end()) {
+        return false;
+    }
+    *address = it->second;
+    return true;
 }
 
-void EnqueueReplicaRepair(FuseState* state,
-                          const zb::rpc::ReplicaLocation& replica,
-                          uint64_t offset,
-                          const std::string& data) {
-    if (!state) {
+void InvalidateInodeCache(FuseState* state, uint64_t inode_id) {
+    if (!state || inode_id == 0) {
         return;
     }
-    std::lock_guard<std::mutex> lock(state->repair_mu);
-    const std::string key = BuildRepairKey(replica, offset, data.size());
-    uint64_t generation = 1;
-    auto it = state->repair_generation.find(key);
-    if (it != state->repair_generation.end()) {
-        generation = it->second;
-    } else {
-        state->repair_generation[key] = generation;
+    std::lock_guard<std::mutex> lock(state->mu);
+    state->inode_cache.erase(inode_id);
+}
+
+void UpdateInodeAttrCache(FuseState* state,
+                          uint64_t inode_id,
+                          const zb::rpc::InodeAttr& attr) {
+    if (!state || inode_id == 0) {
+        return;
     }
-    for (auto qit = state->repair_queue.begin(); qit != state->repair_queue.end();) {
-        if (qit->key == key) {
-            qit = state->repair_queue.erase(qit);
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto& entry = state->inode_cache[inode_id];
+    entry.inode_id = inode_id;
+    if (attr.object_unit_size() > 0) {
+        entry.object_unit_size = attr.object_unit_size();
+    }
+    entry.file_size = attr.size();
+}
+
+void UpdateInodeAnchorCache(FuseState* state,
+                            uint64_t inode_id,
+                            const zb::rpc::ReplicaLocation& anchor) {
+    if (!state || inode_id == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto& entry = state->inode_cache[inode_id];
+    entry.inode_id = inode_id;
+    entry.anchor = anchor;
+    entry.has_anchor = true;
+}
+
+bool TryGetCachedAnchor(FuseState* state,
+                        uint64_t inode_id,
+                        zb::rpc::ReplicaLocation* anchor) {
+    if (!state || inode_id == 0 || !anchor) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto it = state->inode_cache.find(inode_id);
+    if (it == state->inode_cache.end()) {
+        return false;
+    }
+    const auto& entry = it->second;
+    if (!entry.has_anchor) {
+        return false;
+    }
+    *anchor = entry.anchor;
+    return true;
+}
+
+void UpdateCachedFileMeta(FuseState* state,
+                          uint64_t inode_id,
+                          uint64_t file_size,
+                          uint64_t object_unit_size,
+                          uint64_t version) {
+    if (!state || inode_id == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto& entry = state->inode_cache[inode_id];
+    entry.inode_id = inode_id;
+    entry.file_size = file_size;
+    if (object_unit_size > 0) {
+        entry.object_unit_size = object_unit_size;
+    }
+    entry.file_meta_version = version;
+}
+
+bool TryGetCachedInodeMeta(FuseState* state,
+                           uint64_t inode_id,
+                           uint64_t* file_size,
+                           uint64_t* object_unit_size,
+                           uint64_t* file_meta_version) {
+    if (!state || inode_id == 0 || !file_size || !object_unit_size) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto it = state->inode_cache.find(inode_id);
+    if (it == state->inode_cache.end()) {
+        return false;
+    }
+    const auto& entry = it->second;
+    if (entry.object_unit_size == 0) {
+        return false;
+    }
+    *file_size = entry.file_size;
+    *object_unit_size = entry.object_unit_size;
+    if (file_meta_version) {
+        *file_meta_version = entry.file_meta_version;
+    }
+    return true;
+}
+
+void GetCachedInodeMetaHint(FuseState* state,
+                            uint64_t inode_id,
+                            uint64_t* file_size,
+                            uint64_t* object_unit_size) {
+    if (!state || inode_id == 0 || !file_size || !object_unit_size) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state->mu);
+    auto it = state->inode_cache.find(inode_id);
+    if (it == state->inode_cache.end()) {
+        return;
+    }
+    *file_size = it->second.file_size;
+    if (it->second.object_unit_size > 0) {
+        *object_unit_size = it->second.object_unit_size;
+    }
+}
+
+bool GetOrFetchAnchor(FuseState* state,
+                      uint64_t inode_id,
+                      zb::rpc::ReplicaLocation* anchor,
+                      zb::rpc::MdsStatus* status) {
+    if (!state || inode_id == 0 || !anchor) {
+        return false;
+    }
+    if (TryGetCachedAnchor(state, inode_id, anchor)) {
+        return true;
+    }
+    if (!state->mds.GetFileAnchor(inode_id, anchor, status)) {
+        return false;
+    }
+    if (anchor->node_id().empty() || anchor->disk_id().empty()) {
+        if (status) {
+            status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+            status->set_message("empty anchor node_id/disk_id");
+        }
+        return false;
+    }
+    UpdateInodeAnchorCache(state, inode_id, *anchor);
+    return true;
+}
+
+bool GetOrFetchNodeFileMeta(FuseState* state,
+                            uint64_t inode_id,
+                            const zb::rpc::ReplicaLocation& anchor,
+                            bool allow_create,
+                            uint64_t hint_file_size,
+                            uint64_t hint_object_unit_size,
+                            uint64_t* file_size,
+                            uint64_t* object_unit_size,
+                            uint64_t* file_meta_version,
+                            int* out_errno) {
+    if (!state || inode_id == 0 || !file_size || !object_unit_size || !file_meta_version) {
+        if (out_errno) {
+            *out_errno = EINVAL;
+        }
+        return false;
+    }
+    if (TryGetCachedInodeMeta(state, inode_id, file_size, object_unit_size, file_meta_version)) {
+        return true;
+    }
+
+    zb::rpc::Status data_status;
+    zb::rpc::FileMeta meta;
+    std::vector<zb::rpc::FileObjectSlice> ignored_slices;
+    if (!state->data_nodes.ResolveFileRead(anchor,
+                                           inode_id,
+                                           0,
+                                           0,
+                                           hint_object_unit_size > 0 ? hint_object_unit_size : FLAGS_default_object_unit_size,
+                                           &meta,
+                                           &ignored_slices,
+                                           &data_status)) {
+        if (data_status.code() == zb::rpc::STATUS_NOT_FOUND && allow_create) {
+            const uint64_t create_object_unit_size =
+                hint_object_unit_size > 0 ? hint_object_unit_size : FLAGS_default_object_unit_size;
+            zb::rpc::FileMeta committed;
+            const std::string txid = "bootstrap-" + std::to_string(inode_id) + "-" +
+                                     std::to_string(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::system_clock::now().time_since_epoch()).count()));
+            if (!state->data_nodes.CommitFileWrite(anchor,
+                                                   inode_id,
+                                                   txid,
+                                                   hint_file_size,
+                                                   create_object_unit_size,
+                                                   0,
+                                                   true,
+                                                   static_cast<uint64_t>(std::time(nullptr)),
+                                                   &committed,
+                                                   &data_status)) {
+                if (out_errno) {
+                    *out_errno = StatusToErrno(data_status);
+                }
+                return false;
+            }
+            meta = committed;
         } else {
-            ++qit;
+            if (out_errno) {
+                *out_errno = StatusToErrno(data_status);
+            }
+            return false;
         }
     }
-    const size_t max_queue = static_cast<size_t>(std::max(1, FLAGS_repair_max_queue));
-    if (state->repair_queue.size() >= max_queue) {
-        const ReplicaRepairTask dropped = std::move(state->repair_queue.front());
-        state->repair_queue.pop_front();
-        auto dropped_it = state->repair_generation.find(dropped.key);
-        if (dropped_it != state->repair_generation.end() && dropped_it->second == dropped.generation) {
-            state->repair_generation.erase(dropped_it);
-        }
-    }
-    ReplicaRepairTask task;
-    task.key = key;
-    task.replica = replica;
-    task.offset = offset;
-    task.data = data;
-    task.generation = generation;
-    state->repair_queue.push_back(std::move(task));
-    state->repair_cv.notify_one();
+
+    const uint64_t effective_object_unit_size =
+        meta.object_unit_size() > 0 ? meta.object_unit_size()
+                                    : (hint_object_unit_size > 0 ? hint_object_unit_size : FLAGS_default_object_unit_size);
+    UpdateCachedFileMeta(state, inode_id, meta.file_size(), effective_object_unit_size, meta.version());
+    *file_size = meta.file_size();
+    *object_unit_size = effective_object_unit_size;
+    *file_meta_version = meta.version();
+    return true;
 }
 
-void RepairWorkerLoop(FuseState* state) {
-    if (!state) {
-        return;
+bool CommitNodeFileMeta(FuseState* state,
+                        uint64_t inode_id,
+                        const zb::rpc::ReplicaLocation& anchor,
+                        uint64_t file_size,
+                        uint64_t object_unit_size,
+                        uint64_t expected_version,
+                        uint64_t* committed_version,
+                        int* out_errno) {
+    if (!state || inode_id == 0 || object_unit_size == 0) {
+        if (out_errno) {
+            *out_errno = EINVAL;
+        }
+        return false;
     }
-    const uint32_t max_retry = static_cast<uint32_t>(std::max(1, FLAGS_repair_max_retry));
-    const int retry_interval_ms = std::max(1, FLAGS_repair_retry_interval_ms);
-    while (true) {
-        ReplicaRepairTask task;
-        {
-            std::unique_lock<std::mutex> lock(state->repair_mu);
-            state->repair_cv.wait(lock, [&]() {
-                return state->stop_repair.load() || !state->repair_queue.empty();
-            });
-            if (state->stop_repair.load() && state->repair_queue.empty()) {
-                break;
-            }
-            task = std::move(state->repair_queue.front());
-            state->repair_queue.pop_front();
-            auto it = state->repair_generation.find(task.key);
-            if (it != state->repair_generation.end() && it->second != task.generation) {
-                continue;
-            }
+    zb::rpc::Status data_status;
+    zb::rpc::FileMeta committed;
+    const std::string txid = "meta-" + std::to_string(inode_id) + "-" +
+                             std::to_string(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch()).count()));
+    if (!state->data_nodes.CommitFileWrite(anchor,
+                                           inode_id,
+                                           txid,
+                                           file_size,
+                                           object_unit_size,
+                                           expected_version,
+                                           true,
+                                           static_cast<uint64_t>(std::time(nullptr)),
+                                           &committed,
+                                           &data_status)) {
+        if (out_errno) {
+            *out_errno = StatusToErrno(data_status);
         }
-
-        std::string error;
-        if (state->data_nodes.Write(task.replica, task.offset, task.data, &error)) {
-            std::lock_guard<std::mutex> lock(state->repair_mu);
-            auto it = state->repair_generation.find(task.key);
-            if (it != state->repair_generation.end() && it->second == task.generation) {
-                state->repair_generation.erase(it);
-            }
-            continue;
-        }
-        if (task.attempts + 1 >= max_retry) {
-            std::lock_guard<std::mutex> lock(state->repair_mu);
-            auto it = state->repair_generation.find(task.key);
-            if (it != state->repair_generation.end() && it->second == task.generation) {
-                state->repair_generation.erase(it);
-            }
-            continue;
-        }
-
-        ++task.attempts;
-        std::this_thread::sleep_for(std::chrono::milliseconds(retry_interval_ms * task.attempts));
-        {
-            std::lock_guard<std::mutex> lock(state->repair_mu);
-            if (!state->stop_repair.load()) {
-                auto it = state->repair_generation.find(task.key);
-                if (it != state->repair_generation.end() && it->second != task.generation) {
-                    continue;
-                }
-                const size_t max_queue = static_cast<size_t>(std::max(1, FLAGS_repair_max_queue));
-                if (state->repair_queue.size() >= max_queue) {
-                    const ReplicaRepairTask dropped = std::move(state->repair_queue.front());
-                    state->repair_queue.pop_front();
-                    auto dropped_it = state->repair_generation.find(dropped.key);
-                    if (dropped_it != state->repair_generation.end() && dropped_it->second == dropped.generation) {
-                        state->repair_generation.erase(dropped_it);
-                    }
-                }
-                state->repair_queue.push_back(std::move(task));
-                state->repair_cv.notify_one();
-            }
-        }
+        return false;
     }
+    const uint64_t new_version = committed.version();
+    const uint64_t committed_object_unit_size =
+        committed.object_unit_size() > 0 ? committed.object_unit_size() : object_unit_size;
+    UpdateCachedFileMeta(state, inode_id, committed.file_size(), committed_object_unit_size, new_version);
+    zb::rpc::MdsStatus mds_status;
+    zb::rpc::InodeAttr updated_attr;
+    if (state->mds.UpdateInodeStat(inode_id,
+                                   committed.file_size(),
+                                   committed_object_unit_size,
+                                   new_version,
+                                   committed.mtime_sec(),
+                                   &updated_attr,
+                                   &mds_status)) {
+        UpdateInodeAttrCache(state, inode_id, updated_attr);
+    }
+    if (committed_version) {
+        *committed_version = new_version;
+    }
+    return true;
 }
 
 int FuseGetattr(const char* path, struct stat* st, struct fuse_file_info* fi) {
@@ -1073,6 +1398,35 @@ int FuseGetattr(const char* path, struct stat* st, struct fuse_file_info* fi) {
     zb::rpc::MdsStatus status;
     if (!state->mds.Lookup(path, &attr, &status)) {
         return -StatusToErrno(status);
+    }
+    if (attr.type() == zb::rpc::INODE_FILE) {
+        UpdateInodeAttrCache(state, attr.inode_id(), attr);
+        zb::rpc::ReplicaLocation anchor;
+        if (!GetOrFetchAnchor(state, attr.inode_id(), &anchor, &status)) {
+            return -StatusToErrno(status);
+        }
+        uint64_t file_size = attr.size();
+        uint64_t object_unit_size = attr.object_unit_size() > 0
+                                        ? attr.object_unit_size()
+                                        : FLAGS_default_object_unit_size;
+        uint64_t file_meta_version = 0;
+        int node_errno = EIO;
+        if (!GetOrFetchNodeFileMeta(state,
+                                    attr.inode_id(),
+                                    anchor,
+                                    true,
+                                    attr.size(),
+                                    object_unit_size,
+                                    &file_size,
+                                    &object_unit_size,
+                                    &file_meta_version,
+                                    &node_errno)) {
+            return -node_errno;
+        }
+        attr.set_size(file_size);
+        if (object_unit_size > 0) {
+            attr.set_object_unit_size(object_unit_size);
+        }
     }
     FillStat(attr, st);
     return 0;
@@ -1104,14 +1458,54 @@ int FuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offse
 int FuseOpen(const char* path, struct fuse_file_info* fi) {
     auto* state = GetState();
     zb::rpc::InodeAttr attr;
+    zb::rpc::ReplicaLocation open_anchor;
     zb::rpc::MdsStatus status;
     uint64_t handle_id = 0;
-    if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &attr, &status)) {
+    if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &attr, &open_anchor, &status)) {
         return -StatusToErrno(status);
     }
     {
         std::lock_guard<std::mutex> lock(state->mu);
         state->handle_to_inode[handle_id] = attr.inode_id();
+    }
+    UpdateInodeAttrCache(state, attr.inode_id(), attr);
+    if (attr.type() == zb::rpc::INODE_FILE) {
+        zb::rpc::ReplicaLocation anchor = open_anchor;
+        if (anchor.node_id().empty() || anchor.disk_id().empty()) {
+            if (!GetOrFetchAnchor(state, attr.inode_id(), &anchor, &status)) {
+                return -StatusToErrno(status);
+            }
+        } else {
+            UpdateInodeAnchorCache(state, attr.inode_id(), anchor);
+        }
+        if (anchor.node_id().empty() || anchor.disk_id().empty()) {
+            return -StatusToErrno(status);
+        }
+        if (anchor.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL) {
+            if (IsWriteOpenFlags(static_cast<uint32_t>(fi->flags))) {
+                return -EROFS;
+            }
+            fi->fh = handle_id;
+            return 0;
+        }
+        uint64_t file_size = attr.size();
+        uint64_t object_unit_size = attr.object_unit_size() > 0
+                                        ? attr.object_unit_size()
+                                        : FLAGS_default_object_unit_size;
+        uint64_t file_meta_version = 0;
+        int node_errno = EIO;
+        if (!GetOrFetchNodeFileMeta(state,
+                                    attr.inode_id(),
+                                    anchor,
+                                    true,
+                                    attr.size(),
+                                    object_unit_size,
+                                    &file_size,
+                                    &object_unit_size,
+                                    &file_meta_version,
+                                    &node_errno)) {
+            return -node_errno;
+        }
     }
     fi->fh = handle_id;
     return 0;
@@ -1136,17 +1530,52 @@ int FuseCreate(const char* path, mode_t mode, struct fuse_file_info* fi) {
     auto* state = GetState();
     struct fuse_context* ctx = fuse_get_context();
     zb::rpc::InodeAttr attr;
+    zb::rpc::ReplicaLocation create_anchor;
     zb::rpc::MdsStatus status;
-    if (!state->mds.Create(path, static_cast<uint32_t>(mode), ctx->uid, ctx->gid, &attr, &status)) {
+    if (!state->mds.Create(path, static_cast<uint32_t>(mode), ctx->uid, ctx->gid, &attr, &create_anchor, &status)) {
         return -StatusToErrno(status);
     }
     uint64_t handle_id = 0;
-    if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &attr, &status)) {
+    zb::rpc::ReplicaLocation open_anchor;
+    if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &attr, &open_anchor, &status)) {
         return -StatusToErrno(status);
     }
     {
         std::lock_guard<std::mutex> lock(state->mu);
         state->handle_to_inode[handle_id] = attr.inode_id();
+    }
+    UpdateInodeAttrCache(state, attr.inode_id(), attr);
+    zb::rpc::ReplicaLocation anchor = open_anchor;
+    if (anchor.node_id().empty() || anchor.disk_id().empty()) {
+        anchor = create_anchor;
+    }
+    if (anchor.node_id().empty() || anchor.disk_id().empty()) {
+        if (!GetOrFetchAnchor(state, attr.inode_id(), &anchor, &status)) {
+            return -StatusToErrno(status);
+        }
+    } else {
+        UpdateInodeAnchorCache(state, attr.inode_id(), anchor);
+    }
+    if (anchor.node_id().empty() || anchor.disk_id().empty()) {
+        return -StatusToErrno(status);
+    }
+    uint64_t file_size = attr.size();
+    uint64_t object_unit_size = attr.object_unit_size() > 0
+                                    ? attr.object_unit_size()
+                                    : FLAGS_default_object_unit_size;
+    uint64_t file_meta_version = 0;
+    int node_errno = EIO;
+    if (!GetOrFetchNodeFileMeta(state,
+                                attr.inode_id(),
+                                anchor,
+                                true,
+                                attr.size(),
+                                object_unit_size,
+                                &file_size,
+                                &object_unit_size,
+                                &file_meta_version,
+                                &node_errno)) {
+        return -node_errno;
     }
     fi->fh = handle_id;
     return 0;
@@ -1165,9 +1594,18 @@ int FuseMkdir(const char* path, mode_t mode) {
 
 int FuseUnlink(const char* path) {
     auto* state = GetState();
+    zb::rpc::InodeAttr before_attr;
+    zb::rpc::MdsStatus lookup_status;
+    uint64_t inode_id = 0;
+    if (state->mds.Lookup(path, &before_attr, &lookup_status)) {
+        inode_id = before_attr.inode_id();
+    }
     zb::rpc::MdsStatus status;
     if (!state->mds.Unlink(path, &status)) {
         return -StatusToErrno(status);
+    }
+    if (inode_id > 0) {
+        InvalidateInodeCache(state, inode_id);
     }
     return 0;
 }
@@ -1203,97 +1641,136 @@ uint64_t ResolveInode(struct fuse_file_info* fi, const char* path, FuseState* st
     if (!state->mds.Lookup(path, &attr, status)) {
         return 0;
     }
+    UpdateInodeAttrCache(state, attr.inode_id(), attr);
     return attr.inode_id();
 }
 
 int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse_file_info* fi) {
+    if (offset < 0) {
+        return -EINVAL;
+    }
+    if (size == 0) {
+        return 0;
+    }
     auto* state = GetState();
     zb::rpc::MdsStatus status;
     uint64_t inode_id = ResolveInode(fi, path, state, &status);
     if (inode_id == 0) {
         return -StatusToErrno(status);
     }
-
     const uint64_t request_offset = static_cast<uint64_t>(offset);
-    zb::rpc::FileLayout layout;
-    zb::rpc::OpticalReadPlan optical_plan;
-    uint64_t file_size = 0;
-    if (!TryGetLayoutCache(state, inode_id, request_offset, static_cast<uint64_t>(size), &layout, &file_size)) {
-        zb::rpc::InodeAttr attr;
-        if (!state->mds.Getattr(inode_id, &attr, &status)) {
-            return -StatusToErrno(status);
+    zb::rpc::FileAnchorSet anchor_set;
+    if (!state->mds.GetFileAnchorSet(inode_id, &anchor_set, &status)) {
+        return -StatusToErrno(status);
+    }
+    zb::rpc::ReplicaLocation anchor;
+    if (!SelectAnchorForIo(anchor_set, &anchor)) {
+        status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
+        status.set_message("GetFileAnchor returned empty anchor set");
+        return -StatusToErrno(status);
+    }
+    UpdateInodeAnchorCache(state, inode_id, anchor);
+
+    uint64_t hint_object_unit_size = FLAGS_default_object_unit_size;
+    uint64_t hint_file_size = 0;
+    GetCachedInodeMetaHint(state, inode_id, &hint_file_size, &hint_object_unit_size);
+
+    if (anchor.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL) {
+        if (hint_object_unit_size == 0) {
+            hint_object_unit_size = FLAGS_default_object_unit_size;
         }
-        file_size = attr.size();
-        if (request_offset >= file_size) {
+        if (hint_object_unit_size == 0) {
+            return -EIO;
+        }
+        if (hint_file_size == 0) {
+            zb::rpc::InodeAttr attr;
+            if (!state->mds.Getattr(inode_id, &attr, &status)) {
+                return -StatusToErrno(status);
+            }
+            hint_file_size = attr.size();
+            UpdateInodeAttrCache(state, inode_id, attr);
+        }
+        if (request_offset >= hint_file_size) {
             return 0;
         }
-
-        zb::rpc::ResolveLayoutReply resolved;
-        if (!state->mds.ResolveLayout(inode_id, 0, file_size, &resolved, &status)) {
-            return -StatusToErrno(status);
+        uint64_t read_size = static_cast<uint64_t>(size);
+        if (read_size > hint_file_size - request_offset) {
+            read_size = hint_file_size - request_offset;
         }
-        layout = resolved.read_plan();
-        optical_plan = resolved.optical_plan();
-        RecordPlanSource(resolved.plan_source());
-        UpdateLayoutCache(state, inode_id, resolved.root(), layout);
+        std::vector<zb::rpc::FileObjectSlice> slices;
+        BuildObjectSlices(inode_id,
+                          request_offset,
+                          read_size,
+                          hint_object_unit_size,
+                          anchor.disk_id(),
+                          &slices);
+        std::string output(static_cast<size_t>(read_size), 'x');
+        uint64_t write_pos = 0;
+        for (const auto& slice : slices) {
+            if (slice.length() == 0) {
+                continue;
+            }
+            std::string data;
+            std::string error;
+            zb::rpc::ReplicaLocation replica = BuildObjectReplicaFromAnchor(anchor, slice.object_id());
+            if (!state->data_nodes.Read(replica, slice.object_offset(), slice.length(), &data, &error)) {
+                return -EIO;
+            }
+            const size_t copy_len = static_cast<size_t>(std::min<uint64_t>(slice.length(), data.size()));
+            if (write_pos + copy_len > output.size()) {
+                return -EIO;
+            }
+            std::memcpy(output.data() + write_pos, data.data(), copy_len);
+            write_pos += slice.length();
+        }
+        std::memcpy(buf, output.data(), output.size());
+        return static_cast<int>(output.size());
     }
 
-    if (request_offset >= file_size) {
+    zb::rpc::Status data_status;
+    zb::rpc::FileMeta resolved_meta;
+    std::vector<zb::rpc::FileObjectSlice> slices;
+    if (!state->data_nodes.ResolveFileRead(anchor,
+                                           inode_id,
+                                           request_offset,
+                                           static_cast<uint64_t>(size),
+                                           hint_object_unit_size,
+                                           &resolved_meta,
+                                           &slices,
+                                           &data_status)) {
+        return -StatusToErrno(data_status);
+    }
+    const uint64_t object_unit_size = resolved_meta.object_unit_size() > 0
+                                          ? resolved_meta.object_unit_size()
+                                          : hint_object_unit_size;
+    UpdateCachedFileMeta(state, inode_id, resolved_meta.file_size(), object_unit_size, resolved_meta.version());
+    if (request_offset >= resolved_meta.file_size()) {
         return 0;
     }
     uint64_t read_size = static_cast<uint64_t>(size);
-    if (read_size > file_size - request_offset) {
-        read_size = file_size - request_offset;
-    }
-    if (optical_plan.enabled()) {
-        std::string data;
-        std::string error;
-        if (!state->data_nodes.ReadArchivedFile(optical_plan, request_offset, read_size, &data, &error)) {
-            return -EIO;
-        }
-        if (data.size() > read_size) {
-            data.resize(static_cast<size_t>(read_size));
-        }
-        std::memcpy(buf, data.data(), data.size());
-        return static_cast<int>(data.size());
+    if (read_size > resolved_meta.file_size() - request_offset) {
+        read_size = resolved_meta.file_size() - request_offset;
     }
 
     std::string output(read_size, '\0');
-    uint64_t object_unit_size = layout.object_unit_size();
-    if (object_unit_size == 0) {
-        return -EIO;
-    }
-    for (const auto& object : layout.objects()) {
-        uint64_t object_start = static_cast<uint64_t>(object.index()) * object_unit_size;
-        uint64_t object_end = object_start + object_unit_size;
-        uint64_t read_start = std::max<uint64_t>(object_start, request_offset);
-        uint64_t read_end = std::min<uint64_t>(object_end, request_offset + read_size);
-        if (read_end <= read_start) {
+    uint64_t write_pos = 0;
+    for (const auto& slice : slices) {
+        if (slice.length() == 0) {
             continue;
         }
-        uint64_t object_off = read_start - object_start;
-        uint64_t read_len = read_end - read_start;
-
-        bool read_ok = false;
+        const uint64_t read_len = slice.length();
         std::string data;
         std::string error;
-        for (const auto& replica : object.replicas()) {
-            if (replica.storage_tier() != zb::rpc::STORAGE_TIER_DISK ||
-                replica.replica_state() != zb::rpc::REPLICA_READY) {
-                continue;
-            }
-            if (state->data_nodes.Read(replica, object_off, read_len, &data, &error)) {
-                read_ok = true;
-                break;
-            }
-        }
-        if (!read_ok) {
+        const zb::rpc::ReplicaLocation replica = BuildObjectReplicaFromAnchor(anchor, slice.object_id());
+        if (!state->data_nodes.Read(replica, slice.object_offset(), read_len, &data, &error)) {
             return -EIO;
         }
-        if (data.size() > read_len) {
-            data.resize(read_len);
+        const size_t copy_len = static_cast<size_t>(std::min<uint64_t>(read_len, data.size()));
+        if (write_pos + copy_len > output.size()) {
+            return -EIO;
         }
-        std::memcpy(output.data() + (read_start - request_offset), data.data(), data.size());
+        std::memcpy(output.data() + write_pos, data.data(), copy_len);
+        write_pos += read_len;
     }
 
     std::memcpy(buf, output.data(), output.size());
@@ -1301,6 +1778,12 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
 }
 
 int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, struct fuse_file_info* fi) {
+    if (offset < 0) {
+        return -EINVAL;
+    }
+    if (size == 0) {
+        return 0;
+    }
     auto* state = GetState();
     zb::rpc::MdsStatus status;
     uint64_t inode_id = ResolveInode(fi, path, state, &status);
@@ -1308,105 +1791,163 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
         return -StatusToErrno(status);
     }
 
-    zb::rpc::LayoutRoot base_root;
-    if (!state->mds.GetLayoutRoot(inode_id, &base_root, &status)) {
-        base_root.Clear();
-        base_root.set_inode_id(inode_id);
-    }
-
-    zb::rpc::FileLayout layout;
-    if (!state->mds.AllocateWrite(inode_id, static_cast<uint64_t>(offset), static_cast<uint64_t>(size), &layout, &status)) {
+    zb::rpc::FileAnchorSet anchor_set;
+    if (!state->mds.GetFileAnchorSet(inode_id, &anchor_set, &status)) {
         return -StatusToErrno(status);
     }
+    if (HasOpticalAnchor(anchor_set)) {
+        return -EROFS;
+    }
+    zb::rpc::ReplicaLocation anchor;
+    if (!SelectAnchorForIo(anchor_set, &anchor)) {
+        status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
+        status.set_message("GetFileAnchor returned empty anchor set");
+        return -StatusToErrno(status);
+    }
+    UpdateInodeAnchorCache(state, inode_id, anchor);
 
-    uint64_t object_unit_size = layout.object_unit_size();
-    size_t remaining = size;
+    uint64_t hint_object_unit_size = FLAGS_default_object_unit_size;
+    uint64_t ignored_file_size = 0;
+    GetCachedInodeMetaHint(state, inode_id, &ignored_file_size, &hint_object_unit_size);
 
-    for (const auto& object : layout.objects()) {
-        uint64_t object_start = static_cast<uint64_t>(object.index()) * object_unit_size;
-        uint64_t object_end = object_start + object_unit_size;
-        uint64_t write_start = std::max<uint64_t>(object_start, static_cast<uint64_t>(offset));
-        uint64_t write_end = std::min<uint64_t>(object_end, static_cast<uint64_t>(offset + size));
-        if (write_end <= write_start) {
+    const uint64_t request_start = static_cast<uint64_t>(offset);
+    if (request_start > std::numeric_limits<uint64_t>::max() - static_cast<uint64_t>(size)) {
+        return -EOVERFLOW;
+    }
+    const uint64_t request_end = request_start + static_cast<uint64_t>(size);
+
+    zb::rpc::Status data_status;
+    zb::rpc::FileMeta plan_meta;
+    std::string txid;
+    std::vector<zb::rpc::FileObjectSlice> slices;
+    if (!state->data_nodes.AllocateFileWrite(anchor,
+                                             inode_id,
+                                             request_start,
+                                             static_cast<uint64_t>(size),
+                                             hint_object_unit_size,
+                                             &plan_meta,
+                                             &txid,
+                                             &slices,
+                                             &data_status)) {
+        return -StatusToErrno(data_status);
+    }
+    const uint64_t object_unit_size =
+        plan_meta.object_unit_size() > 0 ? plan_meta.object_unit_size() : hint_object_unit_size;
+    if (object_unit_size == 0 || txid.empty()) {
+        return -EIO;
+    }
+
+    uint64_t cursor = 0;
+    for (const auto& slice : slices) {
+        if (slice.length() == 0) {
             continue;
         }
-        uint64_t object_off = write_start - object_start;
-        uint64_t write_len = write_end - write_start;
-        std::string data(buf + (write_start - offset), buf + (write_start - offset + write_len));
-
-        bool wrote_disk_replica = false;
-        std::vector<zb::rpc::ReplicaLocation> failed_replicas;
-        for (const auto& replica : object.replicas()) {
-            if (replica.storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
-                continue;
-            }
-            const std::string repair_key = BuildRepairKey(replica, object_off, data.size());
-            (void)BumpRepairGeneration(state, repair_key);
-            std::string error;
-            if (!state->data_nodes.Write(replica, object_off, data, &error)) {
-                failed_replicas.push_back(replica);
-                continue;
-            }
-            wrote_disk_replica = true;
-        }
-        if (!wrote_disk_replica) {
+        if (cursor > static_cast<uint64_t>(size) || slice.length() > static_cast<uint64_t>(size) - cursor) {
             return -EIO;
         }
-        if (!failed_replicas.empty()) {
-            for (const auto& failed_replica : failed_replicas) {
-                EnqueueReplicaRepair(state, failed_replica, object_off, data);
-            }
+        const uint64_t write_len = slice.length();
+        std::string data(buf + cursor, buf + cursor + write_len);
+        const zb::rpc::ReplicaLocation replica = BuildObjectReplicaFromAnchor(anchor, slice.object_id());
+        std::string error;
+        if (!state->data_nodes.Write(replica, slice.object_offset(), data, &error)) {
             return -EIO;
         }
-
-        remaining -= write_len;
+        cursor += write_len;
+    }
+    if (cursor != static_cast<uint64_t>(size)) {
+        return -EIO;
     }
 
-    uint64_t new_size = static_cast<uint64_t>(offset + size);
-    zb::rpc::LayoutRoot committed_root;
-    const uint64_t expected_layout_version = base_root.layout_version();
-    const std::string write_op_id = BuildWriteOpId(inode_id,
-                                                   static_cast<uint64_t>(offset),
-                                                   static_cast<uint64_t>(size),
-                                                   "write");
-    if (!state->mds.CommitLayoutRoot(inode_id,
-                                     expected_layout_version,
-                                     new_size,
-                                     write_op_id,
-                                     &base_root,
-                                     &committed_root,
-                                     &status)) {
-        return -StatusToErrno(status);
+    const uint64_t new_size = std::max<uint64_t>(plan_meta.file_size(), request_end);
+    zb::rpc::FileMeta committed_meta;
+    if (!state->data_nodes.CommitFileWrite(anchor,
+                                           inode_id,
+                                           txid,
+                                           new_size,
+                                           object_unit_size,
+                                           plan_meta.version(),
+                                           true,
+                                           static_cast<uint64_t>(std::time(nullptr)),
+                                           &committed_meta,
+                                           &data_status)) {
+        return -StatusToErrno(data_status);
     }
-
-    InvalidateLayoutCache(state, inode_id);
-    return static_cast<int>(size - remaining);
+    UpdateCachedFileMeta(state,
+                         inode_id,
+                         committed_meta.file_size(),
+                         committed_meta.object_unit_size() > 0 ? committed_meta.object_unit_size() : object_unit_size,
+                         committed_meta.version());
+    zb::rpc::MdsStatus update_status;
+    zb::rpc::InodeAttr updated_attr;
+    if (state->mds.UpdateInodeStat(inode_id,
+                                   committed_meta.file_size(),
+                                   committed_meta.object_unit_size() > 0 ? committed_meta.object_unit_size()
+                                                                          : object_unit_size,
+                                   committed_meta.version(),
+                                   committed_meta.mtime_sec(),
+                                   &updated_attr,
+                                   &update_status)) {
+        UpdateInodeAttrCache(state, inode_id, updated_attr);
+    }
+    return static_cast<int>(size);
 }
 
 int FuseTruncate(const char* path, off_t size, struct fuse_file_info* fi) {
+    if (size < 0) {
+        return -EINVAL;
+    }
     auto* state = GetState();
     zb::rpc::MdsStatus status;
     uint64_t inode_id = ResolveInode(fi, path, state, &status);
     if (inode_id == 0) {
         return -StatusToErrno(status);
     }
-    zb::rpc::LayoutRoot base_root;
-    if (state->mds.GetLayoutRoot(inode_id, &base_root, &status)) {
-        zb::rpc::LayoutRoot committed;
-        const std::string truncate_op_id =
-            BuildWriteOpId(inode_id, 0, static_cast<uint64_t>(size), "truncate");
-        if (state->mds.CommitLayoutRoot(inode_id,
-                                        base_root.layout_version(),
-                                        static_cast<uint64_t>(size),
-                                        truncate_op_id,
-                                        &base_root,
-                                        &committed,
-                                        &status)) {
-            InvalidateLayoutCache(state, inode_id);
-            return 0;
-        }
+    zb::rpc::FileAnchorSet anchor_set;
+    if (!state->mds.GetFileAnchorSet(inode_id, &anchor_set, &status)) {
+        return -StatusToErrno(status);
     }
-    return -StatusToErrno(status);
+    if (HasOpticalAnchor(anchor_set)) {
+        return -EROFS;
+    }
+    zb::rpc::ReplicaLocation anchor;
+    if (!SelectAnchorForIo(anchor_set, &anchor)) {
+        status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
+        status.set_message("GetFileAnchor returned empty anchor set");
+        return -StatusToErrno(status);
+    }
+    UpdateInodeAnchorCache(state, inode_id, anchor);
+
+    uint64_t hint_file_size = static_cast<uint64_t>(size);
+    uint64_t hint_object_unit_size = FLAGS_default_object_unit_size;
+    GetCachedInodeMetaHint(state, inode_id, &hint_file_size, &hint_object_unit_size);
+    uint64_t cached_file_size = 0;
+    uint64_t object_unit_size = 0;
+    uint64_t file_meta_version = 0;
+    int node_errno = EIO;
+    if (!GetOrFetchNodeFileMeta(state,
+                                inode_id,
+                                anchor,
+                                true,
+                                hint_file_size,
+                                hint_object_unit_size,
+                                &cached_file_size,
+                                &object_unit_size,
+                                &file_meta_version,
+                                &node_errno)) {
+        return -node_errno;
+    }
+    uint64_t committed_version = 0;
+    if (!CommitNodeFileMeta(state,
+                            inode_id,
+                            anchor,
+                            static_cast<uint64_t>(size),
+                            object_unit_size,
+                            file_meta_version,
+                            &committed_version,
+                            &node_errno)) {
+        return -node_errno;
+    }
+    return 0;
 }
 
 } // namespace
@@ -1421,9 +1962,24 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "Failed to connect to MDS %s\n", FLAGS_mds.c_str());
         return 1;
     }
-    state.repair_thread = std::thread([&state]() {
-        zb::client::fuse_client::RepairWorkerLoop(&state);
-    });
+    if (FLAGS_scheduler.empty()) {
+        std::fprintf(stderr, "scheduler endpoint is required\n");
+        return 1;
+    }
+    if (!state.scheduler.Init(FLAGS_scheduler)) {
+        std::fprintf(stderr, "Failed to connect to scheduler %s\n", FLAGS_scheduler.c_str());
+        return 1;
+    }
+    state.scheduler_enabled = true;
+    std::string refresh_error;
+    if (!zb::client::fuse_client::RefreshNodeAddressCache(&state, true, &refresh_error)) {
+        std::fprintf(stderr, "Failed to fetch scheduler cluster view: %s\n", refresh_error.c_str());
+        return 1;
+    }
+    state.data_nodes.SetNodeAddressResolver(
+        [&state](const std::string& node_id, std::string* address) {
+            return zb::client::fuse_client::ResolveNodeAddress(&state, node_id, address);
+        });
 
     static struct fuse_operations ops = {};
     ops.getattr = zb::client::fuse_client::FuseGetattr;
@@ -1439,11 +1995,5 @@ int main(int argc, char* argv[]) {
     ops.write = zb::client::fuse_client::FuseWrite;
     ops.truncate = zb::client::fuse_client::FuseTruncate;
 
-    int ret = fuse_main(argc, argv, &ops, &state);
-    state.stop_repair.store(true);
-    state.repair_cv.notify_all();
-    if (state.repair_thread.joinable()) {
-        state.repair_thread.join();
-    }
-    return ret;
+    return fuse_main(argc, argv, &ops, &state);
 }

@@ -286,6 +286,7 @@ int main(int argc, char* argv[]) {
         archive_meta_dir = (std::filesystem::path(".") /
                             ("virtual_archive_meta_" + std::to_string(FLAGS_port))).string();
     }
+    storage_service.SetFileMetaStoreDir((std::filesystem::path(archive_meta_dir) / "file_meta").string());
     std::string archive_meta_error;
     if (!storage_service.InitArchiveMetaStore(archive_meta_dir,
                                               cfg.archive_track_max_objects,

@@ -3,9 +3,11 @@
 #include <gflags/gflags.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -17,8 +19,10 @@
 
 #include "mds.pb.h"
 #include "real_node.pb.h"
+#include "scheduler.pb.h"
 
 DEFINE_string(mds, "127.0.0.1:9000", "MDS endpoint");
+DEFINE_string(scheduler, "127.0.0.1:9100", "Scheduler endpoint");
 DEFINE_int32(timeout_ms, 5000, "RPC timeout in ms");
 DEFINE_int32(max_retry, 1, "RPC max retry");
 DEFINE_string(base_dir, "/optical_stress", "Base directory in distributed filesystem");
@@ -30,31 +34,160 @@ DEFINE_uint32(replica, 1, "Replica count used by Create");
 DEFINE_uint64(duration_sec, 1800, "Stress write duration in seconds");
 DEFINE_uint64(target_total_bytes, 0, "Optional total bytes to write, 0 means unlimited by bytes");
 DEFINE_uint32(report_interval_sec, 10, "Report interval in seconds");
-DEFINE_uint32(sample_files, 8, "Number of files sampled for layout check per report");
-DEFINE_bool(require_optical, true, "Fail if no optical replica is observed");
+DEFINE_uint32(sample_files, 8, "Number of files sampled for resolve-read check per report");
+DEFINE_bool(require_optical, false, "Deprecated flag in simplified metadata mode; ignored");
 DEFINE_uint64(cooldown_sec, 0, "Cooldown time after writes for archive/evict to catch up");
 DEFINE_bool(require_optical_only_after_cooldown, false,
-            "After cooldown, require at least one object with optical replica only (no disk replica)");
+            "Deprecated flag in simplified metadata mode; ignored");
+DEFINE_uint32(cluster_view_refresh_ms, 2000, "Scheduler cluster-view refresh interval in ms");
 
 namespace {
 
 struct FileState {
     std::string path;
     uint64_t inode_id{0};
+    uint64_t object_unit_size{0};
+    uint64_t file_meta_version{0};
     uint64_t size{0};
     uint64_t writes{0};
+    zb::rpc::ReplicaLocation anchor;
 };
 
-struct LayoutStats {
+struct ResolveStats {
     uint64_t files_scanned{0};
     uint64_t objects_total{0};
-    uint64_t objects_with_optical{0};
-    uint64_t objects_with_disk{0};
-    uint64_t objects_optical_only{0};
 };
+
+class SchedulerAddressBook {
+public:
+    bool Resolve(const std::string& node_id, std::string* address, std::string* err) {
+        if (node_id.empty() || !address) {
+            if (err) {
+                *err = "node_id/address invalid";
+            }
+            return false;
+        }
+        const uint64_t now_ms = NowMilliseconds();
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto it = node_to_addr_.find(node_id);
+            if (it == node_to_addr_.end()) {
+                const std::string base = BaseNodeId(node_id);
+                if (base != node_id) {
+                    it = node_to_addr_.find(base);
+                }
+            }
+            if (it != node_to_addr_.end() &&
+                last_refresh_ms_ > 0 &&
+                now_ms - last_refresh_ms_ <= std::max<uint64_t>(1, FLAGS_cluster_view_refresh_ms)) {
+                *address = it->second;
+                return true;
+            }
+        }
+        if (!Refresh(err)) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = node_to_addr_.find(node_id);
+        if (it == node_to_addr_.end()) {
+            const std::string base = BaseNodeId(node_id);
+            if (base != node_id) {
+                it = node_to_addr_.find(base);
+            }
+        }
+        if (it == node_to_addr_.end()) {
+            if (err) {
+                *err = "node_id not found in scheduler view: " + node_id;
+            }
+            return false;
+        }
+        *address = it->second;
+        return true;
+    }
+
+private:
+    static std::string BaseNodeId(const std::string& node_id) {
+        const size_t pos = node_id.rfind("-v");
+        if (pos == std::string::npos || pos + 2 >= node_id.size()) {
+            return node_id;
+        }
+        for (size_t i = pos + 2; i < node_id.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(node_id[i]))) {
+                return node_id;
+            }
+        }
+        return node_id.substr(0, pos);
+    }
+
+    bool Refresh(std::string* err) {
+        brpc::Channel channel;
+        brpc::ChannelOptions options;
+        options.protocol = "baidu_std";
+        options.timeout_ms = FLAGS_timeout_ms;
+        options.max_retry = FLAGS_max_retry;
+        if (channel.Init(FLAGS_scheduler.c_str(), &options) != 0) {
+            if (err) {
+                *err = "failed to init scheduler channel";
+            }
+            return false;
+        }
+        zb::rpc::SchedulerService_Stub stub(&channel);
+        zb::rpc::GetClusterViewRequest req;
+        req.set_min_generation(0);
+        zb::rpc::GetClusterViewReply resp;
+        brpc::Controller cntl;
+        stub.GetClusterView(&cntl, &req, &resp, nullptr);
+        if (cntl.Failed()) {
+            if (err) {
+                *err = cntl.ErrorText();
+            }
+            return false;
+        }
+        if (resp.status().code() != zb::rpc::SCHED_OK) {
+            if (err) {
+                *err = resp.status().message();
+            }
+            return false;
+        }
+        std::unordered_map<std::string, std::string> updated;
+        for (const auto& node : resp.nodes()) {
+            if (node.node_id().empty() || node.address().empty()) {
+                continue;
+            }
+            updated[node.node_id()] = node.address();
+        }
+        std::lock_guard<std::mutex> lock(mu_);
+        node_to_addr_.swap(updated);
+        last_refresh_ms_ = NowMilliseconds();
+        return true;
+    }
+
+    std::mutex mu_;
+    std::unordered_map<std::string, std::string> node_to_addr_;
+    uint64_t last_refresh_ms_{0};
+};
+
+SchedulerAddressBook& AddressBook() {
+    static SchedulerAddressBook book;
+    return book;
+}
 
 std::string ReplicaObjectId(const zb::rpc::ReplicaLocation& replica) {
     return replica.object_id();
+}
+
+std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index) {
+    return "obj-" + std::to_string(inode_id) + "-" + std::to_string(object_index);
+}
+
+zb::rpc::ReplicaLocation BuildObjectReplicaFromAnchor(const zb::rpc::ReplicaLocation& anchor,
+                                                      uint64_t inode_id,
+                                                      uint32_t object_index) {
+    zb::rpc::ReplicaLocation replica = anchor;
+    replica.set_object_id(BuildStableObjectId(inode_id, object_index));
+    replica.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+    replica.set_replica_state(zb::rpc::REPLICA_READY);
+    return replica;
 }
 
 class MdsClient {
@@ -120,14 +253,12 @@ public:
         return true;
     }
 
-    bool AllocateWrite(uint64_t inode_id, uint64_t offset, uint64_t size, zb::rpc::FileLayout* layout, std::string* err) {
-        zb::rpc::AllocateWriteRequest req;
+    bool GetFileAnchor(uint64_t inode_id, zb::rpc::ReplicaLocation* anchor, std::string* err) {
+        zb::rpc::GetFileAnchorRequest req;
         req.set_inode_id(inode_id);
-        req.set_offset(offset);
-        req.set_size(size);
-        zb::rpc::AllocateWriteReply resp;
+        zb::rpc::GetFileAnchorReply resp;
         brpc::Controller cntl;
-        stub_.AllocateWrite(&cntl, &req, &resp, nullptr);
+        stub_.GetFileAnchor(&cntl, &req, &resp, nullptr);
         if (cntl.Failed()) {
             if (err) {
                 *err = cntl.ErrorText();
@@ -140,56 +271,26 @@ public:
             }
             return false;
         }
-        if (layout) {
-            *layout = resp.layout();
-        }
-        return true;
-    }
-
-    bool CommitWrite(uint64_t inode_id, uint64_t new_size, std::string* err) {
-        zb::rpc::CommitWriteRequest req;
-        req.set_inode_id(inode_id);
-        req.set_new_size(new_size);
-        zb::rpc::CommitWriteReply resp;
-        brpc::Controller cntl;
-        stub_.CommitWrite(&cntl, &req, &resp, nullptr);
-        if (cntl.Failed()) {
-            if (err) {
-                *err = cntl.ErrorText();
+        if (anchor) {
+            const auto& set = resp.anchor();
+            if (!set.disk_anchor().node_id().empty() && !set.disk_anchor().disk_id().empty()) {
+                anchor->set_node_id(set.disk_anchor().node_id());
+                anchor->set_disk_id(set.disk_anchor().disk_id());
+                anchor->set_object_id(set.disk_anchor().object_id());
+                anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+                anchor->set_replica_state(set.disk_anchor().replica_state());
+            } else if (!set.optical_anchor().node_id().empty() && !set.optical_anchor().disk_id().empty()) {
+                anchor->set_node_id(set.optical_anchor().node_id());
+                anchor->set_disk_id(set.optical_anchor().disk_id());
+                anchor->set_object_id(set.optical_anchor().object_id());
+                anchor->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
+                anchor->set_replica_state(set.optical_anchor().replica_state());
+            } else {
+                if (err) {
+                    *err = "GetFileAnchor returned empty anchor set";
+                }
+                return false;
             }
-            return false;
-        }
-        if (resp.status().code() != zb::rpc::MDS_OK) {
-            if (err) {
-                *err = resp.status().message();
-            }
-            return false;
-        }
-        return true;
-    }
-
-    bool GetLayout(uint64_t inode_id, uint64_t offset, uint64_t size, zb::rpc::FileLayout* layout, std::string* err) {
-        zb::rpc::GetLayoutRequest req;
-        req.set_inode_id(inode_id);
-        req.set_offset(offset);
-        req.set_size(size);
-        zb::rpc::GetLayoutReply resp;
-        brpc::Controller cntl;
-        stub_.GetLayout(&cntl, &req, &resp, nullptr);
-        if (cntl.Failed()) {
-            if (err) {
-                *err = cntl.ErrorText();
-            }
-            return false;
-        }
-        if (resp.status().code() != zb::rpc::MDS_OK) {
-            if (err) {
-                *err = resp.status().message();
-            }
-            return false;
-        }
-        if (layout) {
-            *layout = resp.layout();
         }
         return true;
     }
@@ -201,22 +302,118 @@ private:
 
 class DataNodeClient {
 public:
+    bool ResolveFileRead(const zb::rpc::ReplicaLocation& replica,
+                         uint64_t inode_id,
+                         uint64_t offset,
+                         uint64_t size,
+                         uint64_t object_unit_size_hint,
+                         zb::rpc::FileMeta* meta,
+                         std::vector<zb::rpc::FileObjectSlice>* slices,
+                         std::string* err) {
+        std::vector<std::string> addresses = CollectAddresses(replica);
+        if (addresses.empty()) {
+            if (err) {
+                *err = "no endpoint in replica";
+            }
+            return false;
+        }
+        std::string last_error = "ResolveFileRead failed";
+        for (const auto& address : addresses) {
+            brpc::Channel* ch = GetChannel(address, &last_error);
+            if (!ch) {
+                continue;
+            }
+            zb::rpc::RealNodeService_Stub stub(ch);
+            zb::rpc::ResolveFileReadRequest req;
+            req.set_inode_id(inode_id);
+            req.set_offset(offset);
+            req.set_size(size);
+            req.set_disk_id(replica.disk_id());
+            req.set_object_unit_size_hint(object_unit_size_hint);
+            zb::rpc::ResolveFileReadReply resp;
+            brpc::Controller cntl;
+            cntl.set_timeout_ms(FLAGS_timeout_ms);
+            stub.ResolveFileRead(&cntl, &req, &resp, nullptr);
+            if (cntl.Failed()) {
+                last_error = cntl.ErrorText();
+                continue;
+            }
+            if (resp.status().code() == zb::rpc::STATUS_OK) {
+                if (meta) {
+                    *meta = resp.meta();
+                }
+                if (slices) {
+                    slices->assign(resp.slices().begin(), resp.slices().end());
+                }
+                return true;
+            }
+            last_error = resp.status().message();
+        }
+        if (err) {
+            *err = last_error;
+        }
+        return false;
+    }
+
+    bool CommitFileWrite(const zb::rpc::ReplicaLocation& replica,
+                        uint64_t inode_id,
+                        const std::string& txid,
+                        uint64_t file_size,
+                        uint64_t object_unit_size,
+                        uint64_t expected_version,
+                        bool allow_create,
+                        zb::rpc::FileMeta* committed,
+                        std::string* err) {
+        std::vector<std::string> addresses = CollectAddresses(replica);
+        if (addresses.empty()) {
+            if (err) {
+                *err = "no endpoint in replica";
+            }
+            return false;
+        }
+        std::string last_error = "CommitFileWrite failed";
+        for (const auto& address : addresses) {
+            brpc::Channel* ch = GetChannel(address, &last_error);
+            if (!ch) {
+                continue;
+            }
+            zb::rpc::RealNodeService_Stub stub(ch);
+            zb::rpc::CommitFileWriteRequest req;
+            req.set_inode_id(inode_id);
+            req.set_txid(txid);
+            req.set_file_size(file_size);
+            req.set_object_unit_size(object_unit_size);
+            req.set_expected_version(expected_version);
+            req.set_allow_create(allow_create);
+            req.set_mtime_sec(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count()));
+            zb::rpc::CommitFileWriteReply resp;
+            brpc::Controller cntl;
+            cntl.set_timeout_ms(FLAGS_timeout_ms);
+            stub.CommitFileWrite(&cntl, &req, &resp, nullptr);
+            if (cntl.Failed()) {
+                last_error = cntl.ErrorText();
+                continue;
+            }
+            if (resp.status().code() == zb::rpc::STATUS_OK) {
+                if (committed) {
+                    *committed = resp.meta();
+                }
+                return true;
+            }
+            last_error = resp.status().message();
+        }
+        if (err) {
+            *err = last_error;
+        }
+        return false;
+    }
+
     bool WriteReplica(const zb::rpc::ReplicaLocation& replica,
                       uint64_t offset,
                       const std::string& data,
                       std::string* err) {
-        std::vector<std::string> addresses;
-        if (!replica.primary_address().empty()) {
-            addresses.push_back(replica.primary_address());
-        }
-        if (!replica.node_address().empty() &&
-            std::find(addresses.begin(), addresses.end(), replica.node_address()) == addresses.end()) {
-            addresses.push_back(replica.node_address());
-        }
-        if (!replica.secondary_address().empty() &&
-            std::find(addresses.begin(), addresses.end(), replica.secondary_address()) == addresses.end()) {
-            addresses.push_back(replica.secondary_address());
-        }
+        std::vector<std::string> addresses = CollectAddresses(replica);
 
         if (addresses.empty()) {
             if (err) {
@@ -259,6 +456,32 @@ public:
     }
 
 private:
+    static std::vector<std::string> CollectAddresses(const zb::rpc::ReplicaLocation& replica) {
+        std::vector<std::string> addresses;
+        auto push_unique = [&addresses](const std::string& address) {
+            if (address.empty()) {
+                return;
+            }
+            if (std::find(addresses.begin(), addresses.end(), address) == addresses.end()) {
+                addresses.push_back(address);
+            }
+        };
+        auto resolve_and_push = [&push_unique](const std::string& node_id) {
+            if (node_id.empty()) {
+                return;
+            }
+            std::string address;
+            std::string ignore_error;
+            if (AddressBook().Resolve(node_id, &address, &ignore_error)) {
+                push_unique(address);
+            }
+        };
+        resolve_and_push(replica.primary_node_id());
+        resolve_and_push(replica.node_id());
+        resolve_and_push(replica.secondary_node_id());
+        return addresses;
+    }
+
     brpc::Channel* GetChannel(const std::string& address, std::string* err) {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = channels_.find(address);
@@ -329,25 +552,88 @@ std::string BuildWritePayload(size_t size, uint64_t seq) {
     return data;
 }
 
-bool WriteByLayout(DataNodeClient* data_client,
-                   const zb::rpc::FileLayout& layout,
+bool EnsureFileMeta(DataNodeClient* data_client, FileState* file, std::string* err) {
+    if (!data_client || !file || file->inode_id == 0 ||
+        file->anchor.node_id().empty() || file->anchor.disk_id().empty()) {
+        if (err) {
+            *err = "invalid file meta context";
+        }
+        return false;
+    }
+    if (file->object_unit_size == 0) {
+        file->object_unit_size = FLAGS_object_unit_size;
+    }
+    if (file->file_meta_version > 0) {
+        return true;
+    }
+    zb::rpc::FileMeta meta;
+    std::vector<zb::rpc::FileObjectSlice> ignored_slices;
+    if (data_client->ResolveFileRead(file->anchor,
+                                     file->inode_id,
+                                     0,
+                                     0,
+                                     file->object_unit_size,
+                                     &meta,
+                                     &ignored_slices,
+                                     err)) {
+        file->size = meta.file_size();
+        file->object_unit_size = meta.object_unit_size() > 0 ? meta.object_unit_size() : file->object_unit_size;
+        file->file_meta_version = meta.version();
+        return true;
+    }
+
+    zb::rpc::FileMeta committed;
+    const std::string txid =
+        "bootstrap-" + std::to_string(file->inode_id) + "-" + std::to_string(static_cast<uint64_t>(NowMilliseconds()));
+    if (!data_client->CommitFileWrite(file->anchor,
+                                      file->inode_id,
+                                      txid,
+                                      file->size,
+                                      file->object_unit_size,
+                                      0,
+                                      true,
+                                      &committed,
+                                      err)) {
+        return false;
+    }
+    file->size = committed.file_size();
+    file->object_unit_size = committed.object_unit_size() > 0 ? committed.object_unit_size() : file->object_unit_size;
+    file->file_meta_version = committed.version();
+    return true;
+}
+
+bool WriteByAnchor(DataNodeClient* data_client,
+                   const FileState& file,
                    uint64_t file_offset,
                    const std::string& payload,
                    std::string* err) {
-    if (!data_client) {
+    if (!data_client || file.object_unit_size == 0) {
         if (err) {
-            *err = "data client is null";
+            *err = "data client is null or object_unit_size is zero";
         }
         return false;
     }
 
-    const uint64_t object_unit_size = layout.object_unit_size();
+    const uint64_t object_unit_size = file.object_unit_size;
     const uint64_t write_size = static_cast<uint64_t>(payload.size());
-    for (const auto& object : layout.objects()) {
-        const uint64_t object_start = static_cast<uint64_t>(object.index()) * object_unit_size;
+    if (write_size == 0) {
+        return true;
+    }
+    if (file_offset > std::numeric_limits<uint64_t>::max() - write_size) {
+        if (err) {
+            *err = "file offset + write size overflow";
+        }
+        return false;
+    }
+    const uint64_t write_end_global = file_offset + write_size;
+    const uint64_t start_index = file_offset / object_unit_size;
+    const uint64_t end_index = (write_end_global - 1) / object_unit_size;
+    for (uint64_t i = start_index; i <= end_index; ++i) {
+        const uint32_t object_index = static_cast<uint32_t>(i);
+        const uint64_t object_start = static_cast<uint64_t>(object_index) * object_unit_size;
         const uint64_t object_end = object_start + object_unit_size;
         const uint64_t write_start = std::max<uint64_t>(object_start, file_offset);
-        const uint64_t write_end = std::min<uint64_t>(object_end, file_offset + write_size);
+        const uint64_t write_end = std::min<uint64_t>(object_end, write_end_global);
         if (write_end <= write_start) {
             continue;
         }
@@ -357,18 +643,18 @@ bool WriteByLayout(DataNodeClient* data_client,
         const uint64_t payload_off = write_start - file_offset;
         const std::string piece = payload.substr(static_cast<size_t>(payload_off), static_cast<size_t>(write_len));
 
-        for (const auto& replica : object.replicas()) {
-            if (!data_client->WriteReplica(replica, object_off, piece, err)) {
-                return false;
-            }
+        const zb::rpc::ReplicaLocation replica =
+            BuildObjectReplicaFromAnchor(file.anchor, file.inode_id, object_index);
+        if (!data_client->WriteReplica(replica, object_off, piece, err)) {
+            return false;
         }
     }
     return true;
 }
 
-LayoutStats CollectLayoutStats(MdsClient* mds, const std::vector<FileState>& files) {
-    LayoutStats stats;
-    if (!mds || files.empty()) {
+ResolveStats CollectResolveStats(DataNodeClient* data_client, const std::vector<FileState>& files) {
+    ResolveStats stats;
+    if (!data_client || files.empty()) {
         return stats;
     }
 
@@ -378,34 +664,22 @@ LayoutStats CollectLayoutStats(MdsClient* mds, const std::vector<FileState>& fil
         if (f.inode_id == 0 || f.size == 0) {
             continue;
         }
-        zb::rpc::FileLayout layout;
+        zb::rpc::FileMeta meta;
+        std::vector<zb::rpc::FileObjectSlice> slices;
         std::string err;
-        if (!mds->GetLayout(f.inode_id, 0, f.size, &layout, &err)) {
+        if (!data_client->ResolveFileRead(f.anchor,
+                                          f.inode_id,
+                                          0,
+                                          f.size,
+                                          f.object_unit_size,
+                                          &meta,
+                                          &slices,
+                                          &err)) {
             continue;
         }
 
         ++stats.files_scanned;
-        for (const auto& object : layout.objects()) {
-            bool has_optical = false;
-            bool has_disk = false;
-            for (const auto& replica : object.replicas()) {
-                if (replica.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL) {
-                    has_optical = true;
-                } else {
-                    has_disk = true;
-                }
-            }
-            ++stats.objects_total;
-            if (has_optical) {
-                ++stats.objects_with_optical;
-            }
-            if (has_disk) {
-                ++stats.objects_with_disk;
-            }
-            if (has_optical && !has_disk) {
-                ++stats.objects_optical_only;
-            }
-        }
+        stats.objects_total += static_cast<uint64_t>(slices.size());
     }
     return stats;
 }
@@ -445,8 +719,13 @@ int main(int argc, char* argv[]) {
     for (uint32_t i = 0; i < FLAGS_file_count; ++i) {
         FileState state;
         state.path = base_dir + "/f_" + std::to_string(i) + ".bin";
+        state.object_unit_size = FLAGS_object_unit_size;
         if (!mds.Create(state.path, FLAGS_replica, FLAGS_object_unit_size, &state.inode_id, &err)) {
             std::cerr << "Create failed: " << state.path << " err=" << err << std::endl;
+            return 1;
+        }
+        if (!mds.GetFileAnchor(state.inode_id, &state.anchor, &err)) {
+            std::cerr << "GetFileAnchor failed: " << state.path << " err=" << err << std::endl;
             return 1;
         }
         files.push_back(std::move(state));
@@ -464,9 +743,6 @@ int main(int argc, char* argv[]) {
     uint64_t total_bytes = 0;
     uint64_t write_ops = 0;
     uint64_t failures = 0;
-    bool observed_optical = false;
-    bool observed_optical_only = false;
-
     size_t file_index = 0;
     while (true) {
         const auto now = std::chrono::steady_clock::now();
@@ -482,46 +758,56 @@ int main(int argc, char* argv[]) {
         FileState& f = files[file_index];
         file_index = (file_index + 1) % files.size();
 
+        if (!EnsureFileMeta(&data_client, &f, &err)) {
+            ++failures;
+            std::cerr << "EnsureFileMeta failed inode=" << f.inode_id << " err=" << err << std::endl;
+            continue;
+        }
         const std::string payload = BuildWritePayload(static_cast<size_t>(FLAGS_write_size), seq++);
         const uint64_t offset = f.size;
 
-        zb::rpc::FileLayout layout;
-        if (!mds.AllocateWrite(f.inode_id, offset, FLAGS_write_size, &layout, &err)) {
-            ++failures;
-            std::cerr << "AllocateWrite failed inode=" << f.inode_id << " err=" << err << std::endl;
-            continue;
-        }
-
-        if (!WriteByLayout(&data_client, layout, offset, payload, &err)) {
+        if (!WriteByAnchor(&data_client, f, offset, payload, &err)) {
             ++failures;
             std::cerr << "object write failed inode=" << f.inode_id << " err=" << err << std::endl;
             continue;
         }
 
         const uint64_t new_size = offset + FLAGS_write_size;
-        if (!mds.CommitWrite(f.inode_id, new_size, &err)) {
+        zb::rpc::FileMeta committed_meta;
+        const std::string txid =
+            "write-" + std::to_string(f.inode_id) + "-" + std::to_string(seq) + "-" +
+            std::to_string(static_cast<uint64_t>(NowMilliseconds()));
+        if (!data_client.CommitFileWrite(f.anchor,
+                                         f.inode_id,
+                                         txid,
+                                         new_size,
+                                         f.object_unit_size,
+                                         f.file_meta_version,
+                                         true,
+                                         &committed_meta,
+                                         &err)) {
             ++failures;
-            std::cerr << "CommitWrite failed inode=" << f.inode_id << " err=" << err << std::endl;
+            std::cerr << "CommitFileWrite failed inode=" << f.inode_id << " err=" << err << std::endl;
             continue;
         }
 
-        f.size = new_size;
+        f.size = committed_meta.file_size();
+        if (committed_meta.object_unit_size() > 0) {
+            f.object_unit_size = committed_meta.object_unit_size();
+        }
+        f.file_meta_version = committed_meta.version();
         ++f.writes;
         ++write_ops;
         total_bytes += FLAGS_write_size;
 
         if (now >= next_report) {
-            LayoutStats stats = CollectLayoutStats(&mds, files);
-            observed_optical = observed_optical || (stats.objects_with_optical > 0);
-            observed_optical_only = observed_optical_only || (stats.objects_optical_only > 0);
+            ResolveStats stats = CollectResolveStats(&data_client, files);
             std::cout << "[report] elapsed_sec=" << elapsed_sec
                       << " total_bytes=" << total_bytes
                       << " write_ops=" << write_ops
                       << " failures=" << failures
                       << " sampled_files=" << stats.files_scanned
                       << " sampled_objects=" << stats.objects_total
-                      << " objects_with_optical=" << stats.objects_with_optical
-                      << " objects_optical_only=" << stats.objects_optical_only
                       << std::endl;
             next_report = now + std::chrono::seconds(std::max<uint32_t>(1, FLAGS_report_interval_sec));
         }
@@ -530,31 +816,21 @@ int main(int argc, char* argv[]) {
     if (FLAGS_cooldown_sec > 0) {
         std::cout << "cooldown " << FLAGS_cooldown_sec << "s for archive/evict..." << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(FLAGS_cooldown_sec));
-        LayoutStats stats = CollectLayoutStats(&mds, files);
-        observed_optical = observed_optical || (stats.objects_with_optical > 0);
-        observed_optical_only = observed_optical_only || (stats.objects_optical_only > 0);
+        ResolveStats stats = CollectResolveStats(&data_client, files);
         std::cout << "[cooldown-check] sampled_files=" << stats.files_scanned
                   << " sampled_objects=" << stats.objects_total
-                  << " objects_with_optical=" << stats.objects_with_optical
-                  << " objects_optical_only=" << stats.objects_optical_only
                   << std::endl;
     }
 
     std::cout << "Finished: total_bytes=" << total_bytes
               << " write_ops=" << write_ops
               << " failures=" << failures
-              << " observed_optical=" << (observed_optical ? "true" : "false")
-              << " observed_optical_only=" << (observed_optical_only ? "true" : "false")
               << " base_dir=" << base_dir
               << std::endl;
 
-    if (FLAGS_require_optical && !observed_optical) {
-        std::cerr << "FAILED: no optical replica observed in sampled layout." << std::endl;
-        return 2;
-    }
-    if (FLAGS_require_optical_only_after_cooldown && !observed_optical_only) {
-        std::cerr << "FAILED: no optical-only object observed after cooldown." << std::endl;
-        return 3;
+    if (FLAGS_require_optical || FLAGS_require_optical_only_after_cooldown) {
+        std::cout << "Note: require_optical flags are deprecated and ignored in simplified metadata mode."
+                  << std::endl;
     }
     if (failures > 0) {
         std::cerr << "FAILED: write failures encountered=" << failures << std::endl;

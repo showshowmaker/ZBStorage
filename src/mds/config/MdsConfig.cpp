@@ -278,49 +278,6 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
             cfg.archive_staging_dir = value;
         } else if (key == "ARCHIVE_BATCH_MAX_AGE_MS") {
             cfg.archive_batch_max_age_ms = static_cast<uint64_t>(std::stoull(value));
-        } else if (key == "ENABLE_LAYOUT_GC") {
-            if (!ParseBool(value, &cfg.enable_layout_gc)) {
-                if (error) {
-                    *error = "Invalid ENABLE_LAYOUT_GC value: " + value;
-                }
-                return {};
-            }
-        } else if (key == "LAYOUT_GC_INTERVAL_MS") {
-            cfg.layout_gc_interval_ms = static_cast<uint32_t>(std::stoul(value));
-        } else if (key == "LAYOUT_GC_ORPHAN_GRACE_MS") {
-            cfg.layout_gc_orphan_grace_ms = static_cast<uint64_t>(std::stoull(value));
-        } else if (key == "LAYOUT_GC_MAX_DELETE_PER_ROUND") {
-            cfg.layout_gc_max_delete_per_round = static_cast<uint32_t>(std::stoul(value));
-        } else if (key == "LAYOUT_GC_DRY_RUN") {
-            if (!ParseBool(value, &cfg.layout_gc_dry_run)) {
-                if (error) {
-                    *error = "Invalid LAYOUT_GC_DRY_RUN value: " + value;
-                }
-                return {};
-            }
-        } else if (key == "LAYOUT_GC_PAUSED") {
-            if (!ParseBool(value, &cfg.layout_gc_paused)) {
-                if (error) {
-                    *error = "Invalid LAYOUT_GC_PAUSED value: " + value;
-                }
-                return {};
-            }
-        } else if (key == "LAYOUT_OBJECT_REPLICA_COUNT") {
-            cfg.layout_object_replica_count = static_cast<uint32_t>(std::stoul(value));
-        } else if (key == "LAYOUT_OBJECT_SCRUB_ON_LOAD") {
-            if (!ParseBool(value, &cfg.layout_object_scrub_on_load)) {
-                if (error) {
-                    *error = "Invalid LAYOUT_OBJECT_SCRUB_ON_LOAD value: " + value;
-                }
-                return {};
-            }
-        } else if (key == "ENABLE_SIMPLIFIED_ANCHOR_METADATA") {
-            if (!ParseBool(value, &cfg.enable_simplified_anchor_metadata)) {
-                if (error) {
-                    *error = "Invalid ENABLE_SIMPLIFIED_ANCHOR_METADATA value: " + value;
-                }
-                return {};
-            }
         } else if (key == "NODES") {
             auto nodes = Split(value, ';');
             cfg.nodes.clear();
@@ -379,9 +336,6 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
     if (cfg.archive_candidate_queue_size == 0) {
         cfg.archive_candidate_queue_size = 1;
     }
-    if (cfg.layout_object_replica_count == 0) {
-        cfg.layout_object_replica_count = 1;
-    }
     if (cfg.archive_lease_min_ms == 0) {
         cfg.archive_lease_min_ms = 1;
     }
@@ -399,15 +353,6 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
     }
     if (cfg.pg_view_epoch == 0) {
         cfg.pg_view_epoch = 1;
-    }
-    if (cfg.layout_gc_interval_ms == 0) {
-        cfg.layout_gc_interval_ms = 1000;
-    }
-    if (cfg.layout_gc_orphan_grace_ms == 0) {
-        cfg.layout_gc_orphan_grace_ms = 1;
-    }
-    if (cfg.layout_gc_max_delete_per_round == 0) {
-        cfg.layout_gc_max_delete_per_round = 1;
     }
     if (cfg.nodes.empty() && cfg.scheduler_address.empty() && error) {
         *error = "NODES is required when SCHEDULER_ADDR is not set";

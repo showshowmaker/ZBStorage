@@ -414,46 +414,13 @@ zb::msg::Status ImageStore::ReadObject(const std::string& disk_id,
     SleepByBytes(load_delay_bytes, optical_read_bytes_per_sec_);
     SleepByBytes(read_delay_bytes, cache_read_bytes_per_sec_);
 
-    if (use_simulated_payload) {
-        *out = BuildSimulatedObjectData(object_id, offset, read_delay_bytes);
-        if (bytes_read) {
-            *bytes_read = static_cast<uint64_t>(out->size());
-        }
-        return zb::msg::Status::Ok();
-    }
-
-    std::ifstream input(cache_image_path, std::ios::binary);
-    if (!input) {
-        if (simulate_io_) {
-            *out = BuildSimulatedObjectData(object_id, offset, read_delay_bytes);
-            if (bytes_read) {
-                *bytes_read = static_cast<uint64_t>(out->size());
-            }
-            return zb::msg::Status::Ok();
-        }
-        return zb::msg::Status::IoError("failed to open cached image");
-    }
-    input.seekg(static_cast<std::streamoff>(rec.offset + offset));
-    if (!input.good()) {
-        if (simulate_io_) {
-            *out = BuildSimulatedObjectData(object_id, offset, read_delay_bytes);
-            if (bytes_read) {
-                *bytes_read = static_cast<uint64_t>(out->size());
-            }
-            return zb::msg::Status::Ok();
-        }
-        return zb::msg::Status::IoError("failed to seek cached image");
-    }
-
-    out->assign(static_cast<size_t>(read_delay_bytes), '\0');
-    input.read(out->data(), static_cast<std::streamsize>(read_delay_bytes));
-    std::streamsize got = input.gcount();
-    if (got < 0) {
-        return zb::msg::Status::IoError("failed to read cached image");
-    }
-    out->resize(static_cast<size_t>(got));
+    (void)use_simulated_payload;
+    (void)cache_image_path;
+    (void)object_id;
+    (void)offset;
+    out->assign(static_cast<size_t>(read_delay_bytes), 'x');
     if (bytes_read) {
-        *bytes_read = static_cast<uint64_t>(got);
+        *bytes_read = static_cast<uint64_t>(out->size());
     }
     return zb::msg::Status::Ok();
 }
@@ -574,40 +541,9 @@ zb::msg::Status ImageStore::ReadArchivedFile(const std::string& disc_id,
     SleepByBytes(load_delay_bytes, optical_read_bytes_per_sec_);
     SleepByBytes(read_delay_bytes, cache_read_bytes_per_sec_);
 
-    out->assign(static_cast<size_t>(response_size), '\0');
-    for (const auto& seg : segments) {
-        std::ifstream input(seg.image_path, std::ios::binary);
-        if (!input) {
-            if (!simulate_io_) {
-                return zb::msg::Status::IoError("failed to open archived image file");
-            }
-            const std::string sim = BuildSimulatedObjectData(effective_file_id, seg.dst_offset, seg.length);
-            std::memcpy(out->data() + static_cast<size_t>(seg.dst_offset), sim.data(), static_cast<size_t>(seg.length));
-            continue;
-        }
-        input.seekg(static_cast<std::streamoff>(seg.image_offset));
-        if (!input.good()) {
-            if (!simulate_io_) {
-                return zb::msg::Status::IoError("failed to seek archived image");
-            }
-            const std::string sim = BuildSimulatedObjectData(effective_file_id, seg.dst_offset, seg.length);
-            std::memcpy(out->data() + static_cast<size_t>(seg.dst_offset), sim.data(), static_cast<size_t>(seg.length));
-            continue;
-        }
-
-        std::string part(static_cast<size_t>(seg.length), '\0');
-        input.read(part.data(), static_cast<std::streamsize>(seg.length));
-        std::streamsize got = input.gcount();
-        if (got <= 0) {
-            if (!simulate_io_) {
-                return zb::msg::Status::IoError("failed to read archived image");
-            }
-            const std::string sim = BuildSimulatedObjectData(effective_file_id, seg.dst_offset, seg.length);
-            std::memcpy(out->data() + static_cast<size_t>(seg.dst_offset), sim.data(), static_cast<size_t>(seg.length));
-            continue;
-        }
-        std::memcpy(out->data() + static_cast<size_t>(seg.dst_offset), part.data(), static_cast<size_t>(got));
-    }
+    (void)segments;
+    (void)effective_file_id;
+    out->assign(static_cast<size_t>(response_size), 'x');
 
     if (bytes_read) {
         *bytes_read = response_size;

@@ -87,6 +87,11 @@ public:
     zb::data_node::ObjectReadResult GetObject(const zb::data_node::ObjectReadRequest& request);
     zb::msg::Status DeleteObject(const zb::data_node::ObjectDeleteRequest& request);
     zb::msg::DiskReportReply GetDiskReport() const;
+    zb::msg::DeleteFileMetaReply DeleteFileMeta(const zb::msg::DeleteFileMetaRequest& request);
+    zb::msg::ResolveFileReadReply ResolveFileRead(const zb::msg::ResolveFileReadRequest& request) const;
+    zb::msg::AllocateFileWriteReply AllocateFileWrite(const zb::msg::AllocateFileWriteRequest& request) const;
+    zb::msg::CommitFileWriteReply CommitFileWrite(const zb::msg::CommitFileWriteRequest& request);
+    void SetFileMetaStoreDir(const std::string& dir_path);
     bool InitArchiveMetaStore(const std::string& meta_dir,
                               size_t max_objects,
                               uint32_t snapshot_interval_ops,
@@ -101,6 +106,15 @@ public:
     std::vector<ArchiveCandidateStat> CollectArchiveCandidates(uint32_t max_candidates, uint64_t min_age_ms) const;
 
 private:
+    struct PreloadedFileObjectInfo {
+        std::string home_disk_id;
+        uint64_t seed{0};
+    };
+
+    bool ApplyFileMetaInternal(const zb::msg::ApplyFileMetaRequest& request,
+                                const std::string* txid,
+                                zb::msg::ApplyFileMetaReply* reply);
+
     struct ReplicationRepairTask {
         std::string key;
         zb::msg::WriteObjectRequest request;
@@ -129,7 +143,24 @@ private:
     void ReplicationRepairLoop();
     static uint64_t FastChecksum64(const std::string& data);
     static uint64_t NowMilliseconds();
+    static std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index);
+    static bool ParseStableObjectId(const std::string& object_id, uint64_t* inode_id, uint32_t* object_index);
+    static void BuildObjectSlices(uint64_t inode_id,
+                                  uint64_t offset,
+                                  uint64_t size,
+                                  uint64_t object_unit_size,
+                                  const std::string& disk_id,
+                                  std::vector<zb::msg::FileObjectSlice>* slices);
+    bool TryReadPreloadedObjectLocked(const std::string& effective_disk,
+                                      const std::string& object_id,
+                                      uint64_t offset,
+                                      uint64_t size,
+                                      std::string* out,
+                                      uint64_t* bytes_read) const;
     static std::string BuildObjectKey(const std::string& disk_id, const std::string& object_id);
+    bool InitFileMetaStorePath() const;
+    bool LoadFileMetaStoreLocked(std::string* error) const;
+    bool PersistFileMetaStoreLocked(std::string* error) const;
 
     VirtualNodeConfig config_;
     std::unordered_set<std::string> disk_set_;
@@ -138,6 +169,11 @@ private:
     std::unordered_map<std::string, std::string> object_home_disk_;
     std::unordered_map<std::string, uint64_t> object_sizes_;
     std::unordered_map<std::string, uint64_t> disk_used_bytes_;
+    mutable std::unordered_map<uint64_t, zb::msg::FileMeta> file_meta_by_inode_;
+    mutable std::unordered_map<uint64_t, PreloadedFileObjectInfo> preloaded_file_objects_;
+    mutable std::unordered_map<uint64_t, std::string> last_commit_txid_by_inode_;
+    mutable std::string file_meta_store_path_;
+    mutable bool file_meta_loaded_{false};
     mutable std::mutex rng_mu_;
     std::mt19937 rng_;
 

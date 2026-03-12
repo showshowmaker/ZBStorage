@@ -190,7 +190,9 @@ bool PGManager::IsNodeAllocatable(const NodeInfo& node) {
         return false;
     }
     for (const auto& disk : node.disks) {
-        if (disk.is_healthy) {
+        const bool free_known = disk.capacity_bytes > 0 || disk.free_bytes > 0;
+        const bool writable = disk.free_bytes > 0 || !free_known;
+        if (disk.is_healthy && writable) {
             return true;
         }
     }
@@ -211,7 +213,9 @@ std::vector<PGManager::CandidateNode> PGManager::BuildCandidates(const std::vect
         std::vector<std::string> healthy_disks;
         healthy_disks.reserve(node.disks.size());
         for (const auto& disk : node.disks) {
-            if (disk.is_healthy && !disk.disk_id.empty()) {
+            const bool free_known = disk.capacity_bytes > 0 || disk.free_bytes > 0;
+            const bool writable = disk.free_bytes > 0 || !free_known;
+            if (disk.is_healthy && writable && !disk.disk_id.empty()) {
                 healthy_disks.push_back(disk.disk_id);
             }
         }

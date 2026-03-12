@@ -57,13 +57,6 @@ enum ReplicaState {
   REPLICA_DEGRADED = 2;
 }
 
-enum ReadPlanSource {
-  READ_PLAN_SOURCE_UNKNOWN = 0;
-  READ_PLAN_SOURCE_LAYOUT = 1;
-  READ_PLAN_SOURCE_RESERVED_2 = 2;
-  READ_PLAN_SOURCE_OPTICAL = 3;
-}
-
 message ReplicaLocation {
   string node_id = 1;
   string node_address = 2;
@@ -91,44 +84,35 @@ message ObjectMeta {
   repeated ReplicaLocation replicas = 2;
 }
 
-message FileLayout {
-  uint64 inode_id = 1;
-  uint64 object_unit_size = 2;
-  repeated ObjectMeta objects = 3;
-}
-
-message OpticalReadPlan {
-  bool enabled = 1;
-  string node_id = 2;
-  string node_address = 3;
-  string disc_id = 4;
-  uint64 inode_id = 5;
-  string file_id = 6;
-  uint64 file_size = 7;
-  uint64 layout_version = 8;
-}
-
-message LayoutRoot {
-  uint64 inode_id = 1;
-  string layout_root_id = 2;
-  uint64 layout_version = 3;
-  uint64 file_size = 4;
-  uint64 epoch = 5;
-  uint64 update_ts = 6;
-  uint64 object_unit_size = 7;
-}
-
-message LayoutExtent {
-  uint64 logical_offset = 1;
-  uint64 length = 2;
+message FileAnchorLite {
+  string node_id = 1;
+  string disk_id = 2;
   string object_id = 3;
-  uint64 object_offset = 4;
-  uint64 object_length = 5;
-  uint64 object_version = 6;
-  uint32 object_index = 7;
-  uint32 pg_id = 8;
-  uint64 placement_epoch = 9;
-  StorageTier storage_tier = 10;
+  uint64 size = 4;
+  StorageTier storage_tier = 5;
+  ReplicaState replica_state = 6;
+  string image_id = 7;
+  uint64 image_offset = 8;
+  uint64 image_length = 9;
+}
+
+message FileAnchorSet {
+  uint32 version = 1;
+  uint32 anchor_mask = 2;
+  StorageTier primary_tier = 3;
+  FileAnchorLite disk_anchor = 4;
+  FileAnchorLite optical_anchor = 5;
+}
+
+enum PathPlacementTarget {
+  PATH_PLACEMENT_UNSPECIFIED = 0;
+  PATH_PLACEMENT_REAL_ONLY = 1;
+}
+
+message PathPlacementPolicyRecord {
+  string path_prefix = 1;
+  PathPlacementTarget target = 2;
+  bool strict = 3;
 }
 
 message LookupRequest {
@@ -158,6 +142,7 @@ message OpenReply {
   MdsStatus status = 1;
   uint64 handle_id = 2;
   InodeAttr attr = 3;
+  FileAnchorSet file_anchor = 4;
 }
 
 message CloseRequest {
@@ -180,6 +165,7 @@ message CreateRequest {
 message CreateReply {
   MdsStatus status = 1;
   InodeAttr attr = 2;
+  FileAnchorSet file_anchor = 3;
 }
 
 message MkdirRequest {
@@ -228,77 +214,26 @@ message RmdirReply {
   MdsStatus status = 1;
 }
 
-message AllocateWriteRequest {
-  uint64 inode_id = 1;
-  uint64 offset = 2;
-  uint64 size = 3;
-}
-
-message AllocateWriteReply {
-  MdsStatus status = 1;
-  FileLayout layout = 2;
-}
-
-message GetLayoutRequest {
-  uint64 inode_id = 1;
-  uint64 offset = 2;
-  uint64 size = 3;
-}
-
-message GetLayoutReply {
-  MdsStatus status = 1;
-  FileLayout layout = 2;
-  OpticalReadPlan optical_plan = 3;
-  ReadPlanSource plan_source = 4;
-}
-
-message CommitWriteRequest {
-  uint64 inode_id = 1;
-  uint64 new_size = 2;
-}
-
-message CommitWriteReply {
-  MdsStatus status = 1;
-}
-
-message GetLayoutRootRequest {
+message GetFileAnchorRequest {
   uint64 inode_id = 1;
 }
 
-message GetLayoutRootReply {
+message GetFileAnchorReply {
   MdsStatus status = 1;
-  LayoutRoot root = 2;
-  reserved 3;
+  FileAnchorSet anchor = 2;
 }
 
-message ResolveLayoutRequest {
+message UpdateInodeStatRequest {
   uint64 inode_id = 1;
-  uint64 offset = 2;
-  uint64 size = 3;
+  uint64 file_size = 2;
+  uint64 object_unit_size = 3;
+  uint64 version = 4;
+  uint64 mtime = 5;
 }
 
-message ResolveLayoutReply {
+message UpdateInodeStatReply {
   MdsStatus status = 1;
-  LayoutRoot root = 2;
-  repeated LayoutExtent extents = 3;
-  FileLayout read_plan = 4;
-  reserved 5;
-  OpticalReadPlan optical_plan = 6;
-  ReadPlanSource plan_source = 7;
-}
-
-message CommitLayoutRootRequest {
-  uint64 inode_id = 1;
-  LayoutRoot root = 2;
-  uint64 expected_layout_version = 3;
-  bool update_inode_size = 4;
-  uint64 new_size = 5;
-  string op_id = 6;
-}
-
-message CommitLayoutRootReply {
-  MdsStatus status = 1;
-  LayoutRoot root = 2;
+  InodeAttr attr = 2;
 }
 
 message DiskStat {
@@ -350,14 +285,14 @@ message ReportArchiveCandidatesReply {
 enum ArchiveLifecycleState {
   ARCHIVE_STATE_PENDING = 0;
   ARCHIVE_STATE_ARCHIVING = 1;
-  ARCHIVE_STATE_ARCHIVED = 2;
+  reserved 2;
 }
 
 message ArchiveLeaseRecord {
   reserved 1;
+  reserved 4;
   ArchiveLifecycleState state = 2;
   string owner_node_id = 3;
-  string owner_node_address = 4;
   string owner_disk_id = 5;
   string lease_id = 6;
   uint64 lease_expire_ts_ms = 7;
@@ -415,6 +350,33 @@ message CommitArchiveTaskReply {
   ArchiveLeaseRecord record = 4;
 }
 
+message SetPathPlacementPolicyRequest {
+  PathPlacementPolicyRecord policy = 1;
+}
+
+message SetPathPlacementPolicyReply {
+  MdsStatus status = 1;
+}
+
+message DeletePathPlacementPolicyRequest {
+  string path_prefix = 1;
+}
+
+message DeletePathPlacementPolicyReply {
+  MdsStatus status = 1;
+}
+
+message GetPathPlacementPolicyRequest {
+  string path = 1;
+}
+
+message GetPathPlacementPolicyReply {
+  MdsStatus status = 1;
+  bool found = 2;
+  PathPlacementPolicyRecord policy = 3;
+  string matched_prefix = 4;
+}
+
 service MdsService {
   rpc Lookup(LookupRequest) returns (LookupReply);
   rpc Getattr(GetattrRequest) returns (GetattrReply);
@@ -426,15 +388,14 @@ service MdsService {
   rpc Rename(RenameRequest) returns (RenameReply);
   rpc Unlink(UnlinkRequest) returns (UnlinkReply);
   rpc Rmdir(RmdirRequest) returns (RmdirReply);
-  rpc AllocateWrite(AllocateWriteRequest) returns (AllocateWriteReply);
-  rpc GetLayout(GetLayoutRequest) returns (GetLayoutReply);
-  rpc CommitWrite(CommitWriteRequest) returns (CommitWriteReply);
-  rpc GetLayoutRoot(GetLayoutRootRequest) returns (GetLayoutRootReply);
-  rpc ResolveLayout(ResolveLayoutRequest) returns (ResolveLayoutReply);
-  rpc CommitLayoutRoot(CommitLayoutRootRequest) returns (CommitLayoutRootReply);
+  rpc GetFileAnchor(GetFileAnchorRequest) returns (GetFileAnchorReply);
+  rpc UpdateInodeStat(UpdateInodeStatRequest) returns (UpdateInodeStatReply);
   rpc ReportNodeStatus(ReportNodeStatusRequest) returns (ReportNodeStatusReply);
   rpc ReportArchiveCandidates(ReportArchiveCandidatesRequest) returns (ReportArchiveCandidatesReply);
   rpc ClaimArchiveTask(ClaimArchiveTaskRequest) returns (ClaimArchiveTaskReply);
   rpc RenewArchiveLease(RenewArchiveLeaseRequest) returns (RenewArchiveLeaseReply);
   rpc CommitArchiveTask(CommitArchiveTaskRequest) returns (CommitArchiveTaskReply);
+  rpc SetPathPlacementPolicy(SetPathPlacementPolicyRequest) returns (SetPathPlacementPolicyReply);
+  rpc DeletePathPlacementPolicy(DeletePathPlacementPolicyRequest) returns (DeletePathPlacementPolicyReply);
+  rpc GetPathPlacementPolicy(GetPathPlacementPolicyRequest) returns (GetPathPlacementPolicyReply);
 }

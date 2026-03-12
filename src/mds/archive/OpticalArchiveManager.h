@@ -86,8 +86,6 @@ private:
                                                 std::unordered_set<std::string>* touched_object_keys,
                                                 std::string* error);
     bool ReconcileArchiveStates(uint32_t max_records, std::string* error);
-    bool ProcessReverseObjectRepairTasks(uint32_t max_records, std::string* error);
-    bool EnqueueReverseObjectRepair(const std::string& object_id, std::string* error);
     bool ResolveObjectOwner(const std::string& object_id,
                             uint64_t* inode_id,
                             uint32_t* object_index,
@@ -96,8 +94,6 @@ private:
     bool HasReadyOpticalReplica(const std::string& object_id,
                                 bool* has_ready,
                                 std::string* error);
-    bool IsOpticalWriteCommitted(const std::string& object_id, const std::string& op_id, bool* committed, std::string* error);
-    bool MarkOpticalWriteCommitted(const std::string& object_id, const std::string& op_id, std::string* error);
     bool UpdateSourceArchiveState(const ArchiveCandidateEntry& candidate,
                                   const std::string& archive_state,
                                   uint64_t version,

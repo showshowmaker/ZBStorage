@@ -5,6 +5,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -12,11 +17,14 @@
 
 namespace zb::virtual_node {
 
+namespace fs = std::filesystem;
+
 namespace {
 
 constexpr uint32_t kReplicationRepairMaxRetry = 8;
 constexpr int kReplicationRepairRetryIntervalMs = 500;
 constexpr size_t kReplicationRepairMaxQueue = 10000;
+constexpr uint64_t kDefaultObjectUnitSize = 4ULL * 1024ULL * 1024ULL;
 
 } // namespace
 
@@ -43,6 +51,23 @@ VirtualStorageServiceImpl::~VirtualStorageServiceImpl() {
     if (repl_repair_thread_.joinable()) {
         repl_repair_thread_.join();
     }
+}
+
+void VirtualStorageServiceImpl::SetFileMetaStoreDir(const std::string& dir_path) {
+    if (dir_path.empty()) {
+        return;
+    }
+    std::error_code ec;
+    fs::path dir(dir_path);
+    fs::create_directories(dir, ec);
+    if (ec) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(object_mu_);
+    file_meta_store_path_ = (dir / "file_meta.tsv").string();
+    file_meta_loaded_ = false;
+    file_meta_by_inode_.clear();
+    preloaded_file_objects_.clear();
 }
 
 void VirtualStorageServiceImpl::ConfigureReplication(const std::string& node_id,
@@ -208,7 +233,17 @@ zb::msg::ReadObjectReply VirtualStorageServiceImpl::ReadObject(const zb::msg::Re
         const std::string key = BuildObjectKey(effective_disk, object_id);
         auto it = object_data_.find(key);
         if (it == object_data_.end()) {
-            reply.status = zb::msg::Status::NotFound("object not found");
+            if (!TryReadPreloadedObjectLocked(effective_disk,
+                                              object_id,
+                                              request.offset,
+                                              request.size,
+                                              &reply.data,
+                                              &reply.bytes)) {
+                reply.status = zb::msg::Status::NotFound("object not found");
+                return reply;
+            }
+            TrackObjectAccess(effective_disk, object_id, request.offset + reply.bytes, false, 0);
+            reply.status = zb::msg::Status::Ok();
             return reply;
         }
         const std::string& blob = it->second;
@@ -326,6 +361,491 @@ zb::msg::DiskReportReply VirtualStorageServiceImpl::GetDiskReport() const {
     }
     reply.status = zb::msg::Status::Ok();
     return reply;
+}
+
+bool VirtualStorageServiceImpl::ApplyFileMetaInternal(const zb::msg::ApplyFileMetaRequest& request,
+                                                      const std::string* txid,
+                                                      zb::msg::ApplyFileMetaReply* out) {
+    if (!out) {
+        return false;
+    }
+    zb::msg::ApplyFileMetaReply reply;
+    if (request.meta.inode_id == 0) {
+        reply.status = zb::msg::Status::InvalidArgument("inode_id is empty");
+        *out = std::move(reply);
+        return true;
+    }
+    if (request.meta.object_unit_size == 0) {
+        reply.status = zb::msg::Status::InvalidArgument("object_unit_size is zero");
+        *out = std::move(reply);
+        return true;
+    }
+
+    const uint64_t now_ms = NowMilliseconds();
+    const uint64_t now_sec = now_ms / 1000;
+    std::lock_guard<std::mutex> lock(object_mu_);
+    std::string load_error;
+    if (!file_meta_loaded_) {
+        if (!InitFileMetaStorePath() || !LoadFileMetaStoreLocked(&load_error)) {
+            reply.status = zb::msg::Status::IoError(load_error.empty() ? "failed to load file meta store" : load_error);
+            *out = std::move(reply);
+            return true;
+        }
+    }
+    if (txid && !txid->empty()) {
+        auto tx_it = last_commit_txid_by_inode_.find(request.meta.inode_id);
+        auto meta_it = file_meta_by_inode_.find(request.meta.inode_id);
+        if (tx_it != last_commit_txid_by_inode_.end() &&
+            tx_it->second == *txid &&
+            meta_it != file_meta_by_inode_.end()) {
+            reply.meta = meta_it->second;
+            reply.status = zb::msg::Status::Ok();
+            *out = std::move(reply);
+            return true;
+        }
+    }
+    auto it = file_meta_by_inode_.find(request.meta.inode_id);
+    if (it == file_meta_by_inode_.end()) {
+        if (!request.allow_create) {
+            reply.status = zb::msg::Status::NotFound("file meta not found");
+            *out = std::move(reply);
+            return true;
+        }
+        if (request.expected_version > 0) {
+            reply.status = zb::msg::Status::IoError("VERSION_MISMATCH");
+            *out = std::move(reply);
+            return true;
+        }
+        const auto tx_old_it = last_commit_txid_by_inode_.find(request.meta.inode_id);
+        const bool had_old_tx = tx_old_it != last_commit_txid_by_inode_.end();
+        const std::string old_txid = had_old_tx ? tx_old_it->second : std::string();
+        zb::msg::FileMeta created = request.meta;
+        created.version = created.version > 0 ? created.version : 1;
+        created.mtime_sec = created.mtime_sec > 0 ? created.mtime_sec : now_sec;
+        created.update_ts_ms = now_ms;
+        file_meta_by_inode_[created.inode_id] = created;
+        if (txid && !txid->empty()) {
+            last_commit_txid_by_inode_[created.inode_id] = *txid;
+        }
+        std::string persist_error;
+        if (!PersistFileMetaStoreLocked(&persist_error)) {
+            file_meta_by_inode_.erase(created.inode_id);
+            if (had_old_tx) {
+                last_commit_txid_by_inode_[created.inode_id] = old_txid;
+            } else {
+                last_commit_txid_by_inode_.erase(created.inode_id);
+            }
+            reply.status = zb::msg::Status::IoError(
+                persist_error.empty() ? "failed to persist file meta store" : persist_error);
+            *out = std::move(reply);
+            return true;
+        }
+        reply.meta = created;
+        reply.status = zb::msg::Status::Ok();
+        *out = std::move(reply);
+        return true;
+    }
+
+    const zb::msg::FileMeta old = it->second;
+    const auto tx_old_it = last_commit_txid_by_inode_.find(request.meta.inode_id);
+    const bool had_old_tx = tx_old_it != last_commit_txid_by_inode_.end();
+    const std::string old_txid = had_old_tx ? tx_old_it->second : std::string();
+    zb::msg::FileMeta next = it->second;
+    if (request.expected_version > 0 && request.expected_version != next.version) {
+        reply.status = zb::msg::Status::IoError("VERSION_MISMATCH");
+        *out = std::move(reply);
+        return true;
+    }
+    next.file_size = request.meta.file_size;
+    next.object_unit_size = request.meta.object_unit_size;
+    next.version = next.version + 1;
+    next.mtime_sec = request.meta.mtime_sec > 0 ? request.meta.mtime_sec : now_sec;
+    next.update_ts_ms = now_ms;
+    it->second = next;
+    if (txid && !txid->empty()) {
+        last_commit_txid_by_inode_[request.meta.inode_id] = *txid;
+    }
+    std::string persist_error;
+    if (!PersistFileMetaStoreLocked(&persist_error)) {
+        it->second = old;
+        if (had_old_tx) {
+            last_commit_txid_by_inode_[request.meta.inode_id] = old_txid;
+        } else {
+            last_commit_txid_by_inode_.erase(request.meta.inode_id);
+        }
+        reply.status = zb::msg::Status::IoError(
+            persist_error.empty() ? "failed to persist file meta store" : persist_error);
+        *out = std::move(reply);
+        return true;
+    }
+    reply.meta = next;
+    reply.status = zb::msg::Status::Ok();
+    *out = std::move(reply);
+    return true;
+}
+
+zb::msg::DeleteFileMetaReply VirtualStorageServiceImpl::DeleteFileMeta(const zb::msg::DeleteFileMetaRequest& request) {
+    zb::msg::DeleteFileMetaReply reply;
+    if (request.inode_id == 0) {
+        reply.status = zb::msg::Status::InvalidArgument("inode_id is empty");
+        return reply;
+    }
+    if (request.purge_objects && request.disk_id.empty()) {
+        reply.status = zb::msg::Status::InvalidArgument("disk_id is empty when purge_objects=true");
+        return reply;
+    }
+    std::vector<std::pair<std::string, std::string>> removed_objects;
+    {
+        std::lock_guard<std::mutex> lock(object_mu_);
+        std::string load_error;
+        if (!file_meta_loaded_) {
+            if (!InitFileMetaStorePath() || !LoadFileMetaStoreLocked(&load_error)) {
+                reply.status = zb::msg::Status::IoError(
+                    load_error.empty() ? "failed to load file meta store" : load_error);
+                return reply;
+            }
+        }
+        auto it = file_meta_by_inode_.find(request.inode_id);
+        if (it == file_meta_by_inode_.end()) {
+            reply.status = zb::msg::Status::NotFound("file meta not found");
+            return reply;
+        }
+        const zb::msg::FileMeta old = it->second;
+
+        if (request.purge_objects) {
+            const uint64_t object_unit_size = old.object_unit_size > 0 ? old.object_unit_size : kDefaultObjectUnitSize;
+            if (object_unit_size == 0) {
+                reply.status = zb::msg::Status::IoError("object_unit_size is zero");
+                return reply;
+            }
+            const uint64_t object_count = old.file_size == 0 ? 0 : (old.file_size + object_unit_size - 1) / object_unit_size;
+            removed_objects.reserve(static_cast<size_t>(object_count));
+            for (uint64_t i = 0; i < object_count; ++i) {
+                const std::string object_id = BuildStableObjectId(request.inode_id, static_cast<uint32_t>(i));
+                std::string effective_disk = request.disk_id;
+                auto home_it = object_home_disk_.find(object_id);
+                if (home_it != object_home_disk_.end() && !home_it->second.empty()) {
+                    effective_disk = home_it->second;
+                }
+                const std::string key = BuildObjectKey(effective_disk, object_id);
+                auto obj_it = object_data_.find(key);
+                if (obj_it == object_data_.end()) {
+                    continue;
+                }
+                const uint64_t size = static_cast<uint64_t>(obj_it->second.size());
+                object_data_.erase(obj_it);
+                object_sizes_.erase(key);
+                auto home_erase_it = object_home_disk_.find(object_id);
+                if (home_erase_it != object_home_disk_.end() && home_erase_it->second == effective_disk) {
+                    object_home_disk_.erase(home_erase_it);
+                }
+                uint64_t& used = disk_used_bytes_[effective_disk];
+                used = used > size ? (used - size) : 0;
+                removed_objects.emplace_back(effective_disk, object_id);
+            }
+        }
+
+        const auto tx_old_it = last_commit_txid_by_inode_.find(request.inode_id);
+        const bool had_old_tx = tx_old_it != last_commit_txid_by_inode_.end();
+        const std::string old_txid = had_old_tx ? tx_old_it->second : std::string();
+        const auto preload_old_it = preloaded_file_objects_.find(request.inode_id);
+        const bool had_old_preload = preload_old_it != preloaded_file_objects_.end();
+        const PreloadedFileObjectInfo old_preload =
+            had_old_preload ? preload_old_it->second : PreloadedFileObjectInfo{};
+        file_meta_by_inode_.erase(it);
+        last_commit_txid_by_inode_.erase(request.inode_id);
+        preloaded_file_objects_.erase(request.inode_id);
+        std::string persist_error;
+        if (!PersistFileMetaStoreLocked(&persist_error)) {
+            file_meta_by_inode_[old.inode_id] = old;
+            if (had_old_tx) {
+                last_commit_txid_by_inode_[request.inode_id] = old_txid;
+            }
+            if (had_old_preload) {
+                preloaded_file_objects_[request.inode_id] = old_preload;
+            }
+            reply.status = zb::msg::Status::IoError(
+                persist_error.empty() ? "failed to persist file meta store" : persist_error);
+            return reply;
+        }
+    }
+    for (const auto& removed : removed_objects) {
+        RemoveObjectTracking(removed.first, removed.second);
+    }
+    reply.status = zb::msg::Status::Ok();
+    return reply;
+}
+
+zb::msg::ResolveFileReadReply VirtualStorageServiceImpl::ResolveFileRead(
+    const zb::msg::ResolveFileReadRequest& request) const {
+    zb::msg::ResolveFileReadReply reply;
+    if (request.inode_id == 0) {
+        reply.status = zb::msg::Status::InvalidArgument("inode_id is empty");
+        return reply;
+    }
+    if (request.size > std::numeric_limits<uint64_t>::max() - request.offset) {
+        reply.status = zb::msg::Status::InvalidArgument("offset + size overflow");
+        return reply;
+    }
+
+    std::lock_guard<std::mutex> lock(object_mu_);
+    std::string load_error;
+    if (!file_meta_loaded_) {
+        if (!InitFileMetaStorePath() || !LoadFileMetaStoreLocked(&load_error)) {
+            reply.status = zb::msg::Status::IoError(load_error.empty() ? "failed to load file meta store" : load_error);
+            return reply;
+        }
+    }
+    auto it = file_meta_by_inode_.find(request.inode_id);
+    if (it == file_meta_by_inode_.end()) {
+        reply.status = zb::msg::Status::NotFound("file meta not found");
+        return reply;
+    }
+
+    reply.meta = it->second;
+    const uint64_t object_unit_size = reply.meta.object_unit_size > 0 ? reply.meta.object_unit_size : kDefaultObjectUnitSize;
+    if (request.size == 0) {
+        reply.status = zb::msg::Status::Ok();
+        return reply;
+    }
+    if (request.offset >= reply.meta.file_size) {
+        reply.status = zb::msg::Status::Ok();
+        return reply;
+    }
+    const uint64_t read_size = std::min<uint64_t>(request.size, reply.meta.file_size - request.offset);
+    BuildObjectSlices(request.inode_id, request.offset, read_size, object_unit_size, request.disk_id, &reply.slices);
+    reply.status = zb::msg::Status::Ok();
+    return reply;
+}
+
+zb::msg::AllocateFileWriteReply VirtualStorageServiceImpl::AllocateFileWrite(
+    const zb::msg::AllocateFileWriteRequest& request) const {
+    zb::msg::AllocateFileWriteReply reply;
+    if (request.inode_id == 0) {
+        reply.status = zb::msg::Status::InvalidArgument("inode_id is empty");
+        return reply;
+    }
+    if (request.size > std::numeric_limits<uint64_t>::max() - request.offset) {
+        reply.status = zb::msg::Status::InvalidArgument("offset + size overflow");
+        return reply;
+    }
+
+    std::lock_guard<std::mutex> lock(object_mu_);
+    std::string load_error;
+    if (!file_meta_loaded_) {
+        if (!InitFileMetaStorePath() || !LoadFileMetaStoreLocked(&load_error)) {
+            reply.status = zb::msg::Status::IoError(load_error.empty() ? "failed to load file meta store" : load_error);
+            return reply;
+        }
+    }
+    auto it = file_meta_by_inode_.find(request.inode_id);
+    if (it != file_meta_by_inode_.end()) {
+        reply.meta = it->second;
+    } else {
+        reply.meta.inode_id = request.inode_id;
+        reply.meta.file_size = 0;
+        reply.meta.object_unit_size =
+            request.object_unit_size_hint > 0 ? request.object_unit_size_hint : kDefaultObjectUnitSize;
+        reply.meta.version = 0;
+        reply.meta.mtime_sec = NowMilliseconds() / 1000;
+        reply.meta.update_ts_ms = NowMilliseconds();
+    }
+
+    const uint64_t object_unit_size = reply.meta.object_unit_size > 0 ? reply.meta.object_unit_size : kDefaultObjectUnitSize;
+    if (request.size > 0) {
+        BuildObjectSlices(request.inode_id, request.offset, request.size, object_unit_size, request.disk_id, &reply.slices);
+    }
+    reply.txid = "tx-" + std::to_string(request.inode_id) + "-" + std::to_string(NowMilliseconds()) + "-" +
+                 std::to_string(request.offset) + "-" + std::to_string(request.size);
+    reply.status = zb::msg::Status::Ok();
+    return reply;
+}
+
+zb::msg::CommitFileWriteReply VirtualStorageServiceImpl::CommitFileWrite(const zb::msg::CommitFileWriteRequest& request) {
+    zb::msg::CommitFileWriteReply reply;
+    if (request.inode_id == 0) {
+        reply.status = zb::msg::Status::InvalidArgument("inode_id is empty");
+        return reply;
+    }
+    if (request.txid.empty()) {
+        reply.status = zb::msg::Status::InvalidArgument("txid is empty");
+        return reply;
+    }
+    if (request.object_unit_size == 0) {
+        reply.status = zb::msg::Status::InvalidArgument("object_unit_size is zero");
+        return reply;
+    }
+
+    zb::msg::ApplyFileMetaRequest apply_req;
+    apply_req.meta.inode_id = request.inode_id;
+    apply_req.meta.file_size = request.file_size;
+    apply_req.meta.object_unit_size = request.object_unit_size;
+    apply_req.meta.version = request.expected_version;
+    apply_req.meta.mtime_sec = request.mtime_sec > 0 ? request.mtime_sec : (NowMilliseconds() / 1000);
+    apply_req.meta.update_ts_ms = NowMilliseconds();
+    apply_req.expected_version = request.expected_version;
+    apply_req.allow_create = request.allow_create;
+
+    zb::msg::ApplyFileMetaReply meta_reply;
+    ApplyFileMetaInternal(apply_req, &request.txid, &meta_reply);
+    reply.status = meta_reply.status;
+    reply.meta = meta_reply.meta;
+    return reply;
+}
+
+bool VirtualStorageServiceImpl::InitFileMetaStorePath() const {
+    if (!file_meta_store_path_.empty()) {
+        return true;
+    }
+    std::string base_dir = !config_.archive_meta_dir.empty() ? config_.archive_meta_dir : config_.mount_point_prefix;
+    if (base_dir.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    fs::path meta_dir = fs::path(base_dir) / ".zb_meta";
+    fs::create_directories(meta_dir, ec);
+    if (ec) {
+        return false;
+    }
+    file_meta_store_path_ = (meta_dir / "file_meta.tsv").string();
+    return true;
+}
+
+bool VirtualStorageServiceImpl::LoadFileMetaStoreLocked(std::string* error) const {
+    if (file_meta_loaded_) {
+        return true;
+    }
+    if (file_meta_store_path_.empty() && !InitFileMetaStorePath()) {
+        if (error) {
+            *error = "file meta store path is unavailable";
+        }
+        return false;
+    }
+    std::ifstream in(file_meta_store_path_, std::ios::in | std::ios::binary);
+    if (!in.is_open()) {
+        file_meta_by_inode_.clear();
+        preloaded_file_objects_.clear();
+        last_commit_txid_by_inode_.clear();
+        file_meta_loaded_ = true;
+        return true;
+    }
+    std::unordered_map<uint64_t, zb::msg::FileMeta> loaded;
+    std::unordered_map<uint64_t, PreloadedFileObjectInfo> loaded_preload;
+    std::unordered_map<uint64_t, std::string> loaded_txids;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        std::istringstream iss(line);
+        std::string token;
+        zb::msg::FileMeta meta;
+        if (!std::getline(iss, token, '\t')) {
+            continue;
+        }
+        meta.inode_id = static_cast<uint64_t>(std::strtoull(token.c_str(), nullptr, 10));
+        if (meta.inode_id == 0 || !std::getline(iss, token, '\t')) {
+            continue;
+        }
+        meta.file_size = static_cast<uint64_t>(std::strtoull(token.c_str(), nullptr, 10));
+        if (!std::getline(iss, token, '\t')) {
+            continue;
+        }
+        meta.object_unit_size = static_cast<uint64_t>(std::strtoull(token.c_str(), nullptr, 10));
+        if (!std::getline(iss, token, '\t')) {
+            continue;
+        }
+        meta.version = static_cast<uint64_t>(std::strtoull(token.c_str(), nullptr, 10));
+        if (!std::getline(iss, token, '\t')) {
+            continue;
+        }
+        meta.mtime_sec = static_cast<uint64_t>(std::strtoull(token.c_str(), nullptr, 10));
+        if (!std::getline(iss, token, '\t')) {
+            continue;
+        }
+        meta.update_ts_ms = static_cast<uint64_t>(std::strtoull(token.c_str(), nullptr, 10));
+        if (std::getline(iss, token, '\t') && !token.empty()) {
+            loaded_txids[meta.inode_id] = token;
+        }
+        PreloadedFileObjectInfo preload;
+        bool has_preload = false;
+        if (std::getline(iss, token, '\t') && !token.empty()) {
+            preload.home_disk_id = token;
+            has_preload = true;
+        }
+        if (std::getline(iss, token, '\t') && !token.empty()) {
+            preload.seed = static_cast<uint64_t>(std::strtoull(token.c_str(), nullptr, 10));
+            has_preload = true;
+        }
+        if (has_preload) {
+            loaded_preload[meta.inode_id] = std::move(preload);
+        }
+        loaded[meta.inode_id] = meta;
+    }
+    file_meta_by_inode_.swap(loaded);
+    preloaded_file_objects_.swap(loaded_preload);
+    last_commit_txid_by_inode_.swap(loaded_txids);
+    file_meta_loaded_ = true;
+    return true;
+}
+
+bool VirtualStorageServiceImpl::PersistFileMetaStoreLocked(std::string* error) const {
+    if (file_meta_store_path_.empty()) {
+        if (error) {
+            *error = "file meta store path is empty";
+        }
+        return false;
+    }
+    const std::string tmp_path = file_meta_store_path_ + ".tmp";
+    {
+        std::ofstream out(tmp_path, std::ios::out | std::ios::binary | std::ios::trunc);
+        if (!out.is_open()) {
+            if (error) {
+                *error = "failed to open temp file for file meta store";
+            }
+            return false;
+        }
+        for (const auto& [inode, meta] : file_meta_by_inode_) {
+            std::string txid;
+            const auto tx_it = last_commit_txid_by_inode_.find(inode);
+            if (tx_it != last_commit_txid_by_inode_.end()) {
+                txid = tx_it->second;
+            }
+            out << inode << '\t'
+                << meta.file_size << '\t'
+                << meta.object_unit_size << '\t'
+                << meta.version << '\t'
+                << meta.mtime_sec << '\t'
+                << meta.update_ts_ms << '\t'
+                << txid;
+            const auto preload_it = preloaded_file_objects_.find(inode);
+            if (preload_it != preloaded_file_objects_.end()) {
+                out << '\t'
+                    << preload_it->second.home_disk_id << '\t'
+                    << preload_it->second.seed;
+            }
+            out << '\n';
+        }
+        out.flush();
+        if (!out.good()) {
+            if (error) {
+                *error = "failed to write file meta store";
+            }
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::remove(file_meta_store_path_, ec);
+    ec.clear();
+    fs::rename(tmp_path, file_meta_store_path_, ec);
+    if (ec) {
+        fs::remove(tmp_path, ec);
+        if (error) {
+            *error = "failed to rotate file meta store";
+        }
+        return false;
+    }
+    return true;
 }
 
 bool VirtualStorageServiceImpl::InitArchiveMetaStore(const std::string& meta_dir,
@@ -653,6 +1173,124 @@ void VirtualStorageServiceImpl::ReplicationRepairLoop() {
         }
         repl_repair_queue_.push_back(std::move(task));
         repl_repair_cv_.notify_one();
+    }
+}
+
+std::string VirtualStorageServiceImpl::BuildStableObjectId(uint64_t inode_id, uint32_t object_index) {
+    return "obj-" + std::to_string(inode_id) + "-" + std::to_string(object_index);
+}
+
+bool VirtualStorageServiceImpl::ParseStableObjectId(const std::string& object_id,
+                                                    uint64_t* inode_id,
+                                                    uint32_t* object_index) {
+    if (!inode_id || !object_index) {
+        return false;
+    }
+    constexpr const char* kPrefix = "obj-";
+    if (object_id.rfind(kPrefix, 0) != 0) {
+        return false;
+    }
+    const size_t split = object_id.find('-', 4);
+    if (split == std::string::npos || split + 1 >= object_id.size()) {
+        return false;
+    }
+    try {
+        *inode_id = static_cast<uint64_t>(std::stoull(object_id.substr(4, split - 4)));
+        *object_index = static_cast<uint32_t>(std::stoul(object_id.substr(split + 1)));
+        return *inode_id > 0;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool VirtualStorageServiceImpl::TryReadPreloadedObjectLocked(const std::string& effective_disk,
+                                                             const std::string& object_id,
+                                                             uint64_t offset,
+                                                             uint64_t size,
+                                                             std::string* out,
+                                                             uint64_t* bytes_read) const {
+    if (!out || !bytes_read) {
+        return false;
+    }
+    *bytes_read = 0;
+    out->clear();
+    if (size == 0) {
+        return true;
+    }
+
+    uint64_t inode_id = 0;
+    uint32_t object_index = 0;
+    if (!ParseStableObjectId(object_id, &inode_id, &object_index)) {
+        return false;
+    }
+    const auto meta_it = file_meta_by_inode_.find(inode_id);
+    if (meta_it == file_meta_by_inode_.end()) {
+        return false;
+    }
+    const uint64_t object_unit_size =
+        meta_it->second.object_unit_size > 0 ? meta_it->second.object_unit_size : kDefaultObjectUnitSize;
+    if (object_unit_size == 0) {
+        return false;
+    }
+    const auto preload_it = preloaded_file_objects_.find(inode_id);
+    if (preload_it != preloaded_file_objects_.end() &&
+        !preload_it->second.home_disk_id.empty() &&
+        preload_it->second.home_disk_id != effective_disk) {
+        return false;
+    }
+
+    const uint64_t object_begin = static_cast<uint64_t>(object_index) * object_unit_size;
+    if (object_begin >= meta_it->second.file_size) {
+        return false;
+    }
+    const uint64_t object_size = std::min<uint64_t>(object_unit_size, meta_it->second.file_size - object_begin);
+    if (offset >= object_size) {
+        return true;
+    }
+    const uint64_t read_len = std::min<uint64_t>(size, object_size - offset);
+    const uint64_t seed = (preload_it != preloaded_file_objects_.end()) ? preload_it->second.seed : inode_id;
+    out->resize(static_cast<size_t>(read_len), 'x');
+    for (size_t i = 0; i < out->size(); ++i) {
+        const uint64_t v = seed + static_cast<uint64_t>(object_index) * 1315423911ULL +
+                           offset + static_cast<uint64_t>(i);
+        (*out)[i] = static_cast<char>('a' + (v % 26ULL));
+    }
+    *bytes_read = read_len;
+    return true;
+}
+
+void VirtualStorageServiceImpl::BuildObjectSlices(uint64_t inode_id,
+                                                  uint64_t offset,
+                                                  uint64_t size,
+                                                  uint64_t object_unit_size,
+                                                  const std::string& disk_id,
+                                                  std::vector<zb::msg::FileObjectSlice>* slices) {
+    if (!slices) {
+        return;
+    }
+    slices->clear();
+    if (inode_id == 0 || size == 0 || object_unit_size == 0) {
+        return;
+    }
+    const uint64_t end = offset + size;
+    const uint64_t start_index = offset / object_unit_size;
+    const uint64_t end_index = (end - 1) / object_unit_size;
+    slices->reserve(static_cast<size_t>(end_index - start_index + 1));
+    for (uint64_t i = start_index; i <= end_index; ++i) {
+        const uint64_t object_start = i * object_unit_size;
+        const uint64_t object_end = object_start + object_unit_size;
+        const uint64_t seg_start = std::max<uint64_t>(object_start, offset);
+        const uint64_t seg_end = std::min<uint64_t>(object_end, end);
+        if (seg_end <= seg_start) {
+            continue;
+        }
+        zb::msg::FileObjectSlice slice;
+        slice.object_index = static_cast<uint32_t>(i);
+        slice.object_id = BuildStableObjectId(inode_id, slice.object_index);
+        slice.disk_id = disk_id;
+        slice.object_offset = seg_start - object_start;
+        slice.length = seg_end - seg_start;
+        slices->push_back(std::move(slice));
     }
 }
 

@@ -83,10 +83,8 @@ private:
     static std::vector<std::string> SplitTabs(const std::string& line);
     static uint32_t Crc32(const std::string& data);
     static bool WriteUint32LE(std::ostream* out, uint32_t value);
-    static bool ReadUint32LE(std::istream* in, uint32_t* value);
     static bool FsyncPath(const std::string& path);
     bool EnsureWalMagicLocked(std::string* error);
-    bool ReplayLegacyWalLocked(std::string* error);
 
     bool LoadSnapshotLocked(std::string* error);
     bool ReplayWalLocked(std::string* error);
@@ -105,7 +103,6 @@ private:
     std::string wal_path_;
     std::string snapshot_path_;
     std::ofstream wal_out_;
-    bool wal_has_magic_{true};
     bool inited_{false};
 };
 

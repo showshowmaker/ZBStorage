@@ -21,6 +21,14 @@ public:
                             uint64_t epoch,
                             std::vector<zb::rpc::ReplicaLocation>* out,
                             std::string* error);
+    bool AllocateObjectByPgWithType(uint32_t replica,
+                                    const std::string& object_id,
+                                    uint64_t epoch,
+                                    NodeType required_type,
+                                    bool strict_type,
+                                    std::vector<zb::rpc::ReplicaLocation>* out,
+                                    std::string* error);
+    bool ResolveNodeAddress(const std::string& node_id, std::string* address) const;
     void SetPgManager(PGManager* pg_manager);
 
 private:

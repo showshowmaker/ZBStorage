@@ -221,3 +221,192 @@
   - Rewrote core module READMEs (`src/mds`, `src/data_node/real_node`, `src/data_node/virtual_node`, `src/data_node/optical_node`) to object/PG terminology.
 - Verification:
   - `rg -n "chunk|Chunk|CHUNK|RealChunkObjectStore|VirtualChunkObjectStore" src tests config scripts CMakeLists.txt --glob '!**/*.md'` => no matches.
+
+- 2026-03-11: Continued hard cleanup on MDS write-path API (legacy layout commit RPC removal).
+- Changes:
+  - Removed legacy MDS RPCs from protocol/service surface:
+    - `AllocateWrite`, `CommitWrite`, `GetLayoutRoot`, `ResolveLayout`, `CommitLayoutRoot`.
+  - Removed related protobuf message types from `src/msg/mds.proto`.
+  - Deleted corresponding handlers and obsolete pending-write commit pipeline in `MdsServiceImpl`:
+    - removed pending transaction state/mutex/counters and helper functions that only served removed RPCs.
+  - Kept active runtime path focused on:
+    - `GetFileAnchor` + `GetLayout` for MDS side read planning.
+    - node-side `GetFileMeta/CommitFileMeta/DeleteFileMeta` for file metadata updates.
+
+- 2026-03-11: Continued sequential cleanup (MDS layout residual purge + write-tx durability hardening).
+- Changes:
+  - Removed unused MDS layout fallback helpers and dead APIs:
+    - deleted `LoadLayoutRoot/BuildLayoutNodeFromObjects/LoadHealthyLayoutNode/StoreLayoutNodeWithReplicas/ValidateLayoutObjectOnLoad`.
+    - deleted `BuildReadPlan*/ResolveExtents/SelectReadableDiskObjectReplica` dead wrappers.
+    - removed obsolete `SeedObjectForCowWrite`.
+    - removed now-unused layout-object option plumbing (`SetLayoutObjectOptions`, config parse, server wiring).
+  - Strengthened node-side file-write idempotency persistence (real + virtual):
+    - added `CommitFileMetaInternal(..., txid)` path used by `CommitFileWrite`.
+    - persisted per-inode last successful `txid` in `file_meta.tsv` (new optional column).
+    - retrying same `txid` now returns previous committed meta instead of version mismatch.
+    - `DeleteFileMeta` now cleans associated persisted txid state.
+
+- 2026-03-11: Continued API surface cleanup (remove unused file-meta RPCs).
+- Changes:
+  - Removed unused protocol RPCs from `real_node.proto`:
+    - `GetFileMeta`
+    - `CommitFileMeta`
+  - Removed corresponding brpc handlers from real/virtual/optical services.
+  - Removed public service impl methods `GetFileMeta` / `CommitFileMeta`; write commit now only uses internal `CommitFileMetaInternal` via `CommitFileWrite`.
+  - Removed unused internal message structs `GetFileMetaRequest/GetFileMetaReply` from `storage_node_messages.h`.
+
+- 2026-03-11: Continued naming convergence (file-meta internal apply path).
+- Changes:
+  - Renamed internal file-meta commit messages in `storage_node_messages.h`:
+    - `CommitFileMetaRequest` -> `ApplyFileMetaRequest`
+    - `CommitFileMetaReply` -> `ApplyFileMetaReply`
+  - Renamed real/virtual internal helper:
+    - `CommitFileMetaInternal` -> `ApplyFileMetaInternal`
+  - Updated `CommitFileWrite` internals to use `ApplyFileMeta*` request/reply structures.
+
+- 2026-03-11: Continued client naming cleanup (remove fallback wording).
+- Changes:
+  - In `zb_fuse_client.cpp`, renamed cached metadata helper and variables from `fallback_*` to `hint_*`:
+    - `GetCachedInodeMetaFallback` -> `GetCachedInodeMetaHint`
+    - `fallback_file_size/object_unit_size` -> `hint_file_size/object_unit_size`
+  - Semantics unchanged: still uses local cached inode metadata as read/write planning hints.
+
+- 2026-03-11: Continued metadata simplification on MDS service path.
+- Changes:
+  - Simplified `DeleteInodeData` in `MdsServiceImpl`:
+    - no longer decodes/rewrites object/layout records to chase reverse indexes during unlink.
+    - now only performs lightweight inode-scoped key cleanup (`FA/LR/LOP` and direct `O/<inode>/...` keys).
+  - Removed dead MDS recall/cache implementation that depended on full object metadata in MDS:
+    - dropped `RecallTask` and related helper functions (`CollectRecallTasksByImage`, `RecallTasksToDisk`, `CacheWholeFileToDisk`, etc.).
+    - removed unused `GenerateObjectId`, `ReadObjectFromReplica`, `WriteObjectToReplica` in `MdsServiceImpl`.
+  - Removed layout GC runtime integration from MDS startup/config:
+    - deleted `ENABLE_LAYOUT_GC` and `LAYOUT_GC_*` config parsing/fields.
+    - removed `GcManager` thread wiring in `mds_server.cpp`.
+
+- 2026-03-11: Continued metadata simplification (unlink cleanup fully delegated to anchor node).
+- Changes:
+  - Extended `DeleteFileMetaRequest` (proto + internal message) with:
+    - `disk_id`
+    - `purge_objects`
+  - MDS unlink path no longer issues per-object delete RPC loops.
+    - `MdsServiceImpl::Unlink` now sends one `DeleteFileMeta(purge_objects=true)` to file anchor.
+  - Real node `DeleteFileMeta` now supports node-side purge:
+    - computes object id range from local file meta (`inode_id/file_size/object_unit_size`),
+    - deletes local objects first, then removes file meta record.
+  - Virtual node `DeleteFileMeta` now supports node-side purge with in-memory object map cleanup and usage/accounting updates.
+  - Updated brpc adapters (real/virtual) to map new request fields.
+
+- 2026-03-11: Continued metadata-path performance optimization (reduced MDS round trips on open/create).
+- Changes:
+  - Extended MDS replies:
+    - `OpenReply` now carries `file_anchor`.
+    - `CreateReply` now carries `file_anchor`.
+  - MDS `Open` now returns file anchor (load existing anchor or lazily select/persist one).
+  - FUSE client now consumes anchor from `Open/Create` replies and updates local cache directly.
+  - `FuseOpen/FuseCreate` only fallback to `GetFileAnchor` when reply anchor is missing, reducing one common-path MDS RPC.
+
+- 2026-03-11: Continued read-plan simplification (MDS delegates layout slicing to anchor node).
+- Changes:
+  - `MdsServiceImpl::BuildReadPlanFromAnchor` no longer infers object ranges from MDS inode size.
+  - `GetLayout` path now calls anchor node `ResolveFileRead(inode, offset, size, disk_id)` and builds `FileLayout` from returned slices.
+  - Effect: read-plan generation uses node-side file metadata as source of truth, reducing MDS-side detailed metadata dependence.
+
+- 2026-03-11: Removed dead optical-plan branch in MDS `GetLayout`.
+- Changes:
+  - Deleted `BuildOpticalReadPlan` helper and related branch logic in `MdsServiceImpl::GetLayout`.
+  - `GetLayout` now has a single path: anchor-node `ResolveFileRead` -> synthesize `FileLayout`.
+  - `optical_plan` field is now explicitly cleared in reply to avoid stale payload.
+
+- 2026-03-11: Reduced archive online dependence on reverse indexes (`RO/OO`) in owner resolution path.
+- Changes:
+  - `OpticalArchiveManager` now first parses stable object id format `obj-<inode>-<index>`:
+    - `ResolveObjectOwner` prefers direct parse, then optional backfill `OO/<object_id>`.
+    - `FindObjectKeyByObjectId` prefers direct `O/<inode>/<index>` existence check before `RO/<object_id>` fallback.
+  - Effect: common-path archive scheduling/lookup no longer requires reverse-index hit for stable ids.
+
+- 2026-03-11: Further simplified unlink metadata cleanup.
+- Changes:
+  - `DeleteInodeData` now only removes file-anchor key (`FA/<inode>`).
+  - No inline cleanup of `LR/LO/O/RO/LCO` in unlink path; aligns with anchor-only online metadata model.
+
+- 2026-03-11: Removed reverse-index repair/fallback pipeline from optical archive manager.
+- Changes:
+  - Deleted `ProcessReverseObjectRepairTasks` / `EnqueueReverseObjectRepair`.
+  - Removed `ReconcileArchiveStates` tail call to reverse-index repair worker.
+  - `ResolveObjectOwner` now:
+    - accepts stable id parse (`obj-<inode>-<index>`), or
+    - reads existing `OO/<object_id>`, otherwise fail fast (no `RO` fallback).
+  - `FindObjectKeyByObjectId` now:
+    - accepts stable id -> direct `O/<inode>/<index>` lookup,
+    - otherwise fail fast (no `RO` lookup / no repair queueing).
+  - Effect: archive online path no longer depends on `RO/*` keyspace or repair scans.
+
+- 2026-03-11: Stopped maintaining reverse-object index in online archive path.
+- Changes:
+  - Removed `ReverseObjectKey(object_id)` writes from:
+    - `PersistOpticalReplica`
+    - `ArchiveByCandidate`
+  - Removed dead reverse-repair key helpers from `MetaSchema`:
+    - `ArchiveReverseObjectRepairKey`
+    - `ArchiveReverseRepairPrefix`
+    - `ArchiveReverseObjectRepairPrefix`
+  - Result: `RO/*` is now offline-tool-only legacy surface (no online producer/consumer in archive runtime).
+
+- 2026-03-11: Cleaned build surface for removed layout-GC runtime path.
+- Changes:
+  - Removed `src/mds/gc/GcManager.cpp` from `mds_server` target sources.
+  - Removed `layout_gc_probe` executable target from `CMakeLists.txt`.
+  - Runtime/control-plane build no longer links layout-GC implementation.
+
+- 2026-03-11: Removed remaining `RO` code references and checks.
+- Changes:
+  - Dropped `ReverseObjectKey` from `MetaSchema`.
+  - `layout_consistency_check` no longer exposes `--require_reverse_index` and no longer validates reverse-index keys.
+  - Result: source tree no longer has active `RO/*` key usage; reverse-index path is fully retired.
+
+- 2026-03-11: Deleted retired layout-GC source files.
+- Changes:
+  - Removed:
+    - `src/mds/gc/GcManager.h`
+    - `src/mds/gc/GcManager.cpp`
+    - `src/mds/tools/layout_gc_probe.cpp`
+  - `rg -n "GcManager|layout_gc_probe"` now has no source references.
+
+- 2026-03-11: Removed legacy layout consistency checker tool.
+- Changes:
+  - Removed `layout_consistency_check` target from `CMakeLists.txt`.
+  - Deleted `src/mds/tools/layout_consistency_check.cpp`.
+  - Build/test surface no longer includes LR/LO consistency probing toolchain.
+
+- 2026-03-11: Removed unused layout-key helpers from `MetaSchema`.
+- Changes:
+  - Deleted unused key helpers:
+    - `LayoutRootKey/LayoutRootPrefix`
+    - `LayoutCommitOpKey/LayoutCommitOpPrefix`
+    - `LayoutObjectKey/LayoutObjectPrefix`
+    - `LayoutObjectReplicaKey/LayoutObjectReplicaPrefix/LayoutObjectReplicaGlobalPrefix`
+    - `LayoutGcSeenKey/LayoutGcSeenPrefix`
+  - Deleted unused parse helpers:
+    - `ParseLayoutRootKey`
+    - `ParseLayoutObjectReplicaKey`
+  - Result: schema helpers now focus on active anchor/object/PG keyspaces.
+
+- 2026-03-11: Continued cleanup (metadata surface reduction).
+- Changes:
+  - Removed unused MDS GetLayout reply fields: optical_plan / plan_source and related enum/message definitions in src/msg/mds.proto.
+  - Removed dead MDS implementation writes for removed fields in MdsServiceImpl::GetLayout.
+  - Removed legacy text WAL replay compatibility path from ArchiveObjectMetaStore; WAL is now strict magic+len+crc binary only.
+  - Removed unused MetaCodec layout-tree encode/decode surface (LayoutRoot/LayoutNode/LayoutExtent records and codecs).
+
+- 2026-03-11: ArchiveObjectMetaStore WAL path tightened further.
+- Changes:
+  - Removed now-dead wal_has_magic_ state; WAL parser/writer always enforces magic-header format.
+  - Keep behavior: incompatible WAL is truncated, valid WAL replays with tail truncation on corruption.
+
+- 2026-03-11: Continued cleanup (removed legacy MDS read-plan RPC surface).
+- Changes:
+  - Removed GetLayout RPC and related FileLayout/GetLayoutRequest/GetLayoutReply messages from src/msg/mds.proto.
+  - Removed MdsServiceImpl::GetLayout and internal BuildReadPlanFromAnchor/FillAnchorReplica helpers.
+  - Updated optical_archive_stress_test to sample resolve-read slices via anchor (GetFileAnchor + ResolveFileRead) instead of GetLayout.
+  - Marked optical-observation flags as deprecated/ignored in simplified metadata mode.
+

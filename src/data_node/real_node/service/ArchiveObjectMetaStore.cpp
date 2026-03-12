@@ -363,22 +363,6 @@ bool ArchiveObjectMetaStore::WriteUint32LE(std::ostream* out, uint32_t value) {
     return out->good();
 }
 
-bool ArchiveObjectMetaStore::ReadUint32LE(std::istream* in, uint32_t* value) {
-    if (!in || !value) {
-        return false;
-    }
-    char bytes[4] = {0, 0, 0, 0};
-    in->read(bytes, 4);
-    if (!in->good()) {
-        return false;
-    }
-    *value = static_cast<uint32_t>(static_cast<unsigned char>(bytes[0])) |
-             (static_cast<uint32_t>(static_cast<unsigned char>(bytes[1])) << 8) |
-             (static_cast<uint32_t>(static_cast<unsigned char>(bytes[2])) << 16) |
-             (static_cast<uint32_t>(static_cast<unsigned char>(bytes[3])) << 24);
-    return true;
-}
-
 bool ArchiveObjectMetaStore::FsyncPath(const std::string& path) {
     if (path.empty()) {
         return false;
@@ -432,7 +416,6 @@ bool ArchiveObjectMetaStore::LoadSnapshotLocked(std::string* error) {
 bool ArchiveObjectMetaStore::ReplayWalLocked(std::string* error) {
     std::ifstream in(wal_path_, std::ios::in | std::ios::binary);
     if (!in.is_open()) {
-        wal_has_magic_ = true;
         return true;
     }
 
@@ -440,44 +423,30 @@ bool ArchiveObjectMetaStore::ReplayWalLocked(std::string* error) {
     in.read(prefix, 4);
     const std::streamsize prefix_read = in.gcount();
     if (prefix_read == 0 && in.eof()) {
-        wal_has_magic_ = true;
         return true;
     }
-    if (prefix_read >= 2 &&
-        (prefix[0] == 'U' || prefix[0] == 'D') &&
-        prefix[1] == '\t') {
+
+    if (prefix_read != 4 ||
+        prefix[0] != kArchiveWalMagic[0] ||
+        prefix[1] != kArchiveWalMagic[1] ||
+        prefix[2] != kArchiveWalMagic[2] ||
+        prefix[3] != kArchiveWalMagic[3]) {
         in.close();
-        if (!ReplayLegacyWalLocked(error)) {
-            return false;
-        }
         std::error_code ec;
         fs::resize_file(wal_path_, 0, ec);
         if (ec) {
             if (error) {
-                *error = "failed to truncate old wal: " + wal_path_;
+                *error = "failed to truncate incompatible wal: " + wal_path_;
             }
             return false;
         }
-        wal_has_magic_ = true;
         return true;
     }
 
-    uint64_t start_offset = 0;
-    if (prefix_read == 4 &&
-        prefix[0] == kArchiveWalMagic[0] &&
-        prefix[1] == kArchiveWalMagic[1] &&
-        prefix[2] == kArchiveWalMagic[2] &&
-        prefix[3] == kArchiveWalMagic[3]) {
-        wal_has_magic_ = true;
-        start_offset = 4;
-    } else {
-        wal_has_magic_ = false;
-    }
-
     in.clear();
-    in.seekg(static_cast<std::streamoff>(start_offset), std::ios::beg);
+    in.seekg(static_cast<std::streamoff>(sizeof(kArchiveWalMagic)), std::ios::beg);
 
-    uint64_t last_good_offset = start_offset;
+    uint64_t last_good_offset = sizeof(kArchiveWalMagic);
     bool need_truncate = false;
     while (true) {
         const std::streampos record_begin = in.tellg();
@@ -576,58 +545,7 @@ bool ArchiveObjectMetaStore::ReplayWalLocked(std::string* error) {
     return true;
 }
 
-bool ArchiveObjectMetaStore::ReplayLegacyWalLocked(std::string* error) {
-    std::ifstream in(wal_path_);
-    if (!in.is_open()) {
-        return true;
-    }
-    std::string line;
-    size_t line_no = 0;
-    while (std::getline(in, line)) {
-        ++line_no;
-        if (line.empty()) {
-            continue;
-        }
-        if (line.size() < 2 || line[1] != '\t') {
-            if (error) {
-                *error = "invalid archive wal line " + std::to_string(line_no);
-            }
-            return false;
-        }
-        const char op = line[0];
-        const std::string payload = line.substr(2);
-        if (op == 'U') {
-            ArchiveObjectMeta meta;
-            if (!ParseMetaLine(payload, &meta)) {
-                if (error) {
-                    *error = "invalid archive wal upsert at line " + std::to_string(line_no);
-                }
-                return false;
-            }
-            metas_[BuildObjectKey(meta.disk_id, meta.ArchiveObjectId())] = std::move(meta);
-        } else if (op == 'D') {
-            std::vector<std::string> parts = SplitTabs(payload);
-            if (parts.size() != 2 || parts[0].empty() || parts[1].empty()) {
-                if (error) {
-                    *error = "invalid archive wal delete at line " + std::to_string(line_no);
-                }
-                return false;
-            }
-            metas_.erase(BuildObjectKey(parts[0], parts[1]));
-        } else {
-            if (error) {
-                *error = "unknown archive wal op at line " + std::to_string(line_no);
-            }
-            return false;
-        }
-    }
-    return true;
-}
-
 bool ArchiveObjectMetaStore::EnsureWalMagicLocked(std::string* error) {
-    if (!wal_has_magic_) {
-        return true;
-    }
     if (!wal_out_.is_open()) {
         if (error) {
             *error = "archive wal stream is not open";
@@ -766,7 +684,6 @@ bool ArchiveObjectMetaStore::WriteSnapshotLocked(std::string* error) {
         }
         return false;
     }
-    wal_has_magic_ = true;
     if (!EnsureWalMagicLocked(error)) {
         return false;
     }

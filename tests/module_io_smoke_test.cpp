@@ -201,6 +201,39 @@ bool TestMdsNamespace(const std::string& endpoint, const std::string& uniq, std:
     }
 
     {
+        zb::rpc::GetFileAnchorRequest req;
+        req.set_inode_id(inode_id);
+        zb::rpc::GetFileAnchorReply resp;
+        brpc::Controller cntl;
+        stub.GetFileAnchor(&cntl, &req, &resp, nullptr);
+        if (cntl.Failed()) {
+            if (detail) {
+                *detail = "GetFileAnchor rpc failed: " + cntl.ErrorText();
+            }
+            return false;
+        }
+        if (resp.status().code() != zb::rpc::MDS_OK) {
+            if (detail) {
+                *detail = "GetFileAnchor status=" + std::to_string(resp.status().code()) +
+                          " msg=" + resp.status().message();
+            }
+            return false;
+        }
+        const bool has_disk_anchor =
+            !resp.anchor().disk_anchor().node_id().empty() &&
+            !resp.anchor().disk_anchor().disk_id().empty();
+        const bool has_optical_anchor =
+            !resp.anchor().optical_anchor().node_id().empty() &&
+            !resp.anchor().optical_anchor().disk_id().empty();
+        if (!has_disk_anchor && !has_optical_anchor) {
+            if (detail) {
+                *detail = "GetFileAnchor returns empty anchor set";
+            }
+            return false;
+        }
+    }
+
+    {
         zb::rpc::RenameRequest req;
         req.set_old_path(file);
         req.set_new_path(renamed);
