@@ -29,6 +29,7 @@ constexpr size_t kImageRecordHeaderSize = 28;
 ImageStore::ImageStore(std::string root,
                        std::string cache_root,
                        std::vector<std::string> disk_ids,
+                       std::unordered_map<std::string, uint64_t> disk_capacity_map,
                        bool simulate_io,
                        uint64_t optical_read_bytes_per_sec,
                        uint64_t optical_write_bytes_per_sec,
@@ -41,6 +42,7 @@ ImageStore::ImageStore(std::string root,
     : root_(std::move(root)),
       cache_root_(std::move(cache_root)),
       disk_ids_(std::move(disk_ids)),
+      disk_capacity_map_(std::move(disk_capacity_map)),
       simulate_io_(simulate_io),
       optical_read_bytes_per_sec_(optical_read_bytes_per_sec == 0 ? 1 : optical_read_bytes_per_sec),
       optical_write_bytes_per_sec_(optical_write_bytes_per_sec == 0 ? 1 : optical_write_bytes_per_sec),
@@ -84,7 +86,8 @@ bool ImageStore::Init(std::string* error) {
         ctx.cache_root_path = (fs::path(cache_root_) / disk_id).string();
         ctx.mount_point = (fs::path(mount_point_prefix_) / disk_id).string();
         ctx.manifest_path = (fs::path(ctx.root_path) / "manifest.log").string();
-        ctx.capacity_bytes = disk_capacity_bytes_;
+        auto cap_it = disk_capacity_map_.find(disk_id);
+        ctx.capacity_bytes = cap_it != disk_capacity_map_.end() ? cap_it->second : disk_capacity_bytes_;
 
         fs::create_directories(ctx.root_path, ec);
         if (ec) {

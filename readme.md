@@ -79,3 +79,47 @@ bash scripts/oneclick_cluster_from_meta.sh stop
 **补充**
 - 首次启动建议 `CLEAR_MDS_DB_BEFORE_INGEST=1`；后续重启可用 `CLEAR_MDS_DB_BEFORE_INGEST=0`，并可加 `INGEST_MDS_SST=0` 跳过重复导入。  
 - 运行期日志/PID/配置/MDS DB 在 `RUN_DIR`，不是 `OUT_DIR` 根目录。
+
+
+用 `nohup + setsid` 最稳，不绑定 VSCode 终端，断 SSH 也继续跑。
+
+```bash
+cd /mnt/md0/Projects/wjh/ZBStorage
+mkdir -p /mnt/md0/wjh/zb_meta_out/logs
+
+setsid nohup env \
+OUT_DIR=/mnt/md0/wjh/zb_meta_out \
+MIN_FREE_SPACE_TB=10 \
+SPACE_CHECK_INTERVAL_SEC=30 \
+ENABLE_SPACE_GUARD=1 \
+STEP_PROGRESS_INTERVAL_SEC=30 \
+bash scripts/run_meta_gen_pipeline.sh \
+> /mnt/md0/wjh/zb_meta_out/logs/pipeline_nohup.log 2>&1 < /dev/null &
+
+echo $! > /mnt/md0/wjh/zb_meta_out/pipeline.pid
+```
+
+查看是否在跑：
+```bash
+ps -fp "$(cat /mnt/md0/wjh/zb_meta_out/pipeline.pid)"
+```
+
+看实时日志：
+```bash
+tail -f /mnt/md0/wjh/zb_meta_out/logs/pipeline_nohup.log
+```
+
+停止：
+```bash
+kill "$(cat /mnt/md0/wjh/zb_meta_out/pipeline.pid)"
+# 不停再强杀
+kill -9 "$(cat /mnt/md0/wjh/zb_meta_out/pipeline.pid)"
+```
+
+如果你想可恢复会话（更推荐），用 `tmux`：
+```bash
+tmux new -s meta_gen
+# 里面启动脚本
+# Ctrl+b d 退出会话，任务继续
+tmux attach -t meta_gen
+```

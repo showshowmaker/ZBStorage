@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace zb::optical_node {
@@ -30,6 +31,7 @@ struct OpticalNodeConfig {
     uint32_t cache_disc_slots{4};
     uint64_t max_image_size_bytes{1024ULL * 1024ULL * 1024ULL};
     uint64_t disk_capacity_bytes{10ULL * 1024ULL * 1024ULL * 1024ULL};
+    std::unordered_map<std::string, uint64_t> disk_capacity_map;
     std::string mount_point_prefix{"/optical"};
     std::string startup_scan_mode{"fast"};
 

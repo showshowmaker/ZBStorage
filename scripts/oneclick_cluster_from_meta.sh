@@ -15,12 +15,12 @@ VIRTUAL_PORT_BASE="${VIRTUAL_PORT_BASE:-29080}"
 OPTICAL_PORT_BASE="${OPTICAL_PORT_BASE:-39080}"
 
 REAL_NODE_COUNT="${REAL_NODE_COUNT:-1}"
-VIRTUAL_NODE_COUNT="${VIRTUAL_NODE_COUNT:-1}"
-OPTICAL_NODE_COUNT="${OPTICAL_NODE_COUNT:-1}"
+VIRTUAL_NODE_COUNT="${VIRTUAL_NODE_COUNT:-100}"
+OPTICAL_NODE_COUNT="${OPTICAL_NODE_COUNT:-10000}"
 
 REAL_DISKS_PER_NODE="${REAL_DISKS_PER_NODE:-24}"
-VIRTUAL_DISKS_PER_NODE="${VIRTUAL_DISKS_PER_NODE:-24}"
-OPTICAL_DISCS_PER_NODE="${OPTICAL_DISCS_PER_NODE:-256}"
+VIRTUAL_DISKS_PER_NODE="${VIRTUAL_DISKS_PER_NODE:-16}"
+OPTICAL_DISCS_PER_NODE="${OPTICAL_DISCS_PER_NODE:-10000}"
 
 REAL_DISK_CAPACITY_BYTES="${REAL_DISK_CAPACITY_BYTES:-2199023255552}"     # 2TB
 VIRTUAL_DISK_CAPACITY_BYTES="${VIRTUAL_DISK_CAPACITY_BYTES:-2199023255552}" # 2TB
@@ -72,6 +72,26 @@ join_disk_ids() {
     out+="${prefix}${i}"
   done
   echo "${out}"
+}
+
+build_optical_capacity_map() {
+  local node_id="$1"
+  local catalog="${OUT_DIR}/optical_meta/optical_disc_catalog.tsv"
+  if [[ ! -f "${catalog}" ]]; then
+    echo ""
+    return 0
+  fi
+  awk -F '\t' -v node="${node_id}" '
+    $1 == node {
+      if (out != "") {
+        out = out ","
+      }
+      out = out $2 ":" $3
+    }
+    END {
+      print out
+    }
+  ' "${catalog}"
 }
 
 wait_port() {
@@ -227,7 +247,9 @@ render_optical_config() {
   local archive_root="${RUN_DIR}/optical_nodes/${node_id}/archive"
   local cache_root="${RUN_DIR}/optical_nodes/${node_id}/cache"
   local disks
+  local capacity_map
   disks="$(join_disk_ids "odisk" "${OPTICAL_DISCS_PER_NODE}")"
+  capacity_map="$(build_optical_capacity_map "${node_id}")"
   mkdir -p "${archive_root}" "${cache_root}"
   cat > "${CFG_DIR}/${node_id}.conf" <<EOF
 NODE_ID=${node_id}
@@ -249,6 +271,7 @@ CACHE_READ_BYTES_PER_SEC=419430400
 CACHE_DISC_SLOTS=4
 MAX_IMAGE_SIZE_BYTES=1099511627776
 DISK_CAPACITY_BYTES=${OPTICAL_DISK_CAPACITY_BYTES}
+DISK_CAPACITY_MAP=${capacity_map}
 MOUNT_POINT_PREFIX=${RUN_DIR}/optical_nodes/${node_id}/mount
 STARTUP_SCAN_MODE=fast
 EOF

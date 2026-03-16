@@ -57,6 +57,7 @@ public:
     ImageStore(std::string root,
                std::string cache_root,
                std::vector<std::string> disk_ids,
+               std::unordered_map<std::string, uint64_t> disk_capacity_map,
                bool simulate_io,
                uint64_t optical_read_bytes_per_sec,
                uint64_t optical_write_bytes_per_sec,
@@ -193,6 +194,7 @@ private:
     uint64_t cache_read_bytes_per_sec_{0};
     uint64_t max_image_size_bytes_{0};
     uint64_t disk_capacity_bytes_{0};
+    std::unordered_map<std::string, uint64_t> disk_capacity_map_;
     std::string mount_point_prefix_;
     uint32_t cache_disc_slots_{4};
     bool replay_images_on_init_{false};

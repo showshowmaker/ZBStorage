@@ -76,6 +76,32 @@ bool ParseBool(const std::string& value, bool* out) {
     return false;
 }
 
+bool ParseDiskCapacityMap(const std::string& value,
+                          std::unordered_map<std::string, uint64_t>* out) {
+    if (!out) {
+        return false;
+    }
+    out->clear();
+    if (value.empty()) {
+        return true;
+    }
+    const std::vector<std::string> items = Split(value, ',');
+    for (const auto& item : items) {
+        const size_t sep = item.find(':');
+        if (sep == std::string::npos) {
+            return false;
+        }
+        const std::string disk_id = Trim(item.substr(0, sep));
+        const std::string capacity_text = Trim(item.substr(sep + 1));
+        uint64_t capacity = 0;
+        if (disk_id.empty() || !ParseUint64(capacity_text, &capacity)) {
+            return false;
+        }
+        (*out)[disk_id] = capacity;
+    }
+    return true;
+}
+
 } // namespace
 
 OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::string* error) {
@@ -208,6 +234,13 @@ OpticalNodeConfig OpticalNodeConfig::LoadFromFile(const std::string& path, std::
             if (!ParseUint64(value, &cfg.disk_capacity_bytes)) {
                 if (error) {
                     *error = "Invalid DISK_CAPACITY_BYTES at line " + std::to_string(line_no);
+                }
+                return {};
+            }
+        } else if (key == "DISK_CAPACITY_MAP") {
+            if (!ParseDiskCapacityMap(value, &cfg.disk_capacity_map)) {
+                if (error) {
+                    *error = "Invalid DISK_CAPACITY_MAP at line " + std::to_string(line_no);
                 }
                 return {};
             }
