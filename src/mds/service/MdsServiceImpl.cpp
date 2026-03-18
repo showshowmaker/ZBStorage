@@ -34,6 +34,26 @@ std::string ArchiveObjectId(const zb::rpc::ArchiveCandidate& candidate) {
     return candidate.object_id();
 }
 
+bool ParseStableObjectId(const std::string& object_id, uint64_t* inode_id) {
+    if (!inode_id) {
+        return false;
+    }
+    constexpr const char* kPrefix = "obj-";
+    if (object_id.rfind(kPrefix, 0) != 0) {
+        return false;
+    }
+    const size_t split = object_id.find('-', 4);
+    if (split == std::string::npos || split == 4) {
+        return false;
+    }
+    try {
+        *inode_id = static_cast<uint64_t>(std::stoull(object_id.substr(4, split - 4)));
+    } catch (...) {
+        return false;
+    }
+    return *inode_id != 0;
+}
+
 bool IsWriteOpenFlags(uint32_t flags) {
     const int access_mode = static_cast<int>(flags) & O_ACCMODE;
     if (access_mode == O_WRONLY || access_mode == O_RDWR) {
@@ -52,11 +72,19 @@ bool IsWriteOpenFlags(uint32_t flags) {
     return false;
 }
 
-bool HasOpticalAnchor(const zb::rpc::FileAnchorSet& anchors) {
-    const bool mask_has_optical = (anchors.anchor_mask() & (1U << 1U)) != 0U;
-    const auto& optical = anchors.optical_anchor();
-    const bool lite_has_optical = !optical.node_id().empty() && !optical.disk_id().empty();
-    return mask_has_optical || lite_has_optical;
+bool ReplicaFlagHasDisk(zb::rpc::FileReplicaFlag flag) {
+    return flag == zb::rpc::FILE_REPLICA_DISK_ONLY || flag == zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL;
+}
+
+bool ReplicaFlagHasOptical(zb::rpc::FileReplicaFlag flag) {
+    return flag == zb::rpc::FILE_REPLICA_OPTICAL_ONLY || flag == zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL;
+}
+
+uint32_t ComputeObjectCount(uint64_t file_size, uint64_t object_unit_size) {
+    if (file_size == 0 || object_unit_size == 0) {
+        return 0;
+    }
+    return static_cast<uint32_t>((file_size + object_unit_size - 1) / object_unit_size);
 }
 
 bool NormalizePolicyPath(const std::string& path, std::string* normalized) {
@@ -124,31 +152,51 @@ void EnsureReplicaObjectId(zb::rpc::ReplicaLocation* replica, const std::string&
 constexpr uint32_t kAnchorMaskDisk = 1U << 0U;
 constexpr uint32_t kAnchorMaskOptical = 1U << 1U;
 
-zb::rpc::FileAnchorLite ToAnchorLite(const zb::rpc::ReplicaLocation& replica) {
-    zb::rpc::FileAnchorLite lite;
-    lite.set_node_id(replica.node_id());
-    lite.set_disk_id(replica.disk_id());
-    lite.set_object_id(replica.object_id());
-    lite.set_size(replica.size());
-    lite.set_storage_tier(replica.storage_tier());
-    lite.set_replica_state(replica.replica_state());
-    lite.set_image_id(replica.image_id());
-    lite.set_image_offset(replica.image_offset());
-    lite.set_image_length(replica.image_length());
+zb::rpc::DiskFileAnchor ToDiskAnchor(const zb::rpc::DiskFileLocation& location) {
+    zb::rpc::DiskFileAnchor lite;
+    lite.set_node_id(location.node_id());
+    lite.set_disk_id(location.disk_id());
+    lite.set_object_id("obj-" + std::to_string(location.inode_id()) + "-0");
+    lite.set_size(location.file_size());
+    lite.set_replica_state(zb::rpc::REPLICA_READY);
     return lite;
 }
 
-zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::FileAnchorLite& lite) {
+zb::rpc::OpticalFileAnchor ToOpticalAnchor(const zb::rpc::OpticalFileLocation& location) {
+    zb::rpc::OpticalFileAnchor lite;
+    lite.set_node_id(location.node_id());
+    lite.set_disk_id(location.disk_id());
+    lite.set_object_id(location.file_id().empty() ? "obj-" + std::to_string(location.inode_id()) + "-0"
+                                                  : location.file_id());
+    lite.set_size(location.file_size());
+    lite.set_replica_state(zb::rpc::REPLICA_READY);
+    lite.set_image_id(location.image_id());
+    return lite;
+}
+
+zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::DiskFileLocation& location) {
     zb::rpc::ReplicaLocation replica;
-    replica.set_node_id(lite.node_id());
-    replica.set_disk_id(lite.disk_id());
-    replica.set_object_id(lite.object_id());
-    replica.set_size(lite.size());
-    replica.set_storage_tier(lite.storage_tier());
-    replica.set_replica_state(lite.replica_state());
-    replica.set_image_id(lite.image_id());
-    replica.set_image_offset(lite.image_offset());
-    replica.set_image_length(lite.image_length());
+    replica.set_node_id(location.node_id());
+    replica.set_node_address(location.node_address());
+    replica.set_disk_id(location.disk_id());
+    replica.set_object_id("obj-" + std::to_string(location.inode_id()) + "-0");
+    replica.set_size(location.file_size());
+    replica.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+    replica.set_replica_state(zb::rpc::REPLICA_READY);
+    return replica;
+}
+
+zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::OpticalFileLocation& location) {
+    zb::rpc::ReplicaLocation replica;
+    replica.set_node_id(location.node_id());
+    replica.set_node_address(location.node_address());
+    replica.set_disk_id(location.disk_id());
+    replica.set_object_id(location.file_id().empty() ? "obj-" + std::to_string(location.inode_id()) + "-0"
+                                                     : location.file_id());
+    replica.set_size(location.file_size());
+    replica.set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
+    replica.set_replica_state(zb::rpc::REPLICA_READY);
+    replica.set_image_id(location.image_id());
     return replica;
 }
 
@@ -157,7 +205,7 @@ zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::FileAnchorLite& lite) 
 MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
                                ObjectAllocator* allocator,
                                uint64_t default_object_unit_size,
-                               ArchiveCandidateQueue* candidate_queue,
+                               FileArchiveCandidateQueue* candidate_queue,
                                ArchiveLeaseManager* lease_manager)
     : store_(store),
       allocator_(allocator),
@@ -271,31 +319,15 @@ void MdsServiceImpl::Open(google::protobuf::RpcController* cntl_base,
     zb::rpc::FileAnchorSet file_anchor_set;
     if (attr.type() == zb::rpc::INODE_FILE) {
         std::string anchor_error;
-        zb::rpc::ReplicaLocation file_anchor;
-        if (!LoadFileAnchorSet(inode_id, &file_anchor_set, &anchor_error) ||
-            !SelectPrimaryAnchor(file_anchor_set, &file_anchor)) {
-            std::string select_error;
-            if (!SelectFileAnchor(inode_id, attr, &file_anchor, &select_error)) {
-                FillStatus(response->mutable_status(),
-                           zb::rpc::MDS_INTERNAL_ERROR,
-                           select_error.empty() ? "failed to resolve file anchor" : select_error);
-                return;
-            }
-            file_anchor_set = BuildFileAnchorSetFromSingle(file_anchor);
-            rocksdb::WriteBatch anchor_batch;
-            if (!SaveFileAnchorSet(inode_id, file_anchor_set, &anchor_batch)) {
-                FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to encode file anchor");
-                return;
-            }
-            std::string persist_error;
-            if (!store_->WriteBatch(&anchor_batch, &persist_error)) {
-                FillStatus(response->mutable_status(),
-                           zb::rpc::MDS_INTERNAL_ERROR,
-                           persist_error.empty() ? "failed to persist file anchor" : persist_error);
-                return;
-            }
+        if (!BuildCompatFileAnchorSet(inode_id, attr, &file_anchor_set, &anchor_error)) {
+            FillStatus(response->mutable_status(),
+                       zb::rpc::MDS_INTERNAL_ERROR,
+                       anchor_error.empty() ? "failed to load file location" : anchor_error);
+            return;
         }
-        if (IsWriteOpenFlags(request->flags()) && HasOpticalAnchor(file_anchor_set)) {
+        if (IsWriteOpenFlags(request->flags()) &&
+            (attr.file_archive_state() == zb::rpc::INODE_ARCHIVE_ARCHIVED ||
+             ReplicaFlagHasOptical(attr.replica_flag()))) {
             FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, kReadOnlyOpticalMessage);
             return;
         }
@@ -417,6 +449,8 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     attr.set_object_unit_size(request->object_unit_size() ? request->object_unit_size() : default_object_unit_size_);
     attr.set_replica(request->replica() ? request->replica() : 1);
     attr.set_version(1);
+    attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
+    attr.set_replica_flag(zb::rpc::FILE_REPLICA_DISK_ONLY);
 
     zb::rpc::PathPlacementPolicyRecord placement_policy;
     std::string policy_error;
@@ -448,9 +482,22 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
     }
-    zb::rpc::FileAnchorSet anchor_set = BuildFileAnchorSetFromSingle(anchor);
-    if (!SaveFileAnchorSet(inode_id, anchor_set, &batch)) {
-        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to encode file anchor");
+    zb::rpc::DiskFileLocation disk_location;
+    disk_location.set_inode_id(inode_id);
+    disk_location.set_node_id(anchor.node_id());
+    std::string anchor_address;
+    if (ResolveNodeAddress(anchor.node_id(), &anchor_address, &error)) {
+        disk_location.set_node_address(anchor_address);
+    } else {
+        error.clear();
+    }
+    disk_location.set_disk_id(anchor.disk_id());
+    disk_location.set_file_size(0);
+    disk_location.set_object_unit_size(attr.object_unit_size());
+    disk_location.set_object_count(0);
+    disk_location.set_version(attr.version());
+    if (!SaveDiskFileLocation(disk_location, &batch)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to encode disk file location");
         return;
     }
     if (!store_->WriteBatch(&batch, &error)) {
@@ -459,7 +506,7 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     }
 
     *response->mutable_attr() = attr;
-    *response->mutable_file_anchor() = anchor_set;
+    *response->mutable_file_anchor() = BuildCompatFileAnchorSet(&disk_location, nullptr);
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
@@ -530,6 +577,8 @@ void MdsServiceImpl::Mkdir(google::protobuf::RpcController* cntl_base,
     attr.set_object_unit_size(default_object_unit_size_);
     attr.set_replica(1);
     attr.set_version(1);
+    attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
+    attr.set_replica_flag(zb::rpc::FILE_REPLICA_NONE);
 
     rocksdb::WriteBatch batch;
     batch.Put(DentryKey(parent_inode, name), MetaCodec::EncodeUInt64(inode_id));
@@ -704,11 +753,10 @@ void MdsServiceImpl::Unlink(google::protobuf::RpcController* cntl_base,
         return;
     }
 
-    zb::rpc::FileAnchorSet anchors;
-    std::string anchor_error;
     zb::rpc::ReplicaLocation cleanup_anchor;
-    if (LoadFileAnchorSet(inode_id, &anchors, &anchor_error) &&
-        (SelectDiskAnchor(anchors, &cleanup_anchor) || SelectPrimaryAnchor(anchors, &cleanup_anchor)) &&
+    std::string anchor_error;
+    if (ReplicaFlagHasDisk(attr.replica_flag()) &&
+        LoadFilePrimaryLocation(inode_id, attr, &cleanup_anchor, &anchor_error) &&
         !cleanup_anchor.node_id().empty() &&
         cleanup_anchor.storage_tier() == zb::rpc::STORAGE_TIER_DISK) {
         std::string cleanup_error;
@@ -845,30 +893,11 @@ void MdsServiceImpl::GetFileAnchor(google::protobuf::RpcController* cntl_base,
     }
 
     zb::rpc::FileAnchorSet anchor_set;
-    zb::rpc::ReplicaLocation anchor;
-    error.clear();
-    if (!LoadFileAnchorSet(request->inode_id(), &anchor_set, &error) ||
-        !SelectPrimaryAnchor(anchor_set, &anchor)) {
-        std::string select_error;
-        if (!SelectFileAnchor(request->inode_id(), attr, &anchor, &select_error)) {
-            FillStatus(response->mutable_status(),
-                       zb::rpc::MDS_INTERNAL_ERROR,
-                       select_error.empty() ? "failed to resolve file anchor" : select_error);
-            return;
-        }
-        anchor_set = BuildFileAnchorSetFromSingle(anchor);
-        rocksdb::WriteBatch batch;
-        if (!SaveFileAnchorSet(request->inode_id(), anchor_set, &batch)) {
-            FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to encode file anchor");
-            return;
-        }
-        std::string put_error;
-        if (!store_->WriteBatch(&batch, &put_error)) {
-            FillStatus(response->mutable_status(),
-                       zb::rpc::MDS_INTERNAL_ERROR,
-                       put_error.empty() ? "failed to persist file anchor" : put_error);
-            return;
-        }
+    if (!BuildCompatFileAnchorSet(request->inode_id(), attr, &anchor_set, &error)) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "failed to load file location" : error);
+        return;
     }
 
     *response->mutable_anchor() = anchor_set;
@@ -914,15 +943,8 @@ void MdsServiceImpl::UpdateInodeStat(google::protobuf::RpcController* cntl_base,
         return;
     }
 
-    zb::rpc::FileAnchorSet anchors;
-    std::string anchor_error;
-    if (!LoadFileAnchorSet(request->inode_id(), &anchors, &anchor_error)) {
-        FillStatus(response->mutable_status(),
-                   zb::rpc::MDS_INTERNAL_ERROR,
-                   anchor_error.empty() ? "failed to load file anchor set" : anchor_error);
-        return;
-    }
-    if (HasOpticalAnchor(anchors)) {
+    if (attr.file_archive_state() == zb::rpc::INODE_ARCHIVE_ARCHIVED ||
+        ReplicaFlagHasOptical(attr.replica_flag())) {
         FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, kReadOnlyOpticalMessage);
         return;
     }
@@ -932,15 +954,37 @@ void MdsServiceImpl::UpdateInodeStat(google::protobuf::RpcController* cntl_base,
         attr.set_object_unit_size(request->object_unit_size());
     }
     attr.set_version(request->version());
+    attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
     const uint64_t now_sec = NowSeconds();
     const uint64_t mtime = request->mtime() > 0 ? request->mtime() : now_sec;
     attr.set_mtime(mtime);
     attr.set_ctime(now_sec);
 
-    if (!PutInode(request->inode_id(), attr, &error)) {
+    zb::rpc::DiskFileLocation disk_location;
+    std::string disk_error;
+    if (!LoadDiskFileLocation(request->inode_id(), &disk_location, &disk_error)) {
         FillStatus(response->mutable_status(),
                    zb::rpc::MDS_INTERNAL_ERROR,
-                   error.empty() ? "failed to persist inode stat" : error);
+                   disk_error.empty() ? "failed to load disk file location" : disk_error);
+        return;
+    }
+    disk_location.set_file_size(attr.size());
+    disk_location.set_object_unit_size(attr.object_unit_size());
+    disk_location.set_object_count(ComputeObjectCount(attr.size(), attr.object_unit_size()));
+    disk_location.set_version(attr.version());
+
+    rocksdb::WriteBatch batch;
+    batch.Put(InodeKey(request->inode_id()), MetaCodec::EncodeInodeAttr(attr));
+    if (!SaveDiskFileLocation(disk_location, &batch)) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "failed to encode disk file location");
+        return;
+    }
+    if (!store_->WriteBatch(&batch, &error)) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "failed to persist disk file location" : error);
         return;
     }
 
@@ -1022,20 +1066,6 @@ void MdsServiceImpl::GetPathPlacementPolicy(google::protobuf::RpcController* cnt
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
-void MdsServiceImpl::ReportNodeStatus(google::protobuf::RpcController* cntl_base,
-                                      const zb::rpc::ReportNodeStatusRequest* request,
-                                      zb::rpc::ReportNodeStatusReply* response,
-                                      google::protobuf::Closure* done) {
-    brpc::ClosureGuard done_guard(done);
-    (void)cntl_base;
-    (void)request;
-
-    if (!response) {
-        return;
-    }
-    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
-}
-
 void MdsServiceImpl::ReportArchiveCandidates(google::protobuf::RpcController* cntl_base,
                                              const zb::rpc::ReportArchiveCandidatesRequest* request,
                                              zb::rpc::ReportArchiveCandidatesReply* response,
@@ -1057,35 +1087,99 @@ void MdsServiceImpl::ReportArchiveCandidates(google::protobuf::RpcController* cn
         return;
     }
 
-    std::vector<ArchiveCandidateEntry> batch;
+    std::vector<FileArchiveCandidateEntry> batch;
     batch.reserve(static_cast<size_t>(request->candidates_size()));
     uint32_t dropped = 0;
     const uint64_t fallback_report_ts = request->report_ts_ms() > 0 ? request->report_ts_ms() : NowMilliseconds();
 
     for (const auto& item : request->candidates()) {
-        ArchiveCandidateEntry candidate;
+        const std::string object_id = ArchiveObjectId(item);
+        uint64_t inode_id = 0;
+        if (item.disk_id().empty() || object_id.empty() || !ParseStableObjectId(object_id, &inode_id)) {
+            ++dropped;
+            continue;
+        }
+        FileArchiveCandidateEntry candidate;
+        candidate.inode_id = inode_id;
         candidate.node_id = !item.node_id().empty() ? item.node_id() : request->node_id();
         candidate.node_address = !item.node_address().empty() ? item.node_address() : request->node_address();
         candidate.disk_id = item.disk_id();
-        const std::string object_id = ArchiveObjectId(item);
-        candidate.SetArchiveObjectId(object_id);
+        candidate.file_size = item.size_bytes();
+        candidate.object_count = 0;
         candidate.last_access_ts_ms = item.last_access_ts_ms();
-        candidate.size_bytes = item.size_bytes();
-        candidate.checksum = item.checksum();
-        candidate.heat_score = item.heat_score();
         candidate.archive_state = item.archive_state().empty() ? "pending" : item.archive_state();
         candidate.version = item.version();
-        candidate.score = item.score();
         candidate.report_ts_ms = item.report_ts_ms() > 0 ? item.report_ts_ms() : fallback_report_ts;
-
-        if (candidate.disk_id.empty() || candidate.ArchiveObjectId().empty()) {
+        zb::rpc::InodeAttr attr;
+        std::string inode_error;
+        if (!GetInode(inode_id, &attr, &inode_error) ||
+            attr.type() != zb::rpc::INODE_FILE ||
+            attr.file_archive_state() != zb::rpc::INODE_ARCHIVE_PENDING) {
             ++dropped;
             continue;
         }
         batch.push_back(std::move(candidate));
     }
 
-    const ArchiveCandidateQueue::PushResult push = candidate_queue_->PushBatch(batch);
+    const FileArchiveCandidateQueue::PushResult push = candidate_queue_->PushBatch(batch);
+    response->set_accepted(static_cast<uint32_t>(push.accepted));
+    response->set_dropped(static_cast<uint32_t>(dropped + push.dropped));
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::ReportFileArchiveCandidates(google::protobuf::RpcController* cntl_base,
+                                                 const zb::rpc::ReportFileArchiveCandidatesRequest* request,
+                                                 zb::rpc::ReportFileArchiveCandidatesReply* response,
+                                                 google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+
+    if (!response) {
+        return;
+    }
+    if (!request) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, "request is null");
+        return;
+    }
+    if (!candidate_queue_) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "archive candidate queue disabled");
+        response->set_accepted(0);
+        response->set_dropped(static_cast<uint32_t>(request->candidates_size()));
+        return;
+    }
+
+    std::vector<FileArchiveCandidateEntry> batch;
+    batch.reserve(static_cast<size_t>(request->candidates_size()));
+    uint32_t dropped = 0;
+    const uint64_t fallback_report_ts = request->report_ts_ms() > 0 ? request->report_ts_ms() : NowMilliseconds();
+    for (const auto& item : request->candidates()) {
+        FileArchiveCandidateEntry candidate;
+        candidate.inode_id = item.inode_id();
+        candidate.node_id = !item.node_id().empty() ? item.node_id() : request->node_id();
+        candidate.node_address = !item.node_address().empty() ? item.node_address() : request->node_address();
+        candidate.disk_id = item.disk_id();
+        candidate.file_size = item.file_size();
+        candidate.object_count = item.object_count();
+        candidate.last_access_ts_ms = item.last_access_ts_ms();
+        candidate.archive_state = item.archive_state().empty() ? "pending" : item.archive_state();
+        candidate.version = item.version();
+        candidate.report_ts_ms = item.report_ts_ms() > 0 ? item.report_ts_ms() : fallback_report_ts;
+        if (candidate.inode_id == 0 || candidate.disk_id.empty()) {
+            ++dropped;
+            continue;
+        }
+        zb::rpc::InodeAttr attr;
+        std::string inode_error;
+        if (!GetInode(candidate.inode_id, &attr, &inode_error) ||
+            attr.type() != zb::rpc::INODE_FILE ||
+            attr.file_archive_state() != zb::rpc::INODE_ARCHIVE_PENDING) {
+            ++dropped;
+            continue;
+        }
+        batch.push_back(std::move(candidate));
+    }
+
+    const FileArchiveCandidateQueue::PushResult push = candidate_queue_->PushBatch(batch);
     response->set_accepted(static_cast<uint32_t>(push.accepted));
     response->set_dropped(static_cast<uint32_t>(dropped + push.dropped));
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
@@ -1201,6 +1295,8 @@ bool MdsServiceImpl::EnsureRoot(std::string* error) {
     root.set_object_unit_size(default_object_unit_size_);
     root.set_replica(1);
     root.set_version(1);
+    root.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
+    root.set_replica_flag(zb::rpc::FILE_REPLICA_NONE);
 
     return PutInode(kRootInodeId, root, error);
 }
@@ -1311,9 +1407,13 @@ bool MdsServiceImpl::DentryExists(uint64_t parent_inode, const std::string& name
 
 bool MdsServiceImpl::DeleteInodeData(uint64_t inode_id, std::string* error) {
     rocksdb::WriteBatch batch;
-    batch.Delete(FileAnchorKey(inode_id));
-    // Anchor-only metadata mode: do not touch per-object/per-layout keyspaces on unlink.
-    // Data object cleanup is delegated to the anchor node via DeleteFileMeta(purge_objects=true).
+    batch.Delete(FileArchiveStateKey(inode_id));
+    if (!DeleteDiskFileLocation(inode_id, &batch, error)) {
+        return false;
+    }
+    if (!DeleteOpticalFileLocation(inode_id, &batch, error)) {
+        return false;
+    }
     return store_->WriteBatch(&batch, error);
 }
 
@@ -1514,182 +1614,185 @@ bool MdsServiceImpl::DeletePathPlacementPolicyByPrefix(const std::string& path_p
     return store_->WriteBatch(&batch, error);
 }
 
-bool MdsServiceImpl::LoadFileAnchorSet(uint64_t inode_id,
-                                       zb::rpc::FileAnchorSet* anchors,
-                                       std::string* error) const {
-    if (!anchors || inode_id == 0) {
+bool MdsServiceImpl::LoadDiskFileLocation(uint64_t inode_id,
+                                          zb::rpc::DiskFileLocation* location,
+                                          std::string* error) const {
+    if (!location || inode_id == 0) {
         if (error) {
-            *error = "invalid file anchor set output";
+            *error = "invalid disk file location output";
         }
         return false;
     }
-    std::string data;
-    std::string local_error;
-    if (!store_->Get(FileAnchorKey(inode_id), &data, &local_error)) {
-        if (error) {
-            *error = local_error.empty() ? "file anchor not found" : local_error;
-        }
-        return false;
-    }
-    if (!anchors->ParseFromString(data)) {
-        if (error) {
-            *error = "invalid file anchor payload";
-        }
-        return false;
-    }
-
-    uint32_t mask = anchors->anchor_mask();
-    if (!anchors->disk_anchor().node_id().empty() || !anchors->disk_anchor().disk_id().empty()) {
-        mask |= kAnchorMaskDisk;
-    }
-    if (!anchors->optical_anchor().node_id().empty() || !anchors->optical_anchor().disk_id().empty()) {
-        mask |= kAnchorMaskOptical;
-    }
-    anchors->set_anchor_mask(mask);
-    if (anchors->version() == 0) {
-        anchors->set_version(1);
-    }
-    if (anchors->primary_tier() != zb::rpc::STORAGE_TIER_DISK &&
-        anchors->primary_tier() != zb::rpc::STORAGE_TIER_OPTICAL) {
-        anchors->set_primary_tier((mask & kAnchorMaskDisk) ? zb::rpc::STORAGE_TIER_DISK
-                                                            : zb::rpc::STORAGE_TIER_OPTICAL);
-    }
-    if ((mask & kAnchorMaskDisk) != 0U) {
-        anchors->mutable_disk_anchor()->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
-        anchors->mutable_disk_anchor()->set_replica_state(zb::rpc::REPLICA_READY);
-    }
-    if ((mask & kAnchorMaskOptical) != 0U) {
-        anchors->mutable_optical_anchor()->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
-        anchors->mutable_optical_anchor()->set_replica_state(zb::rpc::REPLICA_READY);
-    }
-    return true;
-}
-
-bool MdsServiceImpl::SaveFileAnchorSet(uint64_t inode_id,
-                                       const zb::rpc::FileAnchorSet& anchors,
-                                       rocksdb::WriteBatch* batch) const {
-    if (!batch || inode_id == 0) {
-        return false;
-    }
-    zb::rpc::FileAnchorSet normalized = anchors;
-    if (normalized.version() == 0) {
-        normalized.set_version(1);
-    }
-    uint32_t mask = 0;
-    if (!normalized.disk_anchor().node_id().empty() || !normalized.disk_anchor().disk_id().empty()) {
-        normalized.mutable_disk_anchor()->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
-        normalized.mutable_disk_anchor()->set_replica_state(zb::rpc::REPLICA_READY);
-        if (normalized.disk_anchor().object_id().empty()) {
-            normalized.mutable_disk_anchor()->set_object_id(BuildStableObjectId(inode_id, 0));
-        }
-        mask |= kAnchorMaskDisk;
-    }
-    if (!normalized.optical_anchor().node_id().empty() || !normalized.optical_anchor().disk_id().empty()) {
-        normalized.mutable_optical_anchor()->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
-        normalized.mutable_optical_anchor()->set_replica_state(zb::rpc::REPLICA_READY);
-        if (normalized.optical_anchor().object_id().empty()) {
-            normalized.mutable_optical_anchor()->set_object_id(BuildStableObjectId(inode_id, 0));
-        }
-        mask |= kAnchorMaskOptical;
-    }
-    normalized.set_anchor_mask(mask);
-    if (normalized.primary_tier() != zb::rpc::STORAGE_TIER_DISK &&
-        normalized.primary_tier() != zb::rpc::STORAGE_TIER_OPTICAL) {
-        normalized.set_primary_tier((mask & kAnchorMaskDisk) ? zb::rpc::STORAGE_TIER_DISK
-                                                              : zb::rpc::STORAGE_TIER_OPTICAL);
-    }
-
     std::string payload;
-    if (!normalized.SerializeToString(&payload)) {
+    std::string local_error;
+    if (!store_->GetDiskFileLocation(inode_id, &payload, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "disk file location not found" : local_error;
+        }
         return false;
     }
-    batch->Put(FileAnchorKey(inode_id), payload);
+    if (!MetaCodec::DecodeDiskFileLocation(payload, location)) {
+        if (error) {
+            *error = "invalid disk file location payload";
+        }
+        return false;
+    }
     return true;
 }
 
-zb::rpc::FileAnchorSet MdsServiceImpl::BuildFileAnchorSetFromSingle(const zb::rpc::ReplicaLocation& anchor) {
+bool MdsServiceImpl::SaveDiskFileLocation(const zb::rpc::DiskFileLocation& location,
+                                          rocksdb::WriteBatch* batch) const {
+    if (!batch || location.inode_id() == 0) {
+        return false;
+    }
+    std::string payload = MetaCodec::EncodeDiskFileLocation(location);
+    if (payload.empty()) {
+        return false;
+    }
+    return store_->BatchPutDiskFileLocation(batch, location.inode_id(), payload, nullptr);
+}
+
+bool MdsServiceImpl::DeleteDiskFileLocation(uint64_t inode_id,
+                                            rocksdb::WriteBatch* batch,
+                                            std::string* error) const {
+    if (!batch || inode_id == 0) {
+        if (error) {
+            *error = "invalid disk file location delete args";
+        }
+        return false;
+    }
+    return store_->BatchDeleteDiskFileLocation(batch, inode_id, error);
+}
+
+bool MdsServiceImpl::LoadOpticalFileLocation(uint64_t inode_id,
+                                             zb::rpc::OpticalFileLocation* location,
+                                             std::string* error) const {
+    if (!location || inode_id == 0) {
+        if (error) {
+            *error = "invalid optical file location output";
+        }
+        return false;
+    }
+    std::string payload;
+    std::string local_error;
+    if (!store_->GetOpticalFileLocation(inode_id, &payload, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "optical file location not found" : local_error;
+        }
+        return false;
+    }
+    if (!MetaCodec::DecodeOpticalFileLocation(payload, location)) {
+        if (error) {
+            *error = "invalid optical file location payload";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool MdsServiceImpl::SaveOpticalFileLocation(const zb::rpc::OpticalFileLocation& location,
+                                             rocksdb::WriteBatch* batch) const {
+    if (!batch || location.inode_id() == 0) {
+        return false;
+    }
+    std::string payload = MetaCodec::EncodeOpticalFileLocation(location);
+    if (payload.empty()) {
+        return false;
+    }
+    return store_->BatchPutOpticalFileLocation(batch, location.inode_id(), payload, nullptr);
+}
+
+bool MdsServiceImpl::DeleteOpticalFileLocation(uint64_t inode_id,
+                                               rocksdb::WriteBatch* batch,
+                                               std::string* error) const {
+    if (!batch || inode_id == 0) {
+        if (error) {
+            *error = "invalid optical file location delete args";
+        }
+        return false;
+    }
+    return store_->BatchDeleteOpticalFileLocation(batch, inode_id, error);
+}
+
+zb::rpc::FileAnchorSet MdsServiceImpl::BuildCompatFileAnchorSet(const zb::rpc::DiskFileLocation* disk,
+                                                                const zb::rpc::OpticalFileLocation* optical) {
     zb::rpc::FileAnchorSet anchors;
     anchors.set_version(1);
-    const bool optical = anchor.storage_tier() == zb::rpc::STORAGE_TIER_OPTICAL;
-    if (optical) {
-        anchors.set_anchor_mask(kAnchorMaskOptical);
-        anchors.set_primary_tier(zb::rpc::STORAGE_TIER_OPTICAL);
-        *anchors.mutable_optical_anchor() = ToAnchorLite(anchor);
-    } else {
-        anchors.set_anchor_mask(kAnchorMaskDisk);
-        anchors.set_primary_tier(zb::rpc::STORAGE_TIER_DISK);
-        *anchors.mutable_disk_anchor() = ToAnchorLite(anchor);
+    uint32_t mask = 0;
+    if (disk && !disk->node_id().empty() && !disk->disk_id().empty()) {
+        *anchors.mutable_disk_anchor() = ToDiskAnchor(*disk);
+        mask |= kAnchorMaskDisk;
     }
+    if (optical && !optical->node_id().empty() && !optical->disk_id().empty()) {
+        *anchors.mutable_optical_anchor() = ToOpticalAnchor(*optical);
+        mask |= kAnchorMaskOptical;
+    }
+    anchors.set_anchor_mask(mask);
+    anchors.set_primary_tier((mask & kAnchorMaskDisk) != 0U ? zb::rpc::STORAGE_TIER_DISK
+                                                            : zb::rpc::STORAGE_TIER_OPTICAL);
     return anchors;
 }
 
-bool MdsServiceImpl::SelectPrimaryAnchor(const zb::rpc::FileAnchorSet& anchors,
-                                         zb::rpc::ReplicaLocation* anchor) {
-    if (!anchor) {
-        return false;
-    }
-    const uint32_t mask = anchors.anchor_mask();
-    if (anchors.primary_tier() == zb::rpc::STORAGE_TIER_DISK && (mask & kAnchorMaskDisk) != 0U) {
-        *anchor = ToReplicaLocation(anchors.disk_anchor());
-        return !anchor->node_id().empty() && !anchor->disk_id().empty();
-    }
-    if (anchors.primary_tier() == zb::rpc::STORAGE_TIER_OPTICAL && (mask & kAnchorMaskOptical) != 0U) {
-        *anchor = ToReplicaLocation(anchors.optical_anchor());
-        return !anchor->node_id().empty() && !anchor->disk_id().empty();
-    }
-    if ((mask & kAnchorMaskDisk) != 0U) {
-        *anchor = ToReplicaLocation(anchors.disk_anchor());
-        return !anchor->node_id().empty() && !anchor->disk_id().empty();
-    }
-    if ((mask & kAnchorMaskOptical) != 0U) {
-        *anchor = ToReplicaLocation(anchors.optical_anchor());
-        return !anchor->node_id().empty() && !anchor->disk_id().empty();
-    }
-    return false;
-}
-
-bool MdsServiceImpl::SelectDiskAnchor(const zb::rpc::FileAnchorSet& anchors,
-                                      zb::rpc::ReplicaLocation* anchor) {
-    if (!anchor) {
-        return false;
-    }
-    if ((anchors.anchor_mask() & kAnchorMaskDisk) == 0U) {
-        return false;
-    }
-    *anchor = ToReplicaLocation(anchors.disk_anchor());
-    return !anchor->node_id().empty() && !anchor->disk_id().empty();
-}
-
-bool MdsServiceImpl::LoadFileAnchor(uint64_t inode_id,
-                                    zb::rpc::ReplicaLocation* anchor,
-                                    std::string* error) const {
-    if (!anchor || inode_id == 0) {
+bool MdsServiceImpl::BuildCompatFileAnchorSet(uint64_t inode_id,
+                                              const zb::rpc::InodeAttr& attr,
+                                              zb::rpc::FileAnchorSet* anchors,
+                                              std::string* error) const {
+    if (!anchors || inode_id == 0) {
         if (error) {
-            *error = "invalid file anchor output";
+            *error = "invalid compat file anchor args";
         }
         return false;
     }
-    zb::rpc::FileAnchorSet anchors;
-    if (!LoadFileAnchorSet(inode_id, &anchors, error)) {
-        return false;
-    }
-    if (!SelectPrimaryAnchor(anchors, anchor)) {
-        if (error) {
-            *error = "file anchor set has no usable anchor";
+    zb::rpc::DiskFileLocation disk;
+    zb::rpc::OpticalFileLocation optical;
+    zb::rpc::DiskFileLocation* disk_ptr = nullptr;
+    zb::rpc::OpticalFileLocation* optical_ptr = nullptr;
+    if (ReplicaFlagHasDisk(attr.replica_flag())) {
+        if (!LoadDiskFileLocation(inode_id, &disk, error)) {
+            return false;
         }
-        return false;
+        disk_ptr = &disk;
     }
+    if (ReplicaFlagHasOptical(attr.replica_flag())) {
+        if (!LoadOpticalFileLocation(inode_id, &optical, error)) {
+            return false;
+        }
+        optical_ptr = &optical;
+    }
+    *anchors = BuildCompatFileAnchorSet(disk_ptr, optical_ptr);
     return true;
 }
 
-bool MdsServiceImpl::SaveFileAnchor(uint64_t inode_id,
-                                    const zb::rpc::ReplicaLocation& anchor,
-                                    rocksdb::WriteBatch* batch) const {
-    if (!batch || inode_id == 0) {
+bool MdsServiceImpl::LoadFilePrimaryLocation(uint64_t inode_id,
+                                             const zb::rpc::InodeAttr& attr,
+                                             zb::rpc::ReplicaLocation* anchor,
+                                             std::string* error) const {
+    if (!anchor || inode_id == 0) {
+        if (error) {
+            *error = "invalid file primary location output";
+        }
         return false;
     }
-    zb::rpc::FileAnchorSet anchors = BuildFileAnchorSetFromSingle(anchor);
-    return SaveFileAnchorSet(inode_id, anchors, batch);
+    if (ReplicaFlagHasDisk(attr.replica_flag())) {
+        zb::rpc::DiskFileLocation disk;
+        if (!LoadDiskFileLocation(inode_id, &disk, error)) {
+            return false;
+        }
+        *anchor = ToReplicaLocation(disk);
+        return true;
+    }
+    if (ReplicaFlagHasOptical(attr.replica_flag())) {
+        zb::rpc::OpticalFileLocation optical;
+        if (!LoadOpticalFileLocation(inode_id, &optical, error)) {
+            return false;
+        }
+        *anchor = ToReplicaLocation(optical);
+        return true;
+    }
+    if (error) {
+        *error = "file has no usable replica location";
+    }
+    return false;
 }
 
 std::string MdsServiceImpl::BuildStableObjectId(uint64_t inode_id, uint32_t object_index) {

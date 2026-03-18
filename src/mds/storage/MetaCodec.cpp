@@ -211,6 +211,32 @@ bool MetaCodec::DecodeObjectMeta(const std::string& data, zb::rpc::ObjectMeta* m
     return meta->ParseFromString(data);
 }
 
+std::string MetaCodec::EncodeDiskFileLocation(const zb::rpc::DiskFileLocation& location) {
+    std::string out;
+    location.SerializeToString(&out);
+    return out;
+}
+
+bool MetaCodec::DecodeDiskFileLocation(const std::string& data, zb::rpc::DiskFileLocation* location) {
+    if (!location) {
+        return false;
+    }
+    return location->ParseFromString(data);
+}
+
+std::string MetaCodec::EncodeOpticalFileLocation(const zb::rpc::OpticalFileLocation& location) {
+    std::string out;
+    location.SerializeToString(&out);
+    return out;
+}
+
+bool MetaCodec::DecodeOpticalFileLocation(const std::string& data, zb::rpc::OpticalFileLocation* location) {
+    if (!location) {
+        return false;
+    }
+    return location->ParseFromString(data);
+}
+
 std::string MetaCodec::EncodePgView(const PgViewRecord& view) {
     std::string payload;
     payload.reserve(256);

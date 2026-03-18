@@ -56,6 +56,18 @@ zb::msg::FileMeta ToInternalFileMeta(const zb::rpc::FileMeta& in) {
     return out;
 }
 
+real_node::FileArchiveState ToInternalFileArchiveState(zb::rpc::FileArchiveState state) {
+    switch (state) {
+        case zb::rpc::FILE_ARCHIVE_ARCHIVING:
+            return real_node::FileArchiveState::kArchiving;
+        case zb::rpc::FILE_ARCHIVE_ARCHIVED:
+            return real_node::FileArchiveState::kArchived;
+        case zb::rpc::FILE_ARCHIVE_PENDING:
+        default:
+            return real_node::FileArchiveState::kPending;
+    }
+}
+
 void FillFileObjectSlice(const zb::msg::FileObjectSlice& in, zb::rpc::FileObjectSlice* out) {
     if (!out) {
         return;
@@ -196,6 +208,29 @@ void BrpcVirtualStorageService::UpdateArchiveState(google::protobuf::RpcControll
     const std::string object_id = request->object_id();
     const zb::msg::Status internal_status =
         service_->UpdateArchiveState(request->disk_id(), object_id, request->archive_state(), request->version());
+    FillStatus(internal_status, response->mutable_status());
+}
+
+void BrpcVirtualStorageService::UpdateFileArchiveState(google::protobuf::RpcController* cntl_base,
+                                                       const zb::rpc::UpdateFileArchiveStateRequest* request,
+                                                       zb::rpc::UpdateFileArchiveStateReply* response,
+                                                       google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!service_ || !request || !response) {
+        zb::rpc::Status* status = response ? response->mutable_status() : nullptr;
+        if (status) {
+            status->set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            status->set_message("Service not initialized");
+        }
+        return;
+    }
+
+    const zb::msg::Status internal_status =
+        service_->UpdateFileArchiveState(request->inode_id(),
+                                         request->disk_id(),
+                                         ToInternalFileArchiveState(request->archive_state()),
+                                         request->version());
     FillStatus(internal_status, response->mutable_status());
 }
 

@@ -26,6 +26,19 @@ constexpr int kReplicationRepairRetryIntervalMs = 500;
 constexpr size_t kReplicationRepairMaxQueue = 10000;
 constexpr uint64_t kDefaultObjectUnitSize = 4ULL * 1024ULL * 1024ULL;
 
+struct FileArchiveAggregate {
+    uint64_t file_size{0};
+    uint32_t object_count{0};
+};
+
+uint32_t ComputeObjectCount(uint64_t file_size, uint64_t object_unit_size) {
+    if (file_size == 0 || object_unit_size == 0) {
+        return 0;
+    }
+    const uint64_t count = (file_size + object_unit_size - 1) / object_unit_size;
+    return static_cast<uint32_t>(std::min<uint64_t>(count, std::numeric_limits<uint32_t>::max()));
+}
+
 } // namespace
 
 VirtualStorageServiceImpl::VirtualStorageServiceImpl(VirtualNodeConfig config)
@@ -572,6 +585,7 @@ zb::msg::DeleteFileMetaReply VirtualStorageServiceImpl::DeleteFileMeta(const zb:
     for (const auto& removed : removed_objects) {
         RemoveObjectTracking(removed.first, removed.second);
     }
+    archive_file_meta_store_.RemoveFile(request.inode_id);
     reply.status = zb::msg::Status::Ok();
     return reply;
 }
@@ -690,6 +704,19 @@ zb::msg::CommitFileWriteReply VirtualStorageServiceImpl::CommitFileWrite(const z
     ApplyFileMetaInternal(apply_req, &request.txid, &meta_reply);
     reply.status = meta_reply.status;
     reply.meta = meta_reply.meta;
+    if (reply.status.ok()) {
+        const uint64_t object_unit_size =
+            reply.meta.object_unit_size > 0 ? reply.meta.object_unit_size : kDefaultObjectUnitSize;
+        const uint32_t object_count = ComputeObjectCount(reply.meta.file_size, object_unit_size);
+        if (!archive_file_meta_store_.UpsertFile(request.inode_id,
+                                                 std::string(),
+                                                 reply.meta.file_size,
+                                                 object_count,
+                                                 reply.meta.version,
+                                                 true)) {
+            reply.status = zb::msg::Status::IoError("failed to persist archive file meta");
+        }
+    }
     return reply;
 }
 
@@ -854,15 +881,28 @@ bool VirtualStorageServiceImpl::InitArchiveMetaStore(const std::string& meta_dir
                                                      bool wal_fsync,
                                                      std::string* error) {
     archive_tracking_max_objects_ = max_objects > 0 ? max_objects : 1;
-    return archive_meta_store_.Init(meta_dir,
-                                    archive_tracking_max_objects_,
-                                    snapshot_interval_ops,
-                                    error,
-                                    wal_fsync);
+    if (!archive_meta_store_.Init(meta_dir,
+                                  archive_tracking_max_objects_,
+                                  snapshot_interval_ops,
+                                  error,
+                                  wal_fsync)) {
+        return false;
+    }
+    if (!archive_file_meta_store_.Init(meta_dir,
+                                       archive_tracking_max_objects_,
+                                       snapshot_interval_ops,
+                                       error,
+                                       wal_fsync)) {
+        return false;
+    }
+    return true;
 }
 
 bool VirtualStorageServiceImpl::FlushArchiveMetaSnapshot(std::string* error) {
-    return archive_meta_store_.FlushSnapshot(error);
+    if (!archive_meta_store_.FlushSnapshot(error)) {
+        return false;
+    }
+    return archive_file_meta_store_.FlushSnapshot(error);
 }
 
 zb::msg::Status VirtualStorageServiceImpl::UpdateArchiveState(const std::string& disk_id,
@@ -882,9 +922,23 @@ zb::msg::Status VirtualStorageServiceImpl::UpdateArchiveState(const std::string&
     return zb::msg::Status::Ok();
 }
 
+zb::msg::Status VirtualStorageServiceImpl::UpdateFileArchiveState(uint64_t inode_id,
+                                                                  const std::string& disk_id,
+                                                                  real_node::FileArchiveState archive_state,
+                                                                  uint64_t version) {
+    if (inode_id == 0) {
+        return zb::msg::Status::InvalidArgument("inode_id is empty");
+    }
+    if (!archive_file_meta_store_.UpdateFileArchiveState(inode_id, disk_id, archive_state, version)) {
+        return zb::msg::Status::IoError("failed to update file archive state");
+    }
+    return zb::msg::Status::Ok();
+}
+
 void VirtualStorageServiceImpl::SetArchiveTrackingMaxObjects(size_t max_objects) {
     archive_tracking_max_objects_ = max_objects > 0 ? max_objects : 1;
     archive_meta_store_.SetMaxObjects(archive_tracking_max_objects_);
+    archive_file_meta_store_.SetMaxFiles(archive_tracking_max_objects_);
 }
 
 std::vector<ArchiveCandidateStat> VirtualStorageServiceImpl::CollectArchiveCandidates(uint32_t max_candidates,
@@ -906,6 +960,26 @@ std::vector<ArchiveCandidateStat> VirtualStorageServiceImpl::CollectArchiveCandi
         stat.score = view.score;
         stat.read_ops = view.read_ops;
         stat.write_ops = view.write_ops;
+        out.push_back(std::move(stat));
+    }
+    return out;
+}
+
+std::vector<FileArchiveCandidateStat> VirtualStorageServiceImpl::CollectFileArchiveCandidates(uint32_t max_candidates,
+                                                                                               uint64_t min_age_ms) const {
+    const std::vector<real_node::ArchiveFileMeta> metas =
+        archive_file_meta_store_.CollectCandidates(max_candidates, min_age_ms, NowMilliseconds());
+    std::vector<FileArchiveCandidateStat> out;
+    out.reserve(metas.size());
+    for (const auto& meta : metas) {
+        FileArchiveCandidateStat stat;
+        stat.inode_id = meta.inode_id;
+        stat.disk_id = meta.disk_id;
+        stat.file_size = meta.file_size;
+        stat.object_count = meta.object_count;
+        stat.last_access_ts_ms = meta.last_access_ts_ms;
+        stat.archive_state = "pending";
+        stat.version = meta.version;
         out.push_back(std::move(stat));
     }
     return out;
@@ -971,7 +1045,34 @@ void VirtualStorageServiceImpl::TrackObjectAccess(const std::string& disk_id,
                                                   uint64_t end_offset,
                                                   bool is_write,
                                                   uint64_t checksum) {
-    archive_meta_store_.TrackObjectAccess(disk_id, object_id, end_offset, is_write, checksum, NowMilliseconds());
+    const uint64_t now_ms = NowMilliseconds();
+    archive_meta_store_.TrackObjectAccess(disk_id, object_id, end_offset, is_write, checksum, now_ms);
+
+    uint64_t inode_id = 0;
+    uint32_t object_index = 0;
+    if (!ParseStableObjectId(object_id, &inode_id, &object_index) || inode_id == 0) {
+        return;
+    }
+
+    FileArchiveAggregate aggregate;
+    {
+        std::lock_guard<std::mutex> lock(object_mu_);
+        auto meta_it = file_meta_by_inode_.find(inode_id);
+        if (meta_it != file_meta_by_inode_.end()) {
+            aggregate.file_size = meta_it->second.file_size;
+            const uint64_t object_unit_size =
+                meta_it->second.object_unit_size > 0 ? meta_it->second.object_unit_size : kDefaultObjectUnitSize;
+            aggregate.object_count = ComputeObjectCount(meta_it->second.file_size, object_unit_size);
+        }
+    }
+    aggregate.object_count = std::max<uint32_t>(aggregate.object_count, object_index + 1);
+    archive_file_meta_store_.TrackFileAccess(inode_id,
+                                             disk_id,
+                                             aggregate.file_size,
+                                             aggregate.object_count,
+                                             is_write,
+                                             now_ms,
+                                             0);
 }
 
 void VirtualStorageServiceImpl::RemoveObjectTracking(const std::string& disk_id, const std::string& object_id) {

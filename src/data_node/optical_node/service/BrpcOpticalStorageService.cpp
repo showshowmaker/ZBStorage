@@ -177,6 +177,21 @@ void BrpcOpticalStorageService::UpdateArchiveState(google::protobuf::RpcControll
     FillStatus(internal_status, response->mutable_status());
 }
 
+void BrpcOpticalStorageService::UpdateFileArchiveState(google::protobuf::RpcController* cntl_base,
+                                                       const zb::rpc::UpdateFileArchiveStateRequest* request,
+                                                       zb::rpc::UpdateFileArchiveStateReply* response,
+                                                       google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    (void)request;
+    if (!response) {
+        return;
+    }
+    zb::rpc::Status* status = response->mutable_status();
+    status->set_code(zb::rpc::STATUS_INVALID_ARGUMENT);
+    status->set_message("optical node does not support UpdateFileArchiveState");
+}
+
 void BrpcOpticalStorageService::GetDiskReport(google::protobuf::RpcController* cntl_base,
                                               const google::protobuf::Empty* request,
                                               zb::rpc::DiskReportReply* response,

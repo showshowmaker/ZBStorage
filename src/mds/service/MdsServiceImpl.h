@@ -10,6 +10,7 @@
 
 #include "../allocator/ObjectAllocator.h"
 #include "../archive/ArchiveCandidateQueue.h"
+#include "../archive/FileArchiveCandidateQueue.h"
 #include "../archive/ArchiveLeaseManager.h"
 #include "../storage/RocksMetaStore.h"
 #include "../storage/MetaCodec.h"
@@ -23,7 +24,7 @@ public:
     MdsServiceImpl(RocksMetaStore* store,
                    ObjectAllocator* allocator,
                    uint64_t default_object_unit_size,
-                   ArchiveCandidateQueue* candidate_queue = nullptr,
+                   FileArchiveCandidateQueue* candidate_queue = nullptr,
                    ArchiveLeaseManager* lease_manager = nullptr);
 
     void Lookup(google::protobuf::RpcController* cntl_base,
@@ -84,14 +85,14 @@ public:
                          zb::rpc::UpdateInodeStatReply* response,
                          google::protobuf::Closure* done) override;
 
-    void ReportNodeStatus(google::protobuf::RpcController* cntl_base,
-                          const zb::rpc::ReportNodeStatusRequest* request,
-                          zb::rpc::ReportNodeStatusReply* response,
-                          google::protobuf::Closure* done) override;
     void ReportArchiveCandidates(google::protobuf::RpcController* cntl_base,
                                  const zb::rpc::ReportArchiveCandidatesRequest* request,
                                  zb::rpc::ReportArchiveCandidatesReply* response,
                                  google::protobuf::Closure* done) override;
+    void ReportFileArchiveCandidates(google::protobuf::RpcController* cntl_base,
+                                     const zb::rpc::ReportFileArchiveCandidatesRequest* request,
+                                     zb::rpc::ReportFileArchiveCandidatesReply* response,
+                                     google::protobuf::Closure* done) override;
     void ClaimArchiveTask(google::protobuf::RpcController* cntl_base,
                           const zb::rpc::ClaimArchiveTaskRequest* request,
                           zb::rpc::ClaimArchiveTaskReply* response,
@@ -148,13 +149,22 @@ private:
                                   std::string* error) const;
     bool SavePathPlacementPolicy(const zb::rpc::PathPlacementPolicyRecord& policy, std::string* error);
     bool DeletePathPlacementPolicyByPrefix(const std::string& path_prefix, std::string* error);
-    bool LoadFileAnchorSet(uint64_t inode_id, zb::rpc::FileAnchorSet* anchors, std::string* error) const;
-    bool SaveFileAnchorSet(uint64_t inode_id, const zb::rpc::FileAnchorSet& anchors, rocksdb::WriteBatch* batch) const;
-    static zb::rpc::FileAnchorSet BuildFileAnchorSetFromSingle(const zb::rpc::ReplicaLocation& anchor);
-    static bool SelectPrimaryAnchor(const zb::rpc::FileAnchorSet& anchors, zb::rpc::ReplicaLocation* anchor);
-    static bool SelectDiskAnchor(const zb::rpc::FileAnchorSet& anchors, zb::rpc::ReplicaLocation* anchor);
-    bool LoadFileAnchor(uint64_t inode_id, zb::rpc::ReplicaLocation* anchor, std::string* error) const;
-    bool SaveFileAnchor(uint64_t inode_id, const zb::rpc::ReplicaLocation& anchor, rocksdb::WriteBatch* batch) const;
+    bool LoadDiskFileLocation(uint64_t inode_id, zb::rpc::DiskFileLocation* location, std::string* error) const;
+    bool SaveDiskFileLocation(const zb::rpc::DiskFileLocation& location, rocksdb::WriteBatch* batch) const;
+    bool DeleteDiskFileLocation(uint64_t inode_id, rocksdb::WriteBatch* batch, std::string* error) const;
+    bool LoadOpticalFileLocation(uint64_t inode_id, zb::rpc::OpticalFileLocation* location, std::string* error) const;
+    bool SaveOpticalFileLocation(const zb::rpc::OpticalFileLocation& location, rocksdb::WriteBatch* batch) const;
+    bool DeleteOpticalFileLocation(uint64_t inode_id, rocksdb::WriteBatch* batch, std::string* error) const;
+    static zb::rpc::FileAnchorSet BuildCompatFileAnchorSet(const zb::rpc::DiskFileLocation* disk,
+                                                           const zb::rpc::OpticalFileLocation* optical);
+    bool BuildCompatFileAnchorSet(uint64_t inode_id,
+                                  const zb::rpc::InodeAttr& attr,
+                                  zb::rpc::FileAnchorSet* anchors,
+                                  std::string* error) const;
+    bool LoadFilePrimaryLocation(uint64_t inode_id,
+                                 const zb::rpc::InodeAttr& attr,
+                                 zb::rpc::ReplicaLocation* anchor,
+                                 std::string* error) const;
     static std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index);
     static void StripReplicaAddresses(zb::rpc::ReplicaLocation* replica);
     bool ResolveNodeAddress(const std::string& node_id, std::string* address, std::string* error) const;
@@ -173,7 +183,7 @@ private:
     RocksMetaStore* store_{};
     ObjectAllocator* allocator_{};
     uint64_t default_object_unit_size_{0};
-    ArchiveCandidateQueue* candidate_queue_{};
+    FileArchiveCandidateQueue* candidate_queue_{};
     ArchiveLeaseManager* lease_manager_{};
     mutable std::mutex channel_mu_;
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> channels_;

@@ -34,6 +34,11 @@ public:
                             zb::rpc::UpdateArchiveStateReply* response,
                             google::protobuf::Closure* done) override;
 
+    void UpdateFileArchiveState(google::protobuf::RpcController* cntl_base,
+                                const zb::rpc::UpdateFileArchiveStateRequest* request,
+                                zb::rpc::UpdateFileArchiveStateReply* response,
+                                google::protobuf::Closure* done) override;
+
     void GetDiskReport(google::protobuf::RpcController* cntl_base,
                        const google::protobuf::Empty* request,
                        zb::rpc::DiskReportReply* response,

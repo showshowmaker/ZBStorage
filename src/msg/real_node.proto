@@ -98,6 +98,23 @@ message UpdateArchiveStateReply {
   Status status = 1;
 }
 
+enum FileArchiveState {
+  FILE_ARCHIVE_PENDING = 0;
+  FILE_ARCHIVE_ARCHIVING = 1;
+  FILE_ARCHIVE_ARCHIVED = 2;
+}
+
+message UpdateFileArchiveStateRequest {
+  uint64 inode_id = 1;
+  string disk_id = 2;
+  FileArchiveState archive_state = 3;
+  uint64 version = 4;
+}
+
+message UpdateFileArchiveStateReply {
+  Status status = 1;
+}
+
 message DiskReport {
   string id = 1;
   string mount_point = 2;
@@ -188,6 +205,7 @@ service RealNodeService {
   rpc DeleteObject(DeleteObjectRequest) returns (DeleteObjectReply);
   rpc ReadArchivedFile(ReadArchivedFileRequest) returns (ReadArchivedFileReply);
   rpc UpdateArchiveState(UpdateArchiveStateRequest) returns (UpdateArchiveStateReply);
+  rpc UpdateFileArchiveState(UpdateFileArchiveStateRequest) returns (UpdateFileArchiveStateReply);
   rpc GetDiskReport(google.protobuf.Empty) returns (DiskReportReply);
   rpc DeleteFileMeta(DeleteFileMetaRequest) returns (DeleteFileMetaReply);
   rpc ResolveFileRead(ResolveFileReadRequest) returns (ResolveFileReadReply);

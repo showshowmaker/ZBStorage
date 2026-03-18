@@ -16,6 +16,7 @@
 
 #include "../config/VirtualNodeConfig.h"
 #include "../../common/ObjectStore.h"
+#include "../../real_node/service/ArchiveFileMetaStore.h"
 #include "../../real_node/service/ArchiveObjectMetaStore.h"
 #include "../../../msg/storage_node_messages.h"
 
@@ -56,6 +57,16 @@ struct ArchiveCandidateStat {
     void SetArchiveObjectId(const std::string& id) {
         object_id = id;
     }
+};
+
+struct FileArchiveCandidateStat {
+    uint64_t inode_id{0};
+    std::string disk_id;
+    uint64_t file_size{0};
+    uint32_t object_count{0};
+    uint64_t last_access_ts_ms{0};
+    std::string archive_state{"pending"};
+    uint64_t version{0};
 };
 
 class VirtualStorageServiceImpl {
@@ -102,8 +113,13 @@ public:
                                        const std::string& object_id,
                                        const std::string& archive_state,
                                        uint64_t version);
+    zb::msg::Status UpdateFileArchiveState(uint64_t inode_id,
+                                           const std::string& disk_id,
+                                           real_node::FileArchiveState archive_state,
+                                           uint64_t version);
     void SetArchiveTrackingMaxObjects(size_t max_objects);
     std::vector<ArchiveCandidateStat> CollectArchiveCandidates(uint32_t max_candidates, uint64_t min_age_ms) const;
+    std::vector<FileArchiveCandidateStat> CollectFileArchiveCandidates(uint32_t max_candidates, uint64_t min_age_ms) const;
 
 private:
     struct PreloadedFileObjectInfo {
@@ -190,6 +206,7 @@ private:
     std::atomic<bool> stop_repl_repair_{false};
     std::thread repl_repair_thread_;
     real_node::ArchiveObjectMetaStore archive_meta_store_;
+    real_node::ArchiveFileMetaStore archive_file_meta_store_;
     size_t archive_tracking_max_objects_{500000};
 };
 

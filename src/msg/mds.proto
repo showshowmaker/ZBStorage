@@ -24,6 +24,19 @@ enum InodeType {
   INODE_DIR = 1;
 }
 
+enum InodeArchiveState {
+  INODE_ARCHIVE_PENDING = 0;
+  INODE_ARCHIVE_ARCHIVING = 1;
+  INODE_ARCHIVE_ARCHIVED = 2;
+}
+
+enum FileReplicaFlag {
+  FILE_REPLICA_NONE = 0;
+  FILE_REPLICA_DISK_ONLY = 1;
+  FILE_REPLICA_OPTICAL_ONLY = 2;
+  FILE_REPLICA_DISK_AND_OPTICAL = 3;
+}
+
 message InodeAttr {
   uint64 inode_id = 1;
   InodeType type = 2;
@@ -38,6 +51,8 @@ message InodeAttr {
   uint64 object_unit_size = 11;
   uint32 replica = 12;
   uint64 version = 13;
+  InodeArchiveState file_archive_state = 14;
+  FileReplicaFlag replica_flag = 15;
 }
 
 message Dentry {
@@ -84,24 +99,55 @@ message ObjectMeta {
   repeated ReplicaLocation replicas = 2;
 }
 
-message FileAnchorLite {
+message DiskFileAnchor {
   string node_id = 1;
   string disk_id = 2;
   string object_id = 3;
   uint64 size = 4;
-  StorageTier storage_tier = 5;
-  ReplicaState replica_state = 6;
-  string image_id = 7;
-  uint64 image_offset = 8;
-  uint64 image_length = 9;
+  ReplicaState replica_state = 5;
+}
+
+message OpticalFileAnchor {
+  string node_id = 1;
+  string disk_id = 2;
+  string object_id = 3;
+  uint64 size = 4;
+  ReplicaState replica_state = 5;
+  string image_id = 6;
+  uint64 image_offset = 7;
+  uint64 image_length = 8;
 }
 
 message FileAnchorSet {
   uint32 version = 1;
   uint32 anchor_mask = 2;
   StorageTier primary_tier = 3;
-  FileAnchorLite disk_anchor = 4;
-  FileAnchorLite optical_anchor = 5;
+  DiskFileAnchor disk_anchor = 4;
+  OpticalFileAnchor optical_anchor = 5;
+}
+
+message DiskFileLocation {
+  uint64 inode_id = 1;
+  string node_id = 2;
+  string node_address = 3;
+  string disk_id = 4;
+  uint64 file_size = 5;
+  uint64 object_unit_size = 6;
+  uint32 object_count = 7;
+  uint64 version = 8;
+}
+
+message OpticalFileLocation {
+  uint64 inode_id = 1;
+  string node_id = 2;
+  string node_address = 3;
+  string disk_id = 4;
+  string image_id = 5;
+  string file_id = 6;
+  string file_path = 7;
+  uint64 file_size = 8;
+  uint64 version = 9;
+  uint64 mtime_sec = 10;
 }
 
 enum PathPlacementTarget {
@@ -236,23 +282,6 @@ message UpdateInodeStatReply {
   InodeAttr attr = 2;
 }
 
-message DiskStat {
-  string disk_id = 1;
-  uint64 capacity_bytes = 2;
-  uint64 free_bytes = 3;
-  bool is_healthy = 4;
-}
-
-message ReportNodeStatusRequest {
-  string node_id = 1;
-  string address = 2;
-  repeated DiskStat disks = 3;
-}
-
-message ReportNodeStatusReply {
-  MdsStatus status = 1;
-}
-
 message ArchiveCandidate {
   string node_id = 1;
   string node_address = 2;
@@ -282,6 +311,32 @@ message ReportArchiveCandidatesReply {
   uint32 dropped = 3;
 }
 
+message FileArchiveCandidate {
+  uint64 inode_id = 1;
+  string node_id = 2;
+  string node_address = 3;
+  string disk_id = 4;
+  uint64 file_size = 5;
+  uint32 object_count = 6;
+  uint64 last_access_ts_ms = 7;
+  uint64 report_ts_ms = 8;
+  string archive_state = 9;
+  uint64 version = 10;
+}
+
+message ReportFileArchiveCandidatesRequest {
+  string node_id = 1;
+  string node_address = 2;
+  uint64 report_ts_ms = 3;
+  repeated FileArchiveCandidate candidates = 4;
+}
+
+message ReportFileArchiveCandidatesReply {
+  MdsStatus status = 1;
+  uint32 accepted = 2;
+  uint32 dropped = 3;
+}
+
 enum ArchiveLifecycleState {
   ARCHIVE_STATE_PENDING = 0;
   ARCHIVE_STATE_ARCHIVING = 1;
@@ -301,6 +356,7 @@ message ArchiveLeaseRecord {
   uint64 update_ts_ms = 10;
   uint64 archive_ts_ms = 11;
   string object_id = 12;
+  uint64 inode_id = 13;
 }
 
 message ClaimArchiveTaskRequest {
@@ -311,6 +367,7 @@ message ClaimArchiveTaskRequest {
   uint64 requested_lease_ms = 5;
   string request_id = 6;
   string object_id = 7;
+  uint64 inode_id = 8;
 }
 
 message ClaimArchiveTaskReply {
@@ -325,6 +382,7 @@ message RenewArchiveLeaseRequest {
   string lease_id = 3;
   uint64 requested_lease_ms = 4;
   string object_id = 5;
+  uint64 inode_id = 6;
 }
 
 message RenewArchiveLeaseReply {
@@ -341,6 +399,7 @@ message CommitArchiveTaskRequest {
   bool success = 5;
   string error_message = 6;
   string object_id = 7;
+  uint64 inode_id = 8;
 }
 
 message CommitArchiveTaskReply {
@@ -390,8 +449,8 @@ service MdsService {
   rpc Rmdir(RmdirRequest) returns (RmdirReply);
   rpc GetFileAnchor(GetFileAnchorRequest) returns (GetFileAnchorReply);
   rpc UpdateInodeStat(UpdateInodeStatRequest) returns (UpdateInodeStatReply);
-  rpc ReportNodeStatus(ReportNodeStatusRequest) returns (ReportNodeStatusReply);
   rpc ReportArchiveCandidates(ReportArchiveCandidatesRequest) returns (ReportArchiveCandidatesReply);
+  rpc ReportFileArchiveCandidates(ReportFileArchiveCandidatesRequest) returns (ReportFileArchiveCandidatesReply);
   rpc ClaimArchiveTask(ClaimArchiveTaskRequest) returns (ClaimArchiveTaskReply);
   rpc RenewArchiveLease(RenewArchiveLeaseRequest) returns (RenewArchiveLeaseReply);
   rpc CommitArchiveTask(CommitArchiveTaskRequest) returns (CommitArchiveTaskReply);

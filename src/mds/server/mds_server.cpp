@@ -13,6 +13,7 @@
 #include "../allocator/PGManager.h"
 #include "../archive/ArchiveBatchStager.h"
 #include "../archive/ArchiveCandidateQueue.h"
+#include "../archive/FileArchiveCandidateQueue.h"
 #include "../archive/ArchiveLeaseManager.h"
 #include "../archive/OpticalArchiveManager.h"
 #include "../config/MdsConfig.h"
@@ -58,7 +59,7 @@ int main(int argc, char* argv[]) {
         }
     }
     zb::mds::ObjectAllocator allocator(&cache, &pg_manager);
-    zb::mds::ArchiveCandidateQueue candidate_queue(cfg.archive_candidate_queue_size);
+    zb::mds::FileArchiveCandidateQueue candidate_queue(cfg.archive_candidate_queue_size);
     zb::mds::ArchiveLeaseManager::Options lease_options;
     lease_options.default_lease_ms = cfg.archive_lease_default_ms;
     lease_options.min_lease_ms = cfg.archive_lease_min_ms;

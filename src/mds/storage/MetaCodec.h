@@ -38,6 +38,12 @@ public:
     static std::string EncodeObjectMeta(const zb::rpc::ObjectMeta& meta);
     static bool DecodeObjectMeta(const std::string& data, zb::rpc::ObjectMeta* meta);
 
+    static std::string EncodeDiskFileLocation(const zb::rpc::DiskFileLocation& location);
+    static bool DecodeDiskFileLocation(const std::string& data, zb::rpc::DiskFileLocation* location);
+
+    static std::string EncodeOpticalFileLocation(const zb::rpc::OpticalFileLocation& location);
+    static bool DecodeOpticalFileLocation(const std::string& data, zb::rpc::OpticalFileLocation* location);
+
     static std::string EncodePgView(const PgViewRecord& view);
     static bool DecodePgView(const std::string& data, PgViewRecord* view);
 };

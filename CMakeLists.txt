@@ -69,6 +69,7 @@ set(REAL_NODE_SOURCES
     src/data_node/real_node/io/LocalPathResolver.cpp
     src/data_node/real_node/io/IOExecutor.cpp
     src/data_node/common/RealObjectStore.cpp
+    src/data_node/real_node/service/ArchiveFileMetaStore.cpp
     src/data_node/real_node/service/ArchiveObjectMetaStore.cpp
     src/data_node/real_node/service/StorageServiceImpl.cpp
     src/data_node/real_node/service/BrpcStorageService.cpp
@@ -100,6 +101,7 @@ endif()
 add_executable(virtual_node_server
     src/data_node/virtual_node/config/VirtualNodeConfig.cpp
     src/data_node/common/VirtualObjectStore.cpp
+    src/data_node/real_node/service/ArchiveFileMetaStore.cpp
     src/data_node/real_node/service/ArchiveObjectMetaStore.cpp
     src/data_node/virtual_node/service/VirtualStorageServiceImpl.cpp
     src/data_node/virtual_node/service/BrpcVirtualStorageService.cpp

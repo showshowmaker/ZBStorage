@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ArchiveFileMetaStore.h"
 #include <brpc/channel.h>
 
 #include "ArchiveObjectMetaStore.h"
@@ -57,6 +58,16 @@ struct ArchiveCandidateStat {
     void SetArchiveObjectId(const std::string& id) {
         object_id = id;
     }
+};
+
+struct FileArchiveCandidateStat {
+    uint64_t inode_id{0};
+    std::string disk_id;
+    uint64_t file_size{0};
+    uint32_t object_count{0};
+    uint64_t last_access_ts_ms{0};
+    std::string archive_state{"pending"};
+    uint64_t version{0};
 };
 
 class StorageServiceImpl {
@@ -106,8 +117,13 @@ public:
                                        const std::string& object_id,
                                        const std::string& archive_state,
                                        uint64_t version);
+    zb::msg::Status UpdateFileArchiveState(uint64_t inode_id,
+                                           const std::string& disk_id,
+                                           FileArchiveState archive_state,
+                                           uint64_t version);
     void SetArchiveTrackingMaxObjects(size_t max_objects);
     std::vector<ArchiveCandidateStat> CollectArchiveCandidates(uint32_t max_candidates, uint64_t min_age_ms) const;
+    std::vector<FileArchiveCandidateStat> CollectFileArchiveCandidates(uint32_t max_candidates, uint64_t min_age_ms) const;
 
 private:
     bool ApplyFileMetaInternal(const zb::msg::ApplyFileMetaRequest& request,
@@ -136,6 +152,7 @@ private:
     static uint64_t FastChecksum64(const std::string& data);
     static uint64_t NowMilliseconds();
     static std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index);
+    static bool ParseStableObjectId(const std::string& object_id, uint64_t* inode_id, uint32_t* object_index);
     static void BuildObjectSlices(uint64_t inode_id,
                                   uint64_t offset,
                                   uint64_t size,
@@ -164,6 +181,7 @@ private:
     std::thread repl_repair_thread_;
 
     ArchiveObjectMetaStore archive_meta_store_;
+    ArchiveFileMetaStore archive_file_meta_store_;
     size_t archive_tracking_max_objects_{500000};
     mutable std::mutex file_meta_mu_;
     mutable std::unordered_map<uint64_t, zb::msg::FileMeta> file_meta_by_inode_;

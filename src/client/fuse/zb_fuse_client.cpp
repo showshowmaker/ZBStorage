@@ -136,13 +136,24 @@ bool HasOpticalAnchor(const zb::rpc::FileAnchorSet& anchors) {
     return mask_has_optical || lite_has_optical;
 }
 
-zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::FileAnchorLite& lite) {
+zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::DiskFileAnchor& lite) {
     zb::rpc::ReplicaLocation replica;
     replica.set_node_id(lite.node_id());
     replica.set_disk_id(lite.disk_id());
     replica.set_object_id(lite.object_id());
     replica.set_size(lite.size());
-    replica.set_storage_tier(lite.storage_tier());
+    replica.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+    replica.set_replica_state(lite.replica_state());
+    return replica;
+}
+
+zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::OpticalFileAnchor& lite) {
+    zb::rpc::ReplicaLocation replica;
+    replica.set_node_id(lite.node_id());
+    replica.set_disk_id(lite.disk_id());
+    replica.set_object_id(lite.object_id());
+    replica.set_size(lite.size());
+    replica.set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
     replica.set_replica_state(lite.replica_state());
     replica.set_image_id(lite.image_id());
     replica.set_image_offset(lite.image_offset());
@@ -155,14 +166,15 @@ bool SelectAnchorForIo(const zb::rpc::FileAnchorSet& anchors, zb::rpc::ReplicaLo
         return false;
     }
 
-    auto usable = [](const zb::rpc::FileAnchorLite& lite) {
-        return !lite.node_id().empty() && !lite.disk_id().empty();
-    };
+    const bool disk_usable =
+        !anchors.disk_anchor().node_id().empty() && !anchors.disk_anchor().disk_id().empty();
+    const bool optical_usable =
+        !anchors.optical_anchor().node_id().empty() && !anchors.optical_anchor().disk_id().empty();
 
-    const bool has_disk = ((anchors.anchor_mask() & kAnchorMaskDisk) != 0U && usable(anchors.disk_anchor())) ||
-                          usable(anchors.disk_anchor());
-    const bool has_optical = ((anchors.anchor_mask() & kAnchorMaskOptical) != 0U && usable(anchors.optical_anchor())) ||
-                             usable(anchors.optical_anchor());
+    const bool has_disk =
+        ((anchors.anchor_mask() & kAnchorMaskDisk) != 0U && disk_usable) || disk_usable;
+    const bool has_optical =
+        ((anchors.anchor_mask() & kAnchorMaskOptical) != 0U && optical_usable) || optical_usable;
 
     if (has_disk) {
         *anchor = ToReplicaLocation(anchors.disk_anchor());

@@ -396,6 +396,7 @@ bool EmitDirInode(GeneratorRuntime* rt, uint64_t inode_id, uint64_t now_sec) {
     attr.set_object_unit_size(rt->cfg->object_unit_size);
     attr.set_replica(1);
     attr.set_version(1);
+    attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
     std::string payload;
     if (!EncodeProto(attr, &payload)) {
         if (rt->error) {
@@ -496,6 +497,7 @@ bool EmitFileMeta(GeneratorRuntime* rt,
     attr.set_object_unit_size(rt->cfg->object_unit_size);
     attr.set_replica(has_disk_anchor ? 2 : 1);
     attr.set_version(1);
+    attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_ARCHIVED);
     std::string inode_payload;
     if (!EncodeProto(attr, &inode_payload)) {
         if (rt->error) {
@@ -517,12 +519,11 @@ bool EmitFileMeta(GeneratorRuntime* rt,
         std::string node_id;
         std::string disc_id;
         SelectOpticalReplica(inode_id, *rt->cluster, &node_id, &disc_id);
-        zb::rpc::FileAnchorLite* optical = anchor_set.mutable_optical_anchor();
+        zb::rpc::OpticalFileAnchor* optical = anchor_set.mutable_optical_anchor();
         optical->set_node_id(node_id);
         optical->set_disk_id(disc_id);
         optical->set_object_id(BuildObjectId(inode_id));
         optical->set_size(file_size);
-        optical->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
         optical->set_replica_state(zb::rpc::REPLICA_READY);
         optical->set_image_id("img-" + disc_id);
         optical->set_image_offset(0);
@@ -532,12 +533,11 @@ bool EmitFileMeta(GeneratorRuntime* rt,
         std::string node_id;
         std::string disk_id;
         SelectDiskReplica(inode_id, *rt->cluster, &node_id, &disk_id);
-        zb::rpc::FileAnchorLite* disk = anchor_set.mutable_disk_anchor();
+        zb::rpc::DiskFileAnchor* disk = anchor_set.mutable_disk_anchor();
         disk->set_node_id(node_id);
         disk->set_disk_id(disk_id);
         disk->set_object_id(BuildObjectId(inode_id));
         disk->set_size(file_size);
-        disk->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
         disk->set_replica_state(zb::rpc::REPLICA_READY);
     }
     std::string anchor_payload;

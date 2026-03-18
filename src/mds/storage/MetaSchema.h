@@ -41,6 +41,14 @@ inline std::string ObjectArchiveStatePrefix() {
     return ArchiveStatePrefix();
 }
 
+inline std::string FileArchiveStateKey(uint64_t inode_id) {
+    return "AF/" + std::to_string(inode_id);
+}
+
+inline std::string FileArchiveStatePrefix() {
+    return "AF/";
+}
+
 inline std::string FileAnchorKey(uint64_t inode_id) {
     return "FA/" + std::to_string(inode_id);
 }

@@ -278,6 +278,16 @@ std::vector<ArchiveCandidateView> ArchiveObjectMetaStore::CollectCandidates(uint
     return out;
 }
 
+std::vector<ArchiveObjectMeta> ArchiveObjectMetaStore::SnapshotMetas() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<ArchiveObjectMeta> out;
+    out.reserve(metas_.size());
+    for (const auto& item : metas_) {
+        out.push_back(item.second);
+    }
+    return out;
+}
+
 bool ArchiveObjectMetaStore::FlushSnapshot(std::string* error) {
     std::lock_guard<std::mutex> lock(mu_);
     return WriteSnapshotLocked(error);

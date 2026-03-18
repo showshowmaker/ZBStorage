@@ -11,6 +11,7 @@
 
 #include "ArchiveCandidateQueue.h"
 #include "ArchiveBatchStager.h"
+#include "FileArchiveCandidateQueue.h"
 #include "ArchiveLeaseManager.h"
 #include "../allocator/NodeStateCache.h"
 #include "../storage/RocksMetaStore.h"
@@ -30,7 +31,7 @@ public:
 
     OpticalArchiveManager(RocksMetaStore* store,
                           NodeStateCache* cache,
-                          ArchiveCandidateQueue* candidate_queue,
+                          FileArchiveCandidateQueue* candidate_queue,
                           ArchiveBatchStager* batch_stager,
                           ArchiveLeaseManager* lease_manager,
                           Options options);
@@ -39,14 +40,18 @@ public:
     bool RunOnce(std::string* error);
 
 private:
-    enum class ArchiveByCandidateResult {
-        kArchived,
-        kSkipped,
-        kFailed,
-    };
-
     bool ShouldArchiveNow(const std::vector<NodeInfo>& nodes);
     bool LoadInodeAttr(uint64_t inode_id, zb::rpc::InodeAttr* attr, std::string* error) const;
+    bool LoadDiskFileLocation(uint64_t inode_id, zb::rpc::DiskFileLocation* location, std::string* error) const;
+    bool LoadOpticalFileLocation(uint64_t inode_id, zb::rpc::OpticalFileLocation* location, std::string* error) const;
+    bool SaveOpticalFileLocation(const zb::rpc::OpticalFileLocation& location,
+                                 rocksdb::WriteBatch* batch,
+                                 std::string* error) const;
+    bool DeleteDiskFileLocation(uint64_t inode_id, rocksdb::WriteBatch* batch, std::string* error) const;
+    bool UpdateInodeReplicaFlag(uint64_t inode_id,
+                                zb::rpc::FileReplicaFlag replica_flag,
+                                rocksdb::WriteBatch* batch,
+                                std::string* error);
     bool ReadObjectFromReplica(const zb::rpc::ReplicaLocation& source,
                                uint64_t read_size,
                                std::string* data,
@@ -60,49 +65,52 @@ private:
                               const zb::rpc::InodeAttr* inode_attr,
                               zb::rpc::ReplicaLocation* optical_location,
                               std::string* error);
-    bool DeleteDiskReplica(const zb::rpc::ReplicaLocation& replica, std::string* error);
-    bool ResolveCandidateSource(const ArchiveCandidateEntry& candidate,
-                                std::string* object_key,
-                                zb::rpc::ReplicaLocation* source_disk,
-                                uint64_t* inode_id,
-                                uint32_t* object_index,
-                                uint64_t* object_size,
-                                std::string* error);
-    bool PersistOpticalReplica(const std::string& object_key,
-                               const NodeSelection& optical,
-                               const std::string& object_id,
-                               uint64_t data_size,
-                               const zb::rpc::ReplicaLocation* optical_location,
-                               rocksdb::WriteBatch* update_batch,
-                               std::string* error);
+    bool DeleteDiskFile(const zb::rpc::DiskFileLocation& location, std::string* error);
     bool BurnSealedBatch(const NodeSelection& optical,
                          uint32_t* archived_count,
                          std::unordered_set<std::string>* touched_object_keys,
                          std::string* error);
-    ArchiveByCandidateResult ArchiveByCandidate(const ArchiveCandidateEntry& candidate,
-                                                const NodeSelection& optical,
-                                                const std::string& lease_id,
-                                                const std::string& op_id,
-                                                std::unordered_set<std::string>* touched_object_keys,
-                                                std::string* error);
     bool ReconcileArchiveStates(uint32_t max_records, std::string* error);
+    bool IsFileFullyArchived(uint64_t inode_id, bool* archived, std::string* error);
+    bool ClaimFileLease(const FileArchiveCandidateEntry& candidate,
+                        const std::string& request_id,
+                        std::string* lease_id,
+                        std::string* op_id,
+                        uint64_t* version,
+                        std::string* error);
+    bool RenewFileLease(const FileArchiveCandidateEntry& candidate,
+                        const std::string& lease_id,
+                        std::string* renewed_lease_id,
+                        std::string* renewed_op_id,
+                        uint64_t* version,
+                        std::string* error);
+    bool CommitFileLease(const FileArchiveCandidateEntry& candidate,
+                         const std::string& lease_id,
+                         const std::string& op_id,
+                         bool success,
+                         const std::string& error_message,
+                         uint64_t* version,
+                         std::string* error);
     bool ResolveObjectOwner(const std::string& object_id,
                             uint64_t* inode_id,
                             uint32_t* object_index,
                             std::string* error);
-    bool FindObjectKeyByObjectId(const std::string& object_id, std::string* object_key, std::string* error);
-    bool HasReadyOpticalReplica(const std::string& object_id,
-                                bool* has_ready,
-                                std::string* error);
     bool UpdateSourceArchiveState(const ArchiveCandidateEntry& candidate,
                                   const std::string& archive_state,
                                   uint64_t version,
                                   std::string* error);
+    bool UpdateInodeArchiveState(uint64_t inode_id,
+                                 zb::rpc::InodeArchiveState archive_state,
+                                 std::string* error);
+    bool UpdateSourceFileArchiveState(const FileArchiveCandidateEntry& candidate,
+                                      zb::rpc::FileArchiveState archive_state,
+                                      uint64_t version,
+                                      std::string* error);
     brpc::Channel* GetChannel(const std::string& address, std::string* error);
 
     RocksMetaStore* store_{};
     NodeStateCache* cache_{};
-    ArchiveCandidateQueue* candidate_queue_{};
+    FileArchiveCandidateQueue* candidate_queue_{};
     ArchiveBatchStager* batch_stager_{};
     ArchiveLeaseManager* lease_manager_{};
     Options options_;

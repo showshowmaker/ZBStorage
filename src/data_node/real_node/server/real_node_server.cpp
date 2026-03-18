@@ -207,36 +207,33 @@ private:
                 channel = std::move(new_channel);
             }
 
-            std::vector<zb::real_node::ArchiveCandidateStat> samples =
-                storage_service_->CollectArchiveCandidates(topk_, min_age_ms_);
+            std::vector<zb::real_node::FileArchiveCandidateStat> samples =
+                storage_service_->CollectFileArchiveCandidates(topk_, min_age_ms_);
             if (!samples.empty()) {
                 zb::rpc::MdsService_Stub stub(channel.get());
-                zb::rpc::ReportArchiveCandidatesRequest request;
+                zb::rpc::ReportFileArchiveCandidatesRequest request;
                 request.set_node_id(node_id_);
                 request.set_node_address(node_address_);
                 request.set_report_ts_ms(NowMs());
                 for (const auto& sample : samples) {
-                    zb::rpc::ArchiveCandidate* candidate = request.add_candidates();
-                    const std::string object_id = sample.ArchiveObjectId();
+                    zb::rpc::FileArchiveCandidate* candidate = request.add_candidates();
+                    candidate->set_inode_id(sample.inode_id);
                     candidate->set_node_id(node_id_);
                     candidate->set_node_address(node_address_);
                     candidate->set_disk_id(sample.disk_id);
-                    candidate->set_object_id(object_id);
+                    candidate->set_file_size(sample.file_size);
+                    candidate->set_object_count(sample.object_count);
                     candidate->set_last_access_ts_ms(sample.last_access_ts_ms);
-                    candidate->set_size_bytes(sample.size_bytes);
-                    candidate->set_checksum(sample.checksum);
-                    candidate->set_heat_score(sample.heat_score);
                     candidate->set_archive_state(sample.archive_state);
                     candidate->set_version(sample.version);
-                    candidate->set_score(sample.score);
                     candidate->set_report_ts_ms(request.report_ts_ms());
                 }
 
-                zb::rpc::ReportArchiveCandidatesReply response;
+                zb::rpc::ReportFileArchiveCandidatesReply response;
                 brpc::Controller cntl;
-                stub.ReportArchiveCandidates(&cntl, &request, &response, nullptr);
+                stub.ReportFileArchiveCandidates(&cntl, &request, &response, nullptr);
                 if (cntl.Failed()) {
-                    std::cerr << "ReportArchiveCandidates failed: " << cntl.ErrorText() << std::endl;
+                    std::cerr << "ReportFileArchiveCandidates failed: " << cntl.ErrorText() << std::endl;
                     channel.reset();
                 }
             }
