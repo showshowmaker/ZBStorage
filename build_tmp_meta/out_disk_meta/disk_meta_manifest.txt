@@ -1,6 +1,0 @@
-total_files=10000
-files_with_disk_meta=10000
-real_node_file_meta_records=1999
-virtual_node_file_meta_records=8001
-disk_budget_bytes=20000000000000
-disk_used_bytes=10044841115214
