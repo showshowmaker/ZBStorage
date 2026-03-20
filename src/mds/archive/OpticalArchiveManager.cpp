@@ -579,8 +579,8 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                         file_failed = true;
                         break;
                     }
-                    if (touched_object_keys && !task.object_key.empty()) {
-                        touched_object_keys->insert(task.object_key);
+                    if (!task.object_key.empty()) {
+                        touched_object_keys.insert(task.object_key);
                     }
                     {
                         ++archived_count;

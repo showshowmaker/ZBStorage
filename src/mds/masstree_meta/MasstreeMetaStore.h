@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "MasstreeIndexRuntime.h"
+#include "MasstreeInodeRecordCodec.h"
 #include "MasstreeManifest.h"
 #include "MasstreeNamespaceCatalog.h"
 #include "mds.pb.h"

@@ -3,6 +3,7 @@
 #include "compiler.hh"
 #include <memory>
 #include <iterator>
+#include <utility>
 #include <assert.h>
 
 template <typename T, unsigned N, typename A = std::allocator<T> >

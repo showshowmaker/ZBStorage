@@ -15,6 +15,7 @@
 #include "../allocator/NodeStateCache.h"
 #include "../storage/RocksMetaStore.h"
 #include "mds.pb.h"
+#include "real_node.pb.h"
 
 namespace zb::mds {
 
