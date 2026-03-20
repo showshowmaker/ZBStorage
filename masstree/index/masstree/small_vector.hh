@@ -71,6 +71,9 @@ class small_vector {
         char lv_[sizeof(T) * N]; // XXX does not obey alignof(T)
 
         inline rep(const A& a);
+        template <typename... Args>
+        inline void construct(T* ptr, Args&&... args);
+        inline void destroy(T* ptr);
     };
     rep r_;
 
@@ -81,6 +84,17 @@ template <typename T, unsigned N, typename A>
 inline small_vector<T, N, A>::rep::rep(const A& a)
     : A(a), first_(reinterpret_cast<T*>(lv_)),
       last_(first_), capacity_(first_ + N) {
+}
+
+template <typename T, unsigned N, typename A>
+template <typename... Args>
+inline void small_vector<T, N, A>::rep::construct(T* ptr, Args&&... args) {
+    std::allocator_traits<A>::construct(*this, ptr, std::forward<Args>(args)...);
+}
+
+template <typename T, unsigned N, typename A>
+inline void small_vector<T, N, A>::rep::destroy(T* ptr) {
+    std::allocator_traits<A>::destroy(*this, ptr);
 }
 
 template <typename T, unsigned N, typename A>

@@ -395,6 +395,7 @@ add_executable(archive_meta_build_tool
     src/mds/archive_meta/ArchiveBloomFilter.cpp
     src/mds/archive_meta/ArchiveGenerationPublisher.cpp
     src/mds/archive_meta/ArchiveImportService.cpp
+    src/mds/archive_meta/ArchiveManifest.cpp
     src/mds/archive_meta/ArchiveNamespaceCatalog.cpp
     src/mds/storage/MetaCodec.cpp
     src/mds/storage/RocksMetaStore.cpp
