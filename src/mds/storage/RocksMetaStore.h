@@ -34,6 +34,7 @@ public:
     bool BatchDeleteOpticalFileLocation(rocksdb::WriteBatch* batch, uint64_t inode_id, std::string* error) const;
 
     rocksdb::DB* db() { return db_; }
+    rocksdb::DB* db() const { return db_; }
 
 private:
     static std::string LocationKey(uint64_t inode_id);

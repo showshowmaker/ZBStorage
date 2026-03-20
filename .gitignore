@@ -17,3 +17,10 @@ logs/
 *.o
 *.a
 *.so
+
+# Ignore large masstree benchmark datasets and outputs
+masstree/Bplustreetest/txt/file_info.txt
+masstree/Bplustreetest/txt/filename.txt
+masstree/Bplustreetest/txt/1000user*.txt
+masstree/Bplustreetest/txt/output*.txt
+masstree/build_user/

@@ -61,6 +61,11 @@ struct MdsConfig {
     bool archive_strict_full_disc{true};
     std::string archive_staging_dir;
     uint64_t archive_batch_max_age_ms{0};
+    std::string archive_meta_root;
+    std::string masstree_root;
+    size_t archive_meta_cache_generations{16};
+    uint64_t archive_meta_cache_bytes{512ULL * 1024ULL * 1024ULL};
+    uint32_t archive_import_page_size_bytes{64 * 1024};
 
     static MdsConfig LoadFromFile(const std::string& path, std::string* error);
 };

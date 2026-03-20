@@ -213,6 +213,32 @@ if(BRPC_DYNAMIC_LIB)
     target_link_libraries(virtual_node_test PRIVATE ${BRPC_DYNAMIC_LIB})
 endif()
 
+add_executable(system_demo_tool
+    tools/demo/system_demo_tool.cpp
+)
+set_target_properties(system_demo_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(system_demo_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
+        ${GFLAGS_INCLUDE_PATH}
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(system_demo_tool
+    PRIVATE
+        zb_proto
+        brpc-static
+        ${GFLAGS_LIBRARY}
+        ${CMAKE_THREAD_LIBS_INIT}
+)
+if(BRPC_DYNAMIC_LIB)
+    target_link_libraries(system_demo_tool PRIVATE ${BRPC_DYNAMIC_LIB})
+endif()
+
 add_executable(optical_archive_stress_test
     src/client/test/optical_archive_stress_test.cpp
 )
@@ -342,6 +368,185 @@ target_link_libraries(mds_sst_ingest_tool
         ${ROCKSDB_TARGET}
 )
 
+add_executable(archive_ns_route_tool
+    tools/archive_meta/archive_ns_route_tool.cpp
+    src/mds/archive_meta/ArchiveGenerationPublisher.cpp
+    src/mds/archive_meta/ArchiveManifest.cpp
+    src/mds/archive_meta/ArchiveNamespaceCatalog.cpp
+    src/mds/storage/RocksMetaStore.cpp
+)
+set_target_properties(archive_ns_route_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(archive_ns_route_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${ROCKSDB_ROOT}/include
+)
+target_link_libraries(archive_ns_route_tool
+    PRIVATE
+        ${ROCKSDB_TARGET}
+)
+
+add_executable(archive_meta_build_tool
+    tools/archive_meta/archive_meta_build_tool.cpp
+    src/mds/archive_meta/ArchiveBloomFilter.cpp
+    src/mds/archive_meta/ArchiveGenerationPublisher.cpp
+    src/mds/archive_meta/ArchiveImportService.cpp
+    src/mds/archive_meta/ArchiveNamespaceCatalog.cpp
+    src/mds/storage/MetaCodec.cpp
+    src/mds/storage/RocksMetaStore.cpp
+)
+set_target_properties(archive_meta_build_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(archive_meta_build_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${ROCKSDB_ROOT}/include
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(archive_meta_build_tool
+    PRIVATE
+        zb_proto
+        ${ROCKSDB_TARGET}
+)
+
+add_executable(masstree_meta_generate_tool
+    tools/masstree/masstree_meta_generate_tool.cpp
+    src/mds/masstree_meta/MasstreeBulkMetaGenerator.cpp
+    src/mds/masstree_meta/MasstreeManifest.cpp
+)
+set_target_properties(masstree_meta_generate_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(masstree_meta_generate_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(masstree_meta_generate_tool
+    PRIVATE
+        zb_proto
+)
+if(UNIX)
+    target_compile_definitions(masstree_meta_generate_tool PRIVATE ZBSTORAGE_ENABLE_MASSTREE_INDEX=1)
+endif()
+
+add_executable(masstree_meta_import_tool
+    tools/masstree/masstree_meta_import_tool.cpp
+    src/mds/masstree_meta/MasstreeBulkImporter.cpp
+    src/mds/masstree_meta/MasstreeIndexRuntime.cpp
+    src/mds/masstree_meta/MasstreeInodeRecordCodec.cpp
+    src/mds/masstree_meta/MasstreeManifest.cpp
+    src/mds/masstree_meta/MasstreeOpticalAllocator.cpp
+)
+set_target_properties(masstree_meta_import_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(masstree_meta_import_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/masstree/index/masstree
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(masstree_meta_import_tool
+    PRIVATE
+        zb_proto
+)
+if(UNIX)
+    target_sources(masstree_meta_import_tool PRIVATE
+        masstree/index/masstree/compiler.cc
+        masstree/index/masstree/kvthread.cc
+        masstree/index/masstree/masstree_wrapper.cc
+        masstree/index/masstree/memdebug.cc
+        masstree/index/masstree/misc.cc
+        masstree/index/masstree/str.cc
+        masstree/index/masstree/straccum.cc
+        masstree/index/masstree/string.cc
+        masstree/index/masstree/string_slice.cc
+    )
+    target_compile_definitions(masstree_meta_import_tool PRIVATE ZBSTORAGE_ENABLE_MASSTREE_INDEX=1)
+endif()
+
+add_executable(masstree_meta_build_tool
+    tools/masstree/masstree_meta_build_tool.cpp
+    src/mds/masstree_meta/MasstreeBulkImporter.cpp
+    src/mds/masstree_meta/MasstreeBulkMetaGenerator.cpp
+    src/mds/masstree_meta/MasstreeGenerationPublisher.cpp
+    src/mds/masstree_meta/MasstreeImportService.cpp
+    src/mds/masstree_meta/MasstreeIndexRuntime.cpp
+    src/mds/masstree_meta/MasstreeInodeRecordCodec.cpp
+    src/mds/masstree_meta/MasstreeManifest.cpp
+    src/mds/masstree_meta/MasstreeNamespaceCatalog.cpp
+    src/mds/masstree_meta/MasstreeOpticalAllocator.cpp
+    src/mds/masstree_meta/MasstreeStatsStore.cpp
+    src/mds/storage/MetaCodec.cpp
+    src/mds/storage/RocksMetaStore.cpp
+)
+set_target_properties(masstree_meta_build_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(masstree_meta_build_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/masstree/index/masstree
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${ROCKSDB_ROOT}/include
+)
+target_link_libraries(masstree_meta_build_tool
+    PRIVATE
+        zb_proto
+        ${ROCKSDB_TARGET}
+)
+if(UNIX)
+    target_sources(masstree_meta_build_tool PRIVATE
+        masstree/index/masstree/compiler.cc
+        masstree/index/masstree/kvthread.cc
+        masstree/index/masstree/masstree_wrapper.cc
+        masstree/index/masstree/memdebug.cc
+        masstree/index/masstree/misc.cc
+        masstree/index/masstree/str.cc
+        masstree/index/masstree/straccum.cc
+        masstree/index/masstree/string.cc
+        masstree/index/masstree/string_slice.cc
+    )
+    target_compile_definitions(masstree_meta_build_tool PRIVATE ZBSTORAGE_ENABLE_MASSTREE_INDEX=1)
+endif()
+
+add_executable(masstree_ns_route_tool
+    tools/masstree/masstree_ns_route_tool.cpp
+    src/mds/masstree_meta/MasstreeManifest.cpp
+    src/mds/masstree_meta/MasstreeNamespaceCatalog.cpp
+    src/mds/storage/RocksMetaStore.cpp
+)
+set_target_properties(masstree_ns_route_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(masstree_ns_route_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${ROCKSDB_ROOT}/include
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(masstree_ns_route_tool
+    PRIVATE
+        zb_proto
+        ${ROCKSDB_TARGET}
+)
+
 add_executable(module_io_smoke_test
     tests/module_io_smoke_test.cpp
 )
@@ -401,7 +606,25 @@ target_link_libraries(pg_migration_sim_test
 
 add_executable(mds_server
     src/mds/config/MdsConfig.cpp
+    src/mds/archive_meta/ArchiveBloomFilter.cpp
+    src/mds/archive_meta/ArchiveDataFile.cpp
+    src/mds/archive_meta/ArchiveGenerationPublisher.cpp
+    src/mds/archive_meta/ArchiveImportService.cpp
+    src/mds/archive_meta/ArchiveSparseIndex.cpp
+    src/mds/archive_meta/ArchiveManifest.cpp
+    src/mds/archive_meta/ArchiveMetaStore.cpp
+    src/mds/archive_meta/ArchiveNamespaceCatalog.cpp
+    src/mds/masstree_meta/MasstreeBulkMetaGenerator.cpp
+    src/mds/masstree_meta/MasstreeBulkImporter.cpp
+    src/mds/masstree_meta/MasstreeIndexRuntime.cpp
+    src/mds/masstree_meta/MasstreeInodeRecordCodec.cpp
+    src/mds/masstree_meta/MasstreeManifest.cpp
+    src/mds/masstree_meta/MasstreeMetaStore.cpp
+    src/mds/masstree_meta/MasstreeNamespaceCatalog.cpp
+    src/mds/masstree_meta/MasstreeOpticalAllocator.cpp
+    src/mds/masstree_meta/MasstreeStatsStore.cpp
     src/mds/storage/MetaCodec.cpp
+    src/mds/storage/MetaStoreRouter.cpp
     src/mds/storage/RocksMetaStore.cpp
     src/mds/allocator/NodeStateCache.cpp
     src/mds/allocator/PGManager.cpp
@@ -420,6 +643,7 @@ set_target_properties(mds_server PROPERTIES
 target_include_directories(mds_server
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/masstree/index/masstree
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/brpc/src
         ${GFLAGS_INCLUDE_PATH}
         ${ROCKSDB_ROOT}/include
@@ -435,6 +659,20 @@ target_link_libraries(mds_server
 )
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(mds_server PRIVATE -Wno-deprecated-declarations)
+endif()
+if(UNIX)
+    target_sources(mds_server PRIVATE
+        masstree/index/masstree/compiler.cc
+        masstree/index/masstree/kvthread.cc
+        masstree/index/masstree/masstree_wrapper.cc
+        masstree/index/masstree/memdebug.cc
+        masstree/index/masstree/misc.cc
+        masstree/index/masstree/str.cc
+        masstree/index/masstree/straccum.cc
+        masstree/index/masstree/string.cc
+        masstree/index/masstree/string_slice.cc
+    )
+    target_compile_definitions(mds_server PRIVATE ZBSTORAGE_ENABLE_MASSTREE_INDEX=1)
 endif()
 if(BRPC_DYNAMIC_LIB)
     target_link_libraries(mds_server PRIVATE ${BRPC_DYNAMIC_LIB})

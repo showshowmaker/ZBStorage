@@ -9,12 +9,20 @@
 #include <vector>
 
 #include "../allocator/ObjectAllocator.h"
-#include "../archive/ArchiveCandidateQueue.h"
+#include "../archive_meta/ArchiveGenerationPublisher.h"
+#include "../archive_meta/ArchiveImportService.h"
+#include "../archive_meta/ArchiveMetaStore.h"
+#include "../archive_meta/ArchiveNamespaceCatalog.h"
 #include "../archive/FileArchiveCandidateQueue.h"
 #include "../archive/ArchiveLeaseManager.h"
-#include "../storage/RocksMetaStore.h"
+#include "../masstree_meta/MasstreeImportService.h"
+#include "../masstree_meta/MasstreeMetaStore.h"
+#include "../masstree_meta/MasstreeNamespaceCatalog.h"
+#include "../masstree_meta/MasstreeStatsStore.h"
 #include "../storage/MetaCodec.h"
+#include "../storage/MetaStoreRouter.h"
 #include "../storage/MetaSchema.h"
+#include "../storage/RocksMetaStore.h"
 #include "mds.pb.h"
 
 namespace zb::mds {
@@ -24,6 +32,10 @@ public:
     MdsServiceImpl(RocksMetaStore* store,
                    ObjectAllocator* allocator,
                    uint64_t default_object_unit_size,
+                   const std::string& archive_meta_root,
+                   const std::string& masstree_root,
+                   const ArchiveMetaStore::Options& archive_meta_options,
+                   uint32_t archive_import_page_size_bytes,
                    FileArchiveCandidateQueue* candidate_queue = nullptr,
                    ArchiveLeaseManager* lease_manager = nullptr);
 
@@ -76,9 +88,9 @@ public:
                const zb::rpc::RmdirRequest* request,
                zb::rpc::RmdirReply* response,
                google::protobuf::Closure* done) override;
-    void GetFileAnchor(google::protobuf::RpcController* cntl_base,
-                       const zb::rpc::GetFileAnchorRequest* request,
-                       zb::rpc::GetFileAnchorReply* response,
+    void GetFileLocation(google::protobuf::RpcController* cntl_base,
+                       const zb::rpc::GetFileLocationRequest* request,
+                       zb::rpc::GetFileLocationReply* response,
                        google::protobuf::Closure* done) override;
     void UpdateInodeStat(google::protobuf::RpcController* cntl_base,
                          const zb::rpc::UpdateInodeStatRequest* request,
@@ -117,8 +129,29 @@ public:
                                 const zb::rpc::GetPathPlacementPolicyRequest* request,
                                 zb::rpc::GetPathPlacementPolicyReply* response,
                                 google::protobuf::Closure* done) override;
+    void ImportArchiveNamespace(google::protobuf::RpcController* cntl_base,
+                                const zb::rpc::ImportArchiveNamespaceRequest* request,
+                                zb::rpc::ImportArchiveNamespaceReply* response,
+                                google::protobuf::Closure* done) override;
+    void ImportMasstreeNamespace(google::protobuf::RpcController* cntl_base,
+                                 const zb::rpc::ImportMasstreeNamespaceRequest* request,
+                                 zb::rpc::ImportMasstreeNamespaceReply* response,
+                                 google::protobuf::Closure* done) override;
+    void GetRandomMasstreeFileAttr(google::protobuf::RpcController* cntl_base,
+                                   const zb::rpc::GetRandomMasstreeFileAttrRequest* request,
+                                   zb::rpc::GetRandomMasstreeFileAttrReply* response,
+                                   google::protobuf::Closure* done) override;
+    void GetMasstreeClusterStats(google::protobuf::RpcController* cntl_base,
+                                 const zb::rpc::GetMasstreeClusterStatsRequest* request,
+                                 zb::rpc::GetMasstreeClusterStatsReply* response,
+                                 google::protobuf::Closure* done) override;
+    void GetMasstreeNamespaceStats(google::protobuf::RpcController* cntl_base,
+                                   const zb::rpc::GetMasstreeNamespaceStatsRequest* request,
+                                   zb::rpc::GetMasstreeNamespaceStatsReply* response,
+                                   google::protobuf::Closure* done) override;
 
 private:
+    bool RecoverArchiveCatalog(std::string* error);
     bool EnsureRoot(std::string* error);
     bool ResolvePath(const std::string& path, uint64_t* inode_id, zb::rpc::InodeAttr* attr, std::string* error);
     bool ResolveParent(const std::string& path, uint64_t* parent_inode, std::string* name, std::string* error);
@@ -133,16 +166,16 @@ private:
                                uint64_t placement_epoch,
                                std::vector<zb::rpc::ReplicaLocation>* replicas,
                                std::string* error) const;
-    bool SelectFileAnchor(uint64_t inode_id,
-                          const zb::rpc::InodeAttr& attr,
-                          zb::rpc::ReplicaLocation* anchor,
-                          std::string* error) const;
-    bool SelectFileAnchorWithPreference(uint64_t inode_id,
-                                        const zb::rpc::InodeAttr& attr,
-                                        NodeType preferred_type,
-                                        bool strict_type,
-                                        zb::rpc::ReplicaLocation* anchor,
-                                        std::string* error) const;
+    bool SelectFilePrimaryLocation(uint64_t inode_id,
+                                   const zb::rpc::InodeAttr& attr,
+                                   zb::rpc::ReplicaLocation* location,
+                                   std::string* error) const;
+    bool SelectFilePrimaryLocationWithPreference(uint64_t inode_id,
+                                                 const zb::rpc::InodeAttr& attr,
+                                                 NodeType preferred_type,
+                                                 bool strict_type,
+                                                 zb::rpc::ReplicaLocation* location,
+                                                 std::string* error) const;
     bool MatchPathPlacementPolicy(const std::string& path,
                                   zb::rpc::PathPlacementPolicyRecord* policy,
                                   std::string* matched_prefix,
@@ -150,17 +183,22 @@ private:
     bool SavePathPlacementPolicy(const zb::rpc::PathPlacementPolicyRecord& policy, std::string* error);
     bool DeletePathPlacementPolicyByPrefix(const std::string& path_prefix, std::string* error);
     bool LoadDiskFileLocation(uint64_t inode_id, zb::rpc::DiskFileLocation* location, std::string* error) const;
-    bool SaveDiskFileLocation(const zb::rpc::DiskFileLocation& location, rocksdb::WriteBatch* batch) const;
+    bool SaveDiskFileLocation(uint64_t inode_id,
+                              const zb::rpc::DiskFileLocation& location,
+                              rocksdb::WriteBatch* batch) const;
     bool DeleteDiskFileLocation(uint64_t inode_id, rocksdb::WriteBatch* batch, std::string* error) const;
     bool LoadOpticalFileLocation(uint64_t inode_id, zb::rpc::OpticalFileLocation* location, std::string* error) const;
-    bool SaveOpticalFileLocation(const zb::rpc::OpticalFileLocation& location, rocksdb::WriteBatch* batch) const;
+    bool LoadMasstreeOpticalFileLocation(uint64_t inode_id,
+                                         zb::rpc::OpticalFileLocation* location,
+                                         std::string* error) const;
+    bool SaveOpticalFileLocation(uint64_t inode_id,
+                                 const zb::rpc::OpticalFileLocation& location,
+                                 rocksdb::WriteBatch* batch) const;
     bool DeleteOpticalFileLocation(uint64_t inode_id, rocksdb::WriteBatch* batch, std::string* error) const;
-    static zb::rpc::FileAnchorSet BuildCompatFileAnchorSet(const zb::rpc::DiskFileLocation* disk,
-                                                           const zb::rpc::OpticalFileLocation* optical);
-    bool BuildCompatFileAnchorSet(uint64_t inode_id,
-                                  const zb::rpc::InodeAttr& attr,
-                                  zb::rpc::FileAnchorSet* anchors,
-                                  std::string* error) const;
+    bool BuildFileLocationView(uint64_t inode_id,
+                               const zb::rpc::InodeAttr& attr,
+                               zb::rpc::FileLocationView* view,
+                               std::string* error) const;
     bool LoadFilePrimaryLocation(uint64_t inode_id,
                                  const zb::rpc::InodeAttr& attr,
                                  zb::rpc::ReplicaLocation* anchor,
@@ -172,6 +210,14 @@ private:
                                 uint64_t inode_id,
                                 bool purge_objects,
                                 std::string* error);
+    bool ResolveMasstreeRoute(const std::string& namespace_id,
+                              const std::string& path_prefix,
+                              MasstreeNamespaceRoute* route,
+                              std::string* error) const;
+    bool PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
+                                uint64_t* inode_id,
+                                zb::rpc::InodeAttr* attr,
+                                std::string* error) const;
     brpc::Channel* GetDataChannel(const std::string& address, std::string* error);
 
     uint64_t AllocateInodeId(std::string* error);
@@ -183,8 +229,18 @@ private:
     RocksMetaStore* store_{};
     ObjectAllocator* allocator_{};
     uint64_t default_object_unit_size_{0};
+    std::string archive_meta_root_;
+    std::string masstree_root_;
+    uint32_t archive_import_page_size_bytes_{0};
     FileArchiveCandidateQueue* candidate_queue_{};
     ArchiveLeaseManager* lease_manager_{};
+    ArchiveNamespaceCatalog archive_namespace_catalog_;
+    ArchiveMetaStore archive_meta_store_;
+    MasstreeNamespaceCatalog masstree_namespace_catalog_;
+    MasstreeImportService masstree_import_service_;
+    MasstreeMetaStore masstree_meta_store_;
+    ArchiveImportService archive_import_service_;
+    MetaStoreRouter meta_router_;
     mutable std::mutex channel_mu_;
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> channels_;
 };

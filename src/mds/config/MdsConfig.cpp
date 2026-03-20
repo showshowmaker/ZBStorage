@@ -278,6 +278,16 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
             cfg.archive_staging_dir = value;
         } else if (key == "ARCHIVE_BATCH_MAX_AGE_MS") {
             cfg.archive_batch_max_age_ms = static_cast<uint64_t>(std::stoull(value));
+        } else if (key == "ARCHIVE_META_ROOT") {
+            cfg.archive_meta_root = value;
+        } else if (key == "MASSTREE_ROOT") {
+            cfg.masstree_root = value;
+        } else if (key == "ARCHIVE_META_CACHE_GENERATIONS") {
+            cfg.archive_meta_cache_generations = static_cast<size_t>(std::stoull(value));
+        } else if (key == "ARCHIVE_META_CACHE_BYTES") {
+            cfg.archive_meta_cache_bytes = static_cast<uint64_t>(std::stoull(value));
+        } else if (key == "ARCHIVE_IMPORT_PAGE_SIZE_BYTES") {
+            cfg.archive_import_page_size_bytes = static_cast<uint32_t>(std::stoul(value));
         } else if (key == "NODES") {
             auto nodes = Split(value, ';');
             cfg.nodes.clear();
@@ -347,6 +357,21 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
     }
     if (cfg.archive_disc_size_bytes == 0) {
         cfg.archive_disc_size_bytes = 1;
+    }
+    if (cfg.archive_meta_root.empty() && !cfg.db_path.empty()) {
+        cfg.archive_meta_root = cfg.db_path + "/archive_meta";
+    }
+    if (cfg.masstree_root.empty() && !cfg.db_path.empty()) {
+        cfg.masstree_root = cfg.db_path + "/masstree_meta";
+    }
+    if (cfg.archive_meta_cache_generations == 0) {
+        cfg.archive_meta_cache_generations = 1;
+    }
+    if (cfg.archive_meta_cache_bytes == 0) {
+        cfg.archive_meta_cache_bytes = 64ULL * 1024ULL * 1024ULL;
+    }
+    if (cfg.archive_import_page_size_bytes < 4096) {
+        cfg.archive_import_page_size_bytes = 4096;
     }
     if (cfg.pg_count == 0) {
         cfg.pg_count = 1;

@@ -37,14 +37,6 @@ bool IsReadyOpticalReplica(const zb::rpc::ReplicaLocation& replica) {
            replica.replica_state() == zb::rpc::REPLICA_READY;
 }
 
-bool ReplicaFlagHasDisk(zb::rpc::FileReplicaFlag flag) {
-    return flag == zb::rpc::FILE_REPLICA_DISK_ONLY || flag == zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL;
-}
-
-bool ReplicaFlagHasOptical(zb::rpc::FileReplicaFlag flag) {
-    return flag == zb::rpc::FILE_REPLICA_OPTICAL_ONLY || flag == zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL;
-}
-
 uint32_t ComputeObjectCount(uint64_t file_size, uint64_t object_unit_size) {
     if (file_size == 0 || object_unit_size == 0) {
         return 0;
@@ -240,26 +232,26 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                 }
                 return false;
             }
-            if (!ReplicaFlagHasDisk(inode.replica_flag())) {
+            if (inode.file_archive_state() == zb::rpc::INODE_ARCHIVE_ARCHIVED) {
                 return true;
             }
-            if (ReplicaFlagHasOptical(inode.replica_flag()) &&
-                inode.file_archive_state() == zb::rpc::INODE_ARCHIVE_ARCHIVED) {
-                return true;
-            }
-
             zb::rpc::DiskFileLocation disk_location;
-            if (!LoadDiskFileLocation(file_candidate.inode_id, &disk_location, local_error)) {
+            std::string disk_error;
+            if (!LoadDiskFileLocation(file_candidate.inode_id, &disk_location, &disk_error)) {
+                if (disk_error.empty()) {
+                    return true;
+                }
+                if (local_error) {
+                    *local_error = disk_error;
+                }
                 return false;
             }
-            uint64_t object_unit_size =
-                disk_location.object_unit_size() > 0 ? disk_location.object_unit_size() : inode.object_unit_size();
+            uint64_t object_unit_size = inode.object_unit_size();
             if (object_unit_size == 0) {
                 object_unit_size = options_.default_object_unit_size;
             }
-            uint64_t file_size = disk_location.file_size() > 0 ? disk_location.file_size() : inode.size();
-            uint32_t object_count =
-                disk_location.object_count() > 0 ? disk_location.object_count() : ComputeObjectCount(file_size, object_unit_size);
+            const uint64_t file_size = inode.size();
+            const uint32_t object_count = ComputeObjectCount(file_size, object_unit_size);
 
             for (uint32_t object_index = 0; object_index < object_count; ++object_index) {
                 FileObjectTask task;
@@ -385,7 +377,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                     bool file_archived = false;
                     std::string state_error;
                     const zb::rpc::FileArchiveState file_state =
-                        (IsFileFullyArchived(file_candidate.inode_id, &file_archived, &state_error) && file_archived)
+                        (HasUsableOpticalLocation(file_candidate.inode_id, &file_archived, &state_error) && file_archived)
                             ? zb::rpc::FILE_ARCHIVE_ARCHIVED
                             : zb::rpc::FILE_ARCHIVE_PENDING;
                     std::string update_error;
@@ -549,7 +541,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                     bool file_archived = false;
                     std::string state_error;
                     const zb::rpc::FileArchiveState file_state =
-                        (IsFileFullyArchived(file_candidate.inode_id, &file_archived, &state_error) && file_archived)
+                        (HasUsableOpticalLocation(file_candidate.inode_id, &file_archived, &state_error) && file_archived)
                             ? zb::rpc::FILE_ARCHIVE_ARCHIVED
                             : zb::rpc::FILE_ARCHIVE_PENDING;
                     std::string update_error;
@@ -620,26 +612,16 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
                     } else {
                         rocksdb::WriteBatch metadata_batch;
                         zb::rpc::OpticalFileLocation location;
-                        location.set_inode_id(file_candidate.inode_id);
                         location.set_node_id(last_optical_location.node_id());
                         location.set_node_address(last_optical_location.node_address());
                         location.set_disk_id(last_optical_location.disk_id());
                         location.set_image_id(last_optical_location.image_id());
                         location.set_file_id("inode-" + std::to_string(file_candidate.inode_id));
                         location.set_file_path("/inode/" + std::to_string(file_candidate.inode_id));
-                        location.set_file_size(inode.size());
-                        location.set_version(file_commit_version);
-                        location.set_mtime_sec(inode.mtime());
-                        if (!SaveOpticalFileLocation(location, &metadata_batch, &local_error)) {
+                        if (!SaveOpticalFileLocation(file_candidate.inode_id, location, &metadata_batch, &local_error)) {
                             file_failed = true;
-                        } else {
-                            const zb::rpc::FileReplicaFlag new_flag =
-                                ReplicaFlagHasDisk(inode.replica_flag()) ? zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL
-                                                                         : zb::rpc::FILE_REPLICA_OPTICAL_ONLY;
-                            if (!UpdateInodeReplicaFlag(file_candidate.inode_id, new_flag, &metadata_batch, &local_error) ||
-                                !store_->WriteBatch(&metadata_batch, &local_error)) {
-                                file_failed = true;
-                            }
+                        } else if (!store_->WriteBatch(&metadata_batch, &local_error)) {
+                            file_failed = true;
                         }
                         if (file_failed && error && error->empty() && !local_error.empty()) {
                             *error = local_error;
@@ -693,8 +675,7 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
         if (!MetaCodec::DecodeInodeAttr(it->value().ToString(), &inode) || inode.type() != zb::rpc::INODE_FILE) {
             continue;
         }
-        if (inode.file_archive_state() != zb::rpc::INODE_ARCHIVE_ARCHIVED ||
-            inode.replica_flag() != zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL) {
+        if (inode.file_archive_state() != zb::rpc::INODE_ARCHIVE_ARCHIVED) {
             continue;
         }
         const bool cold =
@@ -718,17 +699,13 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
             }
             continue;
         }
-        if (!DeleteDiskFile(disk_location, &local_error)) {
+        if (!DeleteDiskFile(inode.inode_id(), disk_location, &local_error)) {
             if (error && error->empty() && !local_error.empty()) {
                 *error = local_error;
             }
             continue;
         }
-        if (!DeleteDiskFileLocation(inode.inode_id(), &batch, &local_error) ||
-            !UpdateInodeReplicaFlag(inode.inode_id(),
-                                    zb::rpc::FILE_REPLICA_OPTICAL_ONLY,
-                                    &batch,
-                                    &local_error)) {
+        if (!DeleteDiskFileLocation(inode.inode_id(), &batch, &local_error)) {
             if (error && error->empty() && !local_error.empty()) {
                 *error = local_error;
             }
@@ -831,7 +808,7 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
             if (!lease_ready) {
                 bool file_archived = false;
                 std::string archived_error;
-                if (IsFileFullyArchived(inode_id, &file_archived, &archived_error) && file_archived) {
+                if (HasUsableOpticalLocation(inode_id, &file_archived, &archived_error) && file_archived) {
                     file_lease.already_archived = true;
                     file_lease.version = std::max<uint64_t>(file_lease.version, staged.version);
                 } else {
@@ -984,26 +961,13 @@ bool OpticalArchiveManager::BurnSealedBatch(const NodeSelection& optical,
                 return false;
             }
             zb::rpc::OpticalFileLocation location;
-            location.set_inode_id(inode_id);
             location.set_node_id(task.optical_location.node_id());
             location.set_node_address(task.optical_location.node_address());
             location.set_disk_id(task.optical_location.disk_id());
             location.set_image_id(task.optical_location.image_id());
             location.set_file_id("inode-" + std::to_string(inode_id));
             location.set_file_path("/inode/" + std::to_string(inode_id));
-            location.set_file_size(inode.size());
-            location.set_version(archived_versions.count(inode_id) > 0 ? archived_versions[inode_id] : task.version);
-            location.set_mtime_sec(inode.mtime());
-            if (!SaveOpticalFileLocation(location, &metadata_batch, &local_error)) {
-                if (error && error->empty()) {
-                    *error = local_error;
-                }
-                return false;
-            }
-            const zb::rpc::FileReplicaFlag new_flag =
-                ReplicaFlagHasDisk(inode.replica_flag()) ? zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL
-                                                         : zb::rpc::FILE_REPLICA_OPTICAL_ONLY;
-            if (!UpdateInodeReplicaFlag(inode_id, new_flag, &metadata_batch, &local_error)) {
+            if (!SaveOpticalFileLocation(inode_id, location, &metadata_batch, &local_error)) {
                 if (error && error->empty()) {
                     *error = local_error;
                 }
@@ -1175,9 +1139,9 @@ bool OpticalArchiveManager::UpdateSourceFileArchiveState(const FileArchiveCandid
     return true;
 }
 
-bool OpticalArchiveManager::IsFileFullyArchived(uint64_t inode_id,
-                                                bool* archived,
-                                                std::string* error) {
+bool OpticalArchiveManager::HasUsableOpticalLocation(uint64_t inode_id,
+                                                     bool* archived,
+                                                     std::string* error) {
     if (!archived || inode_id == 0 || !store_) {
         if (error) {
             *error = "invalid file archive check args";
@@ -1189,9 +1153,6 @@ bool OpticalArchiveManager::IsFileFullyArchived(uint64_t inode_id,
     zb::rpc::InodeAttr inode;
     if (!LoadInodeAttr(inode_id, &inode, error)) {
         return false;
-    }
-    if (!ReplicaFlagHasOptical(inode.replica_flag())) {
-        return true;
     }
     zb::rpc::OpticalFileLocation location;
     std::string local_error;
@@ -1418,32 +1379,8 @@ bool OpticalArchiveManager::ReconcileArchiveStates(uint32_t max_records, std::st
         if (!LoadInodeAttr(inode_id, &inode, &local_error)) {
             continue;
         }
-        bool has_disk = false;
-        bool has_optical = false;
-        zb::rpc::DiskFileLocation disk_location;
-        zb::rpc::OpticalFileLocation optical_location;
-        std::string disk_error;
-        if (LoadDiskFileLocation(inode_id, &disk_location, &disk_error)) {
-            has_disk = true;
-        }
-        std::string optical_error;
-        if (LoadOpticalFileLocation(inode_id, &optical_location, &optical_error)) {
-            has_optical = true;
-        }
-        zb::rpc::FileReplicaFlag expected_flag = zb::rpc::FILE_REPLICA_NONE;
-        if (has_disk && has_optical) {
-            expected_flag = zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL;
-        } else if (has_disk) {
-            expected_flag = zb::rpc::FILE_REPLICA_DISK_ONLY;
-        } else if (has_optical) {
-            expected_flag = zb::rpc::FILE_REPLICA_OPTICAL_ONLY;
-        }
-        if (inode.replica_flag() != expected_flag) {
-            inode.set_replica_flag(expected_flag);
-            batch.Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(inode));
-        }
         bool file_archived = false;
-        if (!IsFileFullyArchived(inode_id, &file_archived, &local_error)) {
+        if (!HasUsableOpticalLocation(inode_id, &file_archived, &local_error)) {
             continue;
         }
 
@@ -1719,7 +1656,11 @@ bool OpticalArchiveManager::LoadDiskFileLocation(uint64_t inode_id,
         return false;
     }
     std::string data;
-    if (!store_->GetDiskFileLocation(inode_id, &data, error)) {
+    std::string local_error;
+    if (!store_->GetDiskFileLocation(inode_id, &data, &local_error)) {
+        if (error) {
+            *error = local_error;
+        }
         return false;
     }
     if (!MetaCodec::DecodeDiskFileLocation(data, location)) {
@@ -1741,7 +1682,11 @@ bool OpticalArchiveManager::LoadOpticalFileLocation(uint64_t inode_id,
         return false;
     }
     std::string data;
-    if (!store_->GetOpticalFileLocation(inode_id, &data, error)) {
+    std::string local_error;
+    if (!store_->GetOpticalFileLocation(inode_id, &data, &local_error)) {
+        if (error) {
+            *error = local_error;
+        }
         return false;
     }
     if (!MetaCodec::DecodeOpticalFileLocation(data, location)) {
@@ -1753,10 +1698,11 @@ bool OpticalArchiveManager::LoadOpticalFileLocation(uint64_t inode_id,
     return true;
 }
 
-bool OpticalArchiveManager::SaveOpticalFileLocation(const zb::rpc::OpticalFileLocation& location,
+bool OpticalArchiveManager::SaveOpticalFileLocation(uint64_t inode_id,
+                                                    const zb::rpc::OpticalFileLocation& location,
                                                     rocksdb::WriteBatch* batch,
                                                     std::string* error) const {
-    if (!batch || location.inode_id() == 0 || !store_) {
+    if (!batch || inode_id == 0 || !store_) {
         if (error) {
             *error = "invalid optical file location save args";
         }
@@ -1769,7 +1715,7 @@ bool OpticalArchiveManager::SaveOpticalFileLocation(const zb::rpc::OpticalFileLo
         }
         return false;
     }
-    return store_->BatchPutOpticalFileLocation(batch, location.inode_id(), payload, error);
+    return store_->BatchPutOpticalFileLocation(batch, inode_id, payload, error);
 }
 
 bool OpticalArchiveManager::DeleteDiskFileLocation(uint64_t inode_id,
@@ -1784,23 +1730,9 @@ bool OpticalArchiveManager::DeleteDiskFileLocation(uint64_t inode_id,
     return store_->BatchDeleteDiskFileLocation(batch, inode_id, error);
 }
 
-bool OpticalArchiveManager::UpdateInodeReplicaFlag(uint64_t inode_id,
-                                                   zb::rpc::FileReplicaFlag replica_flag,
-                                                   rocksdb::WriteBatch* batch,
-                                                   std::string* error) {
-    zb::rpc::InodeAttr inode;
-    if (!LoadInodeAttr(inode_id, &inode, error)) {
-        return false;
-    }
-    inode.set_replica_flag(replica_flag);
-    if (batch) {
-        batch->Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(inode));
-        return true;
-    }
-    return store_->Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(inode), error);
-}
-
-bool OpticalArchiveManager::DeleteDiskFile(const zb::rpc::DiskFileLocation& location, std::string* error) {
+bool OpticalArchiveManager::DeleteDiskFile(uint64_t inode_id,
+                                           const zb::rpc::DiskFileLocation& location,
+                                           std::string* error) {
     brpc::Channel* channel = GetChannel(location.node_address(), error);
     if (!channel) {
         return false;
@@ -1810,7 +1742,7 @@ bool OpticalArchiveManager::DeleteDiskFile(const zb::rpc::DiskFileLocation& loca
     brpc::Controller cntl;
     cntl.set_timeout_ms(3000);
     zb::rpc::DeleteFileMetaRequest req;
-    req.set_inode_id(location.inode_id());
+    req.set_inode_id(inode_id);
     req.set_disk_id(location.disk_id());
     req.set_purge_objects(true);
     zb::rpc::DeleteFileMetaReply resp;

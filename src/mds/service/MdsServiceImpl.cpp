@@ -5,10 +5,14 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <filesystem>
 #include <fcntl.h>
+#include <limits>
 #include <memory>
+#include <random>
 #include <sstream>
 
+#include "../masstree_meta/MasstreeManifest.h"
 #include "real_node.pb.h"
 
 namespace zb::mds {
@@ -17,6 +21,20 @@ namespace {
 
 constexpr const char* kReadOnlyOpticalMessage = "READ_ONLY_OPTICAL";
 constexpr const char* kNoSpaceRealPolicyMessage = "NO_SPACE_REAL_POLICY";
+constexpr const char* kNoSpaceVirtualPolicyMessage = "NO_SPACE_VIRTUAL_POLICY";
+constexpr const char* kCrossTierRenameMessage = "CROSS_TIER_RENAME";
+
+bool IsLocationMetadataMissing(const std::string& error) {
+    return error.empty();
+}
+
+bool IsInvalidReaddirRequest(const std::string& error) {
+    return error == "not a directory" ||
+           error == "invalid archive readdir token" ||
+           error == "archive readdir token generation mismatch" ||
+           error == "invalid masstree readdir token" ||
+           error == "masstree readdir token generation mismatch";
+}
 
 std::vector<std::string> SplitPath(const std::string& path) {
     std::vector<std::string> parts;
@@ -72,14 +90,6 @@ bool IsWriteOpenFlags(uint32_t flags) {
     return false;
 }
 
-bool ReplicaFlagHasDisk(zb::rpc::FileReplicaFlag flag) {
-    return flag == zb::rpc::FILE_REPLICA_DISK_ONLY || flag == zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL;
-}
-
-bool ReplicaFlagHasOptical(zb::rpc::FileReplicaFlag flag) {
-    return flag == zb::rpc::FILE_REPLICA_OPTICAL_ONLY || flag == zb::rpc::FILE_REPLICA_DISK_AND_OPTICAL;
-}
-
 uint32_t ComputeObjectCount(uint64_t file_size, uint64_t object_unit_size) {
     if (file_size == 0 || object_unit_size == 0) {
         return 0;
@@ -121,6 +131,38 @@ bool NormalizePolicyPath(const std::string& path, std::string* normalized) {
     return true;
 }
 
+bool IsTierPlacementTarget(zb::rpc::PathPlacementTarget target) {
+    return target == zb::rpc::PATH_PLACEMENT_REAL_ONLY ||
+           target == zb::rpc::PATH_PLACEMENT_VIRTUAL_ONLY;
+}
+
+bool PlacementTargetToNodeType(zb::rpc::PathPlacementTarget target, NodeType* type) {
+    if (!type) {
+        return false;
+    }
+    switch (target) {
+        case zb::rpc::PATH_PLACEMENT_REAL_ONLY:
+            *type = NodeType::kReal;
+            return true;
+        case zb::rpc::PATH_PLACEMENT_VIRTUAL_ONLY:
+            *type = NodeType::kVirtual;
+            return true;
+        default:
+            return false;
+    }
+}
+
+const char* NoSpaceMessageForPlacementTarget(zb::rpc::PathPlacementTarget target) {
+    switch (target) {
+        case zb::rpc::PATH_PLACEMENT_REAL_ONLY:
+            return kNoSpaceRealPolicyMessage;
+        case zb::rpc::PATH_PLACEMENT_VIRTUAL_ONLY:
+            return kNoSpaceVirtualPolicyMessage;
+        default:
+            return "NO_SPACE_POLICY";
+    }
+}
+
 std::vector<std::string> BuildPathPrefixCandidates(const std::string& normalized_path) {
     std::vector<std::string> out;
     if (normalized_path.empty() || normalized_path[0] != '/') {
@@ -149,51 +191,30 @@ void EnsureReplicaObjectId(zb::rpc::ReplicaLocation* replica, const std::string&
     replica->set_object_id(object_id);
 }
 
-constexpr uint32_t kAnchorMaskDisk = 1U << 0U;
-constexpr uint32_t kAnchorMaskOptical = 1U << 1U;
-
-zb::rpc::DiskFileAnchor ToDiskAnchor(const zb::rpc::DiskFileLocation& location) {
-    zb::rpc::DiskFileAnchor lite;
-    lite.set_node_id(location.node_id());
-    lite.set_disk_id(location.disk_id());
-    lite.set_object_id("obj-" + std::to_string(location.inode_id()) + "-0");
-    lite.set_size(location.file_size());
-    lite.set_replica_state(zb::rpc::REPLICA_READY);
-    return lite;
-}
-
-zb::rpc::OpticalFileAnchor ToOpticalAnchor(const zb::rpc::OpticalFileLocation& location) {
-    zb::rpc::OpticalFileAnchor lite;
-    lite.set_node_id(location.node_id());
-    lite.set_disk_id(location.disk_id());
-    lite.set_object_id(location.file_id().empty() ? "obj-" + std::to_string(location.inode_id()) + "-0"
-                                                  : location.file_id());
-    lite.set_size(location.file_size());
-    lite.set_replica_state(zb::rpc::REPLICA_READY);
-    lite.set_image_id(location.image_id());
-    return lite;
-}
-
-zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::DiskFileLocation& location) {
+zb::rpc::ReplicaLocation ToReplicaLocation(uint64_t inode_id,
+                                           uint64_t file_size,
+                                           const zb::rpc::DiskFileLocation& location) {
     zb::rpc::ReplicaLocation replica;
     replica.set_node_id(location.node_id());
     replica.set_node_address(location.node_address());
     replica.set_disk_id(location.disk_id());
-    replica.set_object_id("obj-" + std::to_string(location.inode_id()) + "-0");
-    replica.set_size(location.file_size());
+    replica.set_object_id("obj-" + std::to_string(inode_id) + "-0");
+    replica.set_size(file_size);
     replica.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
     replica.set_replica_state(zb::rpc::REPLICA_READY);
     return replica;
 }
 
-zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::OpticalFileLocation& location) {
+zb::rpc::ReplicaLocation ToReplicaLocation(uint64_t inode_id,
+                                           uint64_t file_size,
+                                           const zb::rpc::OpticalFileLocation& location) {
     zb::rpc::ReplicaLocation replica;
     replica.set_node_id(location.node_id());
     replica.set_node_address(location.node_address());
     replica.set_disk_id(location.disk_id());
-    replica.set_object_id(location.file_id().empty() ? "obj-" + std::to_string(location.inode_id()) + "-0"
+    replica.set_object_id(location.file_id().empty() ? "obj-" + std::to_string(inode_id) + "-0"
                                                      : location.file_id());
-    replica.set_size(location.file_size());
+    replica.set_size(file_size);
     replica.set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
     replica.set_replica_state(zb::rpc::REPLICA_READY);
     replica.set_image_id(location.image_id());
@@ -205,15 +226,89 @@ zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::OpticalFileLocation& l
 MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
                                ObjectAllocator* allocator,
                                uint64_t default_object_unit_size,
+                               const std::string& archive_meta_root,
+                               const std::string& masstree_root,
+                               const ArchiveMetaStore::Options& archive_meta_options,
+                               uint32_t archive_import_page_size_bytes,
                                FileArchiveCandidateQueue* candidate_queue,
                                ArchiveLeaseManager* lease_manager)
     : store_(store),
       allocator_(allocator),
       default_object_unit_size_(default_object_unit_size),
+      archive_meta_root_(archive_meta_root),
+      masstree_root_(masstree_root),
+      archive_import_page_size_bytes_(archive_import_page_size_bytes),
       candidate_queue_(candidate_queue),
-      lease_manager_(lease_manager) {
+      lease_manager_(lease_manager),
+      archive_namespace_catalog_(store),
+      archive_meta_store_(),
+      masstree_namespace_catalog_(store),
+      masstree_import_service_(store, &masstree_namespace_catalog_),
+      masstree_meta_store_(),
+      archive_import_service_(store, &archive_namespace_catalog_),
+      meta_router_(store,
+                   &archive_namespace_catalog_,
+                   &archive_meta_store_,
+                   &masstree_namespace_catalog_,
+                   &masstree_meta_store_) {
     std::string error;
+    archive_meta_store_.Init(archive_meta_root, archive_meta_options, &error);
+    RecoverArchiveCatalog(&error);
     EnsureRoot(&error);
+}
+
+bool MdsServiceImpl::RecoverArchiveCatalog(std::string* error) {
+    if (!store_ || archive_meta_root_.empty()) {
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    ArchiveGenerationPublisher publisher(&archive_namespace_catalog_);
+    std::vector<ArchiveNamespaceRoute> routes;
+    if (!archive_namespace_catalog_.ListRoutes(&routes, error)) {
+        return false;
+    }
+
+    for (const auto& route : routes) {
+        if (route.namespace_id.empty()) {
+            continue;
+        }
+        std::vector<std::string> removed_paths;
+        std::string cleanup_error;
+        if (!publisher.CleanupNamespaceStaging(archive_meta_root_, route.namespace_id, &removed_paths, &cleanup_error)) {
+            if (error) {
+                *error = cleanup_error;
+            }
+            return false;
+        }
+
+        ArchiveNamespaceRoute current;
+        std::string current_error;
+        if (archive_namespace_catalog_.LookupCurrentRoute(route.path_prefix, &current, &current_error)) {
+            continue;
+        }
+        if (!current_error.empty()) {
+            if (error) {
+                *error = current_error;
+            }
+            return false;
+        }
+        ArchiveNamespaceRoute recovered;
+        std::string recover_error;
+        if (!publisher.RecoverCurrentRouteFromLatest(archive_meta_root_, route.namespace_id, &recovered, &recover_error)) {
+            if (error) {
+                *error = recover_error;
+            }
+            return false;
+        }
+    }
+
+    if (error) {
+        error->clear();
+    }
+    return true;
 }
 
 void MdsServiceImpl::Lookup(google::protobuf::RpcController* cntl_base,
@@ -238,7 +333,7 @@ void MdsServiceImpl::Lookup(google::protobuf::RpcController* cntl_base,
     std::string error;
     zb::rpc::InodeAttr attr;
     uint64_t inode_id = 0;
-    if (!ResolvePath(request->path(), &inode_id, &attr, &error)) {
+    if (!meta_router_.ResolvePath(request->path(), &inode_id, &attr, &error)) {
         if (error.empty()) {
             FillStatus(response->mutable_status(), zb::rpc::MDS_NOT_FOUND, "path not found");
         } else {
@@ -272,7 +367,7 @@ void MdsServiceImpl::Getattr(google::protobuf::RpcController* cntl_base,
 
     std::string error;
     zb::rpc::InodeAttr attr;
-    if (!GetInode(request->inode_id(), &attr, &error)) {
+    if (!meta_router_.GetInode(request->inode_id(), &attr, &error)) {
         if (error.empty()) {
             FillStatus(response->mutable_status(), zb::rpc::MDS_NOT_FOUND, "inode not found");
         } else {
@@ -316,18 +411,16 @@ void MdsServiceImpl::Open(google::protobuf::RpcController* cntl_base,
         return;
     }
 
-    zb::rpc::FileAnchorSet file_anchor_set;
     if (attr.type() == zb::rpc::INODE_FILE) {
-        std::string anchor_error;
-        if (!BuildCompatFileAnchorSet(inode_id, attr, &file_anchor_set, &anchor_error)) {
+        std::string location_error;
+        if (!BuildFileLocationView(inode_id, attr, response->mutable_location(), &location_error)) {
             FillStatus(response->mutable_status(),
                        zb::rpc::MDS_INTERNAL_ERROR,
-                       anchor_error.empty() ? "failed to load file location" : anchor_error);
+                       location_error.empty() ? "failed to load file location" : location_error);
             return;
         }
         if (IsWriteOpenFlags(request->flags()) &&
-            (attr.file_archive_state() == zb::rpc::INODE_ARCHIVE_ARCHIVED ||
-             ReplicaFlagHasOptical(attr.replica_flag()))) {
+            attr.file_archive_state() == zb::rpc::INODE_ARCHIVE_ARCHIVED) {
             FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, kReadOnlyOpticalMessage);
             return;
         }
@@ -344,9 +437,8 @@ void MdsServiceImpl::Open(google::protobuf::RpcController* cntl_base,
     }
 
     response->set_handle_id(handle_id);
-    *response->mutable_attr() = attr;
-    if (attr.type() == zb::rpc::INODE_FILE) {
-        *response->mutable_file_anchor() = file_anchor_set;
+    if (attr.type() != zb::rpc::INODE_FILE) {
+        *response->mutable_location()->mutable_attr() = attr;
     }
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
     (void)request->flags();
@@ -450,7 +542,6 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     attr.set_replica(request->replica() ? request->replica() : 1);
     attr.set_version(1);
     attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
-    attr.set_replica_flag(zb::rpc::FILE_REPLICA_DISK_ONLY);
 
     zb::rpc::PathPlacementPolicyRecord placement_policy;
     std::string policy_error;
@@ -464,39 +555,36 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     rocksdb::WriteBatch batch;
     batch.Put(DentryKey(parent_inode, name), MetaCodec::EncodeUInt64(inode_id));
     batch.Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(attr));
-    zb::rpc::ReplicaLocation anchor;
-    bool anchor_ok = false;
-    if (has_path_policy &&
-        placement_policy.target() == zb::rpc::PATH_PLACEMENT_REAL_ONLY &&
-        placement_policy.strict()) {
-        anchor_ok = SelectFileAnchorWithPreference(inode_id, attr, NodeType::kReal, true, &anchor, &error);
+    zb::rpc::ReplicaLocation primary_location;
+    bool location_ok = false;
+    NodeType preferred_type = NodeType::kReal;
+    const bool has_strict_tier_policy =
+        has_path_policy &&
+        placement_policy.strict() &&
+        PlacementTargetToNodeType(placement_policy.target(), &preferred_type);
+    if (has_strict_tier_policy) {
+        location_ok = SelectFilePrimaryLocationWithPreference(
+            inode_id, attr, preferred_type, true, &primary_location, &error);
     } else {
-        anchor_ok = SelectFileAnchor(inode_id, attr, &anchor, &error);
+        location_ok = SelectFilePrimaryLocation(inode_id, attr, &primary_location, &error);
     }
-    if (!anchor_ok) {
-        if (has_path_policy &&
-            placement_policy.target() == zb::rpc::PATH_PLACEMENT_REAL_ONLY &&
-            placement_policy.strict()) {
-            error = kNoSpaceRealPolicyMessage;
+    if (!location_ok) {
+        if (has_strict_tier_policy) {
+            error = NoSpaceMessageForPlacementTarget(placement_policy.target());
         }
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
     }
     zb::rpc::DiskFileLocation disk_location;
-    disk_location.set_inode_id(inode_id);
-    disk_location.set_node_id(anchor.node_id());
-    std::string anchor_address;
-    if (ResolveNodeAddress(anchor.node_id(), &anchor_address, &error)) {
-        disk_location.set_node_address(anchor_address);
+    disk_location.set_node_id(primary_location.node_id());
+    std::string primary_location_address;
+    if (ResolveNodeAddress(primary_location.node_id(), &primary_location_address, &error)) {
+        disk_location.set_node_address(primary_location_address);
     } else {
         error.clear();
     }
-    disk_location.set_disk_id(anchor.disk_id());
-    disk_location.set_file_size(0);
-    disk_location.set_object_unit_size(attr.object_unit_size());
-    disk_location.set_object_count(0);
-    disk_location.set_version(attr.version());
-    if (!SaveDiskFileLocation(disk_location, &batch)) {
+    disk_location.set_disk_id(primary_location.disk_id());
+    if (!SaveDiskFileLocation(inode_id, disk_location, &batch)) {
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to encode disk file location");
         return;
     }
@@ -505,8 +593,9 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
         return;
     }
 
-    *response->mutable_attr() = attr;
-    *response->mutable_file_anchor() = BuildCompatFileAnchorSet(&disk_location, nullptr);
+    zb::rpc::FileLocationView* view = response->mutable_location();
+    *view->mutable_attr() = attr;
+    *view->mutable_disk_location() = disk_location;
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
@@ -578,7 +667,6 @@ void MdsServiceImpl::Mkdir(google::protobuf::RpcController* cntl_base,
     attr.set_replica(1);
     attr.set_version(1);
     attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
-    attr.set_replica_flag(zb::rpc::FILE_REPLICA_NONE);
 
     rocksdb::WriteBatch batch;
     batch.Put(DentryKey(parent_inode, name), MetaCodec::EncodeUInt64(inode_id));
@@ -612,36 +700,27 @@ void MdsServiceImpl::Readdir(google::protobuf::RpcController* cntl_base,
     }
 
     std::string error;
-    zb::rpc::InodeAttr attr;
-    uint64_t inode_id = 0;
-    if (!ResolvePath(request->path(), &inode_id, &attr, &error)) {
-        FillStatus(response->mutable_status(), zb::rpc::MDS_NOT_FOUND, "path not found");
+    std::vector<zb::rpc::Dentry> entries;
+    bool has_more = false;
+    std::string next_token;
+    if (!meta_router_.Readdir(request->path(),
+                              request->start_after(),
+                              request->limit(),
+                              &entries,
+                              &has_more,
+                              &next_token,
+                              &error)) {
+        FillStatus(response->mutable_status(),
+                   IsInvalidReaddirRequest(error) ? zb::rpc::MDS_INVALID_ARGUMENT : zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "readdir failed" : error);
         return;
     }
-    if (attr.type() != zb::rpc::INODE_DIR) {
-        FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, "not a directory");
-        return;
+    for (const auto& entry : entries) {
+        *response->add_entries() = entry;
     }
-
-    std::string prefix = DentryPrefix(inode_id);
-    std::unique_ptr<rocksdb::Iterator> it(store_->db()->NewIterator(rocksdb::ReadOptions()));
-    for (it->Seek(prefix); it->Valid(); it->Next()) {
-        if (!it->key().starts_with(prefix)) {
-            break;
-        }
-        std::string name = it->key().ToString().substr(prefix.size());
-        uint64_t child_inode = 0;
-        if (!MetaCodec::DecodeUInt64(it->value().ToString(), &child_inode)) {
-            continue;
-        }
-        zb::rpc::InodeAttr child_attr;
-        if (!GetInode(child_inode, &child_attr, &error)) {
-            continue;
-        }
-        zb::rpc::Dentry* entry = response->add_entries();
-        entry->set_name(name);
-        entry->set_inode_id(child_inode);
-        entry->set_type(child_attr.type());
+    response->set_has_more(has_more);
+    if (!next_token.empty()) {
+        response->set_next_token(next_token);
     }
 
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
@@ -663,6 +742,29 @@ void MdsServiceImpl::Rename(google::protobuf::RpcController* cntl_base,
 
     if (request->old_path().empty() || request->new_path().empty()) {
         FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, "path is empty");
+        return;
+    }
+
+    zb::rpc::PathPlacementPolicyRecord old_policy;
+    zb::rpc::PathPlacementPolicyRecord new_policy;
+    std::string old_policy_error;
+    std::string new_policy_error;
+    const bool has_old_policy =
+        MatchPathPlacementPolicy(request->old_path(), &old_policy, nullptr, &old_policy_error);
+    const bool has_new_policy =
+        MatchPathPlacementPolicy(request->new_path(), &new_policy, nullptr, &new_policy_error);
+    if (!old_policy_error.empty() || !new_policy_error.empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   !old_policy_error.empty() ? old_policy_error : new_policy_error);
+        return;
+    }
+    if (has_old_policy &&
+        has_new_policy &&
+        IsTierPlacementTarget(old_policy.target()) &&
+        IsTierPlacementTarget(new_policy.target()) &&
+        old_policy.target() != new_policy.target()) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, kCrossTierRenameMessage);
         return;
     }
 
@@ -755,8 +857,7 @@ void MdsServiceImpl::Unlink(google::protobuf::RpcController* cntl_base,
 
     zb::rpc::ReplicaLocation cleanup_anchor;
     std::string anchor_error;
-    if (ReplicaFlagHasDisk(attr.replica_flag()) &&
-        LoadFilePrimaryLocation(inode_id, attr, &cleanup_anchor, &anchor_error) &&
+    if (LoadFilePrimaryLocation(inode_id, attr, &cleanup_anchor, &anchor_error) &&
         !cleanup_anchor.node_id().empty() &&
         cleanup_anchor.storage_tier() == zb::rpc::STORAGE_TIER_DISK) {
         std::string cleanup_error;
@@ -861,9 +962,9 @@ void MdsServiceImpl::Rmdir(google::protobuf::RpcController* cntl_base,
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
-void MdsServiceImpl::GetFileAnchor(google::protobuf::RpcController* cntl_base,
-                                   const zb::rpc::GetFileAnchorRequest* request,
-                                   zb::rpc::GetFileAnchorReply* response,
+void MdsServiceImpl::GetFileLocation(google::protobuf::RpcController* cntl_base,
+                                   const zb::rpc::GetFileLocationRequest* request,
+                                   zb::rpc::GetFileLocationReply* response,
                                    google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
     (void)cntl_base;
@@ -892,15 +993,15 @@ void MdsServiceImpl::GetFileAnchor(google::protobuf::RpcController* cntl_base,
         return;
     }
 
-    zb::rpc::FileAnchorSet anchor_set;
-    if (!BuildCompatFileAnchorSet(request->inode_id(), attr, &anchor_set, &error)) {
+    zb::rpc::FileLocationView location;
+    if (!BuildFileLocationView(request->inode_id(), attr, &location, &error)) {
         FillStatus(response->mutable_status(),
                    zb::rpc::MDS_INTERNAL_ERROR,
                    error.empty() ? "failed to load file location" : error);
         return;
     }
 
-    *response->mutable_anchor() = anchor_set;
+    *response->mutable_location() = location;
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
@@ -943,8 +1044,7 @@ void MdsServiceImpl::UpdateInodeStat(google::protobuf::RpcController* cntl_base,
         return;
     }
 
-    if (attr.file_archive_state() == zb::rpc::INODE_ARCHIVE_ARCHIVED ||
-        ReplicaFlagHasOptical(attr.replica_flag())) {
+    if (attr.file_archive_state() == zb::rpc::INODE_ARCHIVE_ARCHIVED) {
         FillStatus(response->mutable_status(), zb::rpc::MDS_INVALID_ARGUMENT, kReadOnlyOpticalMessage);
         return;
     }
@@ -960,31 +1060,12 @@ void MdsServiceImpl::UpdateInodeStat(google::protobuf::RpcController* cntl_base,
     attr.set_mtime(mtime);
     attr.set_ctime(now_sec);
 
-    zb::rpc::DiskFileLocation disk_location;
-    std::string disk_error;
-    if (!LoadDiskFileLocation(request->inode_id(), &disk_location, &disk_error)) {
-        FillStatus(response->mutable_status(),
-                   zb::rpc::MDS_INTERNAL_ERROR,
-                   disk_error.empty() ? "failed to load disk file location" : disk_error);
-        return;
-    }
-    disk_location.set_file_size(attr.size());
-    disk_location.set_object_unit_size(attr.object_unit_size());
-    disk_location.set_object_count(ComputeObjectCount(attr.size(), attr.object_unit_size()));
-    disk_location.set_version(attr.version());
-
     rocksdb::WriteBatch batch;
     batch.Put(InodeKey(request->inode_id()), MetaCodec::EncodeInodeAttr(attr));
-    if (!SaveDiskFileLocation(disk_location, &batch)) {
-        FillStatus(response->mutable_status(),
-                   zb::rpc::MDS_INTERNAL_ERROR,
-                   "failed to encode disk file location");
-        return;
-    }
     if (!store_->WriteBatch(&batch, &error)) {
         FillStatus(response->mutable_status(),
                    zb::rpc::MDS_INTERNAL_ERROR,
-                   error.empty() ? "failed to persist disk file location" : error);
+                   error.empty() ? "failed to persist inode stat" : error);
         return;
     }
 
@@ -1063,6 +1144,241 @@ void MdsServiceImpl::GetPathPlacementPolicy(google::protobuf::RpcController* cnt
         *response->mutable_policy() = policy;
         response->set_matched_prefix(matched_prefix);
     }
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::ImportArchiveNamespace(google::protobuf::RpcController* cntl_base,
+                                            const zb::rpc::ImportArchiveNamespaceRequest* request,
+                                            zb::rpc::ImportArchiveNamespaceReply* response,
+                                            google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!store_ || !request || !response) {
+        FillStatus(response ? response->mutable_status() : nullptr,
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "Service not initialized");
+        return;
+    }
+    if (request->path_prefix().empty() || request->namespace_id().empty() || request->generation_id().empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INVALID_ARGUMENT,
+                   "path_prefix/namespace_id/generation_id is required");
+        return;
+    }
+
+    ArchiveImportService::Request import_request;
+    import_request.archive_root = archive_meta_root_;
+    import_request.namespace_id = request->namespace_id();
+    import_request.generation_id = request->generation_id();
+    import_request.path_prefix = request->path_prefix();
+    import_request.page_size_bytes =
+        request->page_size_bytes() > 0 ? request->page_size_bytes() : archive_import_page_size_bytes_;
+    import_request.publish_route = request->publish_route();
+
+    ArchiveImportService::Result result;
+    std::string error;
+    if (!archive_import_service_.ImportPathPrefix(import_request, &result, &error)) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "archive import failed" : error);
+        return;
+    }
+    response->set_manifest_path(result.manifest_path);
+    response->set_inode_count(result.inode_count);
+    response->set_dentry_count(result.dentry_count);
+    response->set_inode_min(result.inode_min);
+    response->set_inode_max(result.inode_max);
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::ImportMasstreeNamespace(google::protobuf::RpcController* cntl_base,
+                                             const zb::rpc::ImportMasstreeNamespaceRequest* request,
+                                             zb::rpc::ImportMasstreeNamespaceReply* response,
+                                             google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!store_ || !request || !response) {
+        FillStatus(response ? response->mutable_status() : nullptr,
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "Service not initialized");
+        return;
+    }
+    if (masstree_root_.empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "masstree_root is not configured");
+        return;
+    }
+    if (request->path_prefix().empty() || request->namespace_id().empty() || request->generation_id().empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INVALID_ARGUMENT,
+                   "path_prefix/namespace_id/generation_id is required");
+        return;
+    }
+
+    MasstreeImportService::Request import_request;
+    import_request.masstree_root = masstree_root_;
+    import_request.namespace_id = request->namespace_id();
+    import_request.generation_id = request->generation_id();
+    import_request.path_prefix = request->path_prefix();
+    import_request.inode_start = request->inode_start();
+    import_request.file_count = request->file_count() > 0 ? request->file_count() : 100000000000ULL;
+    import_request.max_files_per_leaf_dir =
+        request->max_files_per_leaf_dir() > 0 ? request->max_files_per_leaf_dir() : 2048U;
+    import_request.max_subdirs_per_dir =
+        request->max_subdirs_per_dir() > 0 ? request->max_subdirs_per_dir() : 256U;
+    import_request.verify_inode_samples = request->verify_inode_samples();
+    import_request.verify_dentry_samples = request->verify_dentry_samples();
+    import_request.publish_route = true;
+
+    MasstreeImportService::Result result;
+    std::string error;
+    if (!masstree_import_service_.ImportNamespace(import_request, &result, &error)) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "masstree import failed" : error);
+        return;
+    }
+    response->set_manifest_path(result.manifest_path);
+    response->set_root_inode_id(result.root_inode_id);
+    response->set_inode_count(result.inode_count);
+    response->set_dentry_count(result.dentry_count);
+    response->set_inode_min(result.inode_min);
+    response->set_inode_max(result.inode_max);
+    response->set_inode_blob_bytes(result.inode_blob_bytes);
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::GetRandomMasstreeFileAttr(google::protobuf::RpcController* cntl_base,
+                                               const zb::rpc::GetRandomMasstreeFileAttrRequest* request,
+                                               zb::rpc::GetRandomMasstreeFileAttrReply* response,
+                                               google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!store_ || !request || !response) {
+        FillStatus(response ? response->mutable_status() : nullptr,
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "Service not initialized");
+        return;
+    }
+    if (request->namespace_id().empty() && request->path_prefix().empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INVALID_ARGUMENT,
+                   "namespace_id or path_prefix is required");
+        return;
+    }
+
+    MasstreeNamespaceRoute route;
+    std::string error;
+    if (!ResolveMasstreeRoute(request->namespace_id(), request->path_prefix(), &route, &error)) {
+        FillStatus(response->mutable_status(),
+                   error.empty() ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "masstree namespace not found" : error);
+        return;
+    }
+
+    uint64_t inode_id = 0;
+    zb::rpc::InodeAttr attr;
+    if (!PickRandomMasstreeFile(route, &inode_id, &attr, &error)) {
+        FillStatus(response->mutable_status(),
+                   error.empty() ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "masstree file not found" : error);
+        return;
+    }
+
+    response->set_namespace_id(route.namespace_id);
+    response->set_path_prefix(route.path_prefix);
+    response->set_generation_id(route.generation_id);
+    response->set_inode_id(inode_id);
+    *response->mutable_attr() = attr;
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::GetMasstreeClusterStats(google::protobuf::RpcController* cntl_base,
+                                             const zb::rpc::GetMasstreeClusterStatsRequest* request,
+                                             zb::rpc::GetMasstreeClusterStatsReply* response,
+                                             google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    (void)request;
+    if (!store_ || !response) {
+        FillStatus(response ? response->mutable_status() : nullptr,
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "Service not initialized");
+        return;
+    }
+
+    MasstreeStatsStore stats_store(store_);
+    MasstreeClusterStatsRecord stats;
+    std::string error;
+    if (!stats_store.LoadClusterStats(&stats, &error)) {
+        FillStatus(response->mutable_status(),
+                   error.empty() ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "masstree cluster stats not found" : error);
+        return;
+    }
+
+    response->set_disk_node_count(stats.disk_node_count);
+    response->set_optical_node_count(stats.optical_node_count);
+    response->set_disk_device_count(stats.disk_device_count);
+    response->set_optical_device_count(stats.optical_device_count);
+    response->set_total_capacity_bytes(stats.total_capacity_bytes);
+    response->set_used_capacity_bytes(stats.used_capacity_bytes);
+    response->set_free_capacity_bytes(stats.free_capacity_bytes);
+    response->set_total_file_count(stats.total_file_count);
+    response->set_total_file_bytes(stats.total_file_bytes);
+    response->set_avg_file_size_bytes(stats.avg_file_size_bytes);
+    response->set_cursor_node_index(stats.cursor.node_index);
+    response->set_cursor_disk_index(stats.cursor.disk_index);
+    response->set_cursor_image_index(stats.cursor.image_index_in_disk);
+    response->set_cursor_image_used_bytes(stats.cursor.image_used_bytes);
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::GetMasstreeNamespaceStats(google::protobuf::RpcController* cntl_base,
+                                               const zb::rpc::GetMasstreeNamespaceStatsRequest* request,
+                                               zb::rpc::GetMasstreeNamespaceStatsReply* response,
+                                               google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!store_ || !request || !response) {
+        FillStatus(response ? response->mutable_status() : nullptr,
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "Service not initialized");
+        return;
+    }
+    if (request->namespace_id().empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INVALID_ARGUMENT,
+                   "namespace_id is required");
+        return;
+    }
+
+    MasstreeStatsStore stats_store(store_);
+    MasstreeNamespaceStatsRecord stats;
+    std::string error;
+    if (!stats_store.LoadNamespaceStats(request->namespace_id(), &stats, &error)) {
+        FillStatus(response->mutable_status(),
+                   error.empty() ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "masstree namespace stats not found" : error);
+        return;
+    }
+
+    response->set_namespace_id(stats.namespace_id);
+    response->set_generation_id(stats.generation_id);
+    response->set_file_count(stats.file_count);
+    response->set_total_file_bytes(stats.total_file_bytes);
+    response->set_avg_file_size_bytes(stats.avg_file_size_bytes);
+    response->set_start_global_image_id(stats.start_global_image_id);
+    response->set_end_global_image_id(stats.end_global_image_id);
+    response->set_start_cursor_node_index(stats.start_cursor.node_index);
+    response->set_start_cursor_disk_index(stats.start_cursor.disk_index);
+    response->set_start_cursor_image_index(stats.start_cursor.image_index_in_disk);
+    response->set_start_cursor_image_used_bytes(stats.start_cursor.image_used_bytes);
+    response->set_end_cursor_node_index(stats.end_cursor.node_index);
+    response->set_end_cursor_disk_index(stats.end_cursor.disk_index);
+    response->set_end_cursor_image_index(stats.end_cursor.image_index_in_disk);
+    response->set_end_cursor_image_used_bytes(stats.end_cursor.image_used_bytes);
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
@@ -1296,7 +1612,6 @@ bool MdsServiceImpl::EnsureRoot(std::string* error) {
     root.set_replica(1);
     root.set_version(1);
     root.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
-    root.set_replica_flag(zb::rpc::FILE_REPLICA_NONE);
 
     return PutInode(kRootInodeId, root, error);
 }
@@ -1305,39 +1620,7 @@ bool MdsServiceImpl::ResolvePath(const std::string& path,
                                  uint64_t* inode_id,
                                  zb::rpc::InodeAttr* attr,
                                  std::string* error) {
-    if (!inode_id) {
-        return false;
-    }
-    std::vector<std::string> parts = SplitPath(path);
-    uint64_t current = kRootInodeId;
-    if (parts.empty()) {
-        *inode_id = current;
-        if (attr) {
-            return GetInode(current, attr, error);
-        }
-        return true;
-    }
-
-    for (const auto& name : parts) {
-        std::string data;
-        if (!store_->Get(DentryKey(current, name), &data, error)) {
-            return false;
-        }
-        uint64_t next = 0;
-        if (!MetaCodec::DecodeUInt64(data, &next)) {
-            if (error) {
-                *error = "invalid dentry";
-            }
-            return false;
-        }
-        current = next;
-    }
-
-    *inode_id = current;
-    if (attr) {
-        return GetInode(current, attr, error);
-    }
-    return true;
+    return meta_router_.ResolvePath(path, inode_id, attr, error);
 }
 
 bool MdsServiceImpl::ResolveParent(const std::string& path,
@@ -1374,17 +1657,7 @@ bool MdsServiceImpl::ResolveParent(const std::string& path,
 }
 
 bool MdsServiceImpl::GetInode(uint64_t inode_id, zb::rpc::InodeAttr* attr, std::string* error) {
-    std::string data;
-    if (!store_->Get(InodeKey(inode_id), &data, error)) {
-        return false;
-    }
-    if (!MetaCodec::DecodeInodeAttr(data, attr)) {
-        if (error) {
-            *error = "invalid inode data";
-        }
-        return false;
-    }
-    return true;
+    return meta_router_.GetInode(inode_id, attr, error);
 }
 
 bool MdsServiceImpl::PutInode(uint64_t inode_id, const zb::rpc::InodeAttr& attr, std::string* error) {
@@ -1450,22 +1723,22 @@ bool MdsServiceImpl::ResolveObjectReplicas(uint32_t replica_count,
     return true;
 }
 
-bool MdsServiceImpl::SelectFileAnchor(uint64_t inode_id,
-                                      const zb::rpc::InodeAttr& attr,
-                                      zb::rpc::ReplicaLocation* anchor,
-                                      std::string* error) const {
-    return SelectFileAnchorWithPreference(inode_id, attr, NodeType::kReal, false, anchor, error);
+bool MdsServiceImpl::SelectFilePrimaryLocation(uint64_t inode_id,
+                                               const zb::rpc::InodeAttr& attr,
+                                               zb::rpc::ReplicaLocation* location,
+                                               std::string* error) const {
+    return SelectFilePrimaryLocationWithPreference(inode_id, attr, NodeType::kReal, false, location, error);
 }
 
-bool MdsServiceImpl::SelectFileAnchorWithPreference(uint64_t inode_id,
-                                                    const zb::rpc::InodeAttr& attr,
-                                                    NodeType preferred_type,
-                                                    bool strict_type,
-                                                    zb::rpc::ReplicaLocation* anchor,
-                                                    std::string* error) const {
-    if (!anchor || inode_id == 0) {
+bool MdsServiceImpl::SelectFilePrimaryLocationWithPreference(uint64_t inode_id,
+                                                             const zb::rpc::InodeAttr& attr,
+                                                             NodeType preferred_type,
+                                                             bool strict_type,
+                                                             zb::rpc::ReplicaLocation* location,
+                                                             std::string* error) const {
+    if (!location || inode_id == 0) {
         if (error) {
-            *error = "invalid file anchor args";
+            *error = "invalid file primary location args";
         }
         return false;
     }
@@ -1496,7 +1769,7 @@ bool MdsServiceImpl::SelectFileAnchorWithPreference(uint64_t inode_id,
         replicas.clear();
         if (!allocator_->AllocateObject(1, object_id, &replicas) || replicas.empty()) {
             if (error) {
-                *error = local_error.empty() ? "failed to allocate anchor replica" : local_error;
+                *error = local_error.empty() ? "failed to allocate file primary location" : local_error;
             }
             return false;
         }
@@ -1506,20 +1779,20 @@ bool MdsServiceImpl::SelectFileAnchorWithPreference(uint64_t inode_id,
         if (replica.node_id().empty() || replica.disk_id().empty()) {
             continue;
         }
-        *anchor = replica;
-        if (anchor->storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
-            anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+        *location = replica;
+        if (location->storage_tier() != zb::rpc::STORAGE_TIER_DISK) {
+            location->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
         }
-        anchor->set_replica_state(zb::rpc::REPLICA_READY);
-        EnsureReplicaObjectId(anchor, object_id);
-        StripReplicaAddresses(anchor);
+        location->set_replica_state(zb::rpc::REPLICA_READY);
+        EnsureReplicaObjectId(location, object_id);
+        StripReplicaAddresses(location);
         return true;
     }
 
     (void)attr;
     if (error) {
         *error = strict_type ? "no usable replica for strict placement policy"
-                             : "no usable disk replica for file anchor";
+                             : "no usable disk replica for file primary location";
     }
     return false;
 }
@@ -1627,7 +1900,7 @@ bool MdsServiceImpl::LoadDiskFileLocation(uint64_t inode_id,
     std::string local_error;
     if (!store_->GetDiskFileLocation(inode_id, &payload, &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "disk file location not found" : local_error;
+            *error = local_error;
         }
         return false;
     }
@@ -1640,16 +1913,17 @@ bool MdsServiceImpl::LoadDiskFileLocation(uint64_t inode_id,
     return true;
 }
 
-bool MdsServiceImpl::SaveDiskFileLocation(const zb::rpc::DiskFileLocation& location,
+bool MdsServiceImpl::SaveDiskFileLocation(uint64_t inode_id,
+                                          const zb::rpc::DiskFileLocation& location,
                                           rocksdb::WriteBatch* batch) const {
-    if (!batch || location.inode_id() == 0) {
+    if (!batch || inode_id == 0) {
         return false;
     }
     std::string payload = MetaCodec::EncodeDiskFileLocation(location);
     if (payload.empty()) {
         return false;
     }
-    return store_->BatchPutDiskFileLocation(batch, location.inode_id(), payload, nullptr);
+    return store_->BatchPutDiskFileLocation(batch, inode_id, payload, nullptr);
 }
 
 bool MdsServiceImpl::DeleteDiskFileLocation(uint64_t inode_id,
@@ -1677,7 +1951,7 @@ bool MdsServiceImpl::LoadOpticalFileLocation(uint64_t inode_id,
     std::string local_error;
     if (!store_->GetOpticalFileLocation(inode_id, &payload, &local_error)) {
         if (error) {
-            *error = local_error.empty() ? "optical file location not found" : local_error;
+            *error = local_error;
         }
         return false;
     }
@@ -1690,16 +1964,70 @@ bool MdsServiceImpl::LoadOpticalFileLocation(uint64_t inode_id,
     return true;
 }
 
-bool MdsServiceImpl::SaveOpticalFileLocation(const zb::rpc::OpticalFileLocation& location,
+bool MdsServiceImpl::LoadMasstreeOpticalFileLocation(uint64_t inode_id,
+                                                     zb::rpc::OpticalFileLocation* location,
+                                                     std::string* error) const {
+    if (!location || inode_id == 0) {
+        if (error) {
+            *error = "invalid masstree optical file location output";
+        }
+        return false;
+    }
+
+    std::vector<MasstreeNamespaceRoute> routes;
+    if (!masstree_namespace_catalog_.LookupByInode(inode_id, &routes, error)) {
+        return false;
+    }
+    if (routes.empty() && !masstree_namespace_catalog_.ListRoutes(&routes, error)) {
+        return false;
+    }
+    for (const auto& route : routes) {
+        if (route.inode_min != 0 && inode_id < route.inode_min) {
+            continue;
+        }
+        if (route.inode_max != 0 && inode_id > route.inode_max) {
+            continue;
+        }
+        zb::rpc::OpticalFileLocation candidate;
+        std::string local_error;
+        if (masstree_meta_store_.GetOpticalFileLocation(route, inode_id, &candidate, &local_error)) {
+            if (!candidate.node_id().empty()) {
+                std::string node_address;
+                std::string resolve_error;
+                if (ResolveNodeAddress(candidate.node_id(), &node_address, &resolve_error) && !node_address.empty()) {
+                    candidate.set_node_address(node_address);
+                }
+            }
+            *location = std::move(candidate);
+            if (error) {
+                error->clear();
+            }
+            return true;
+        }
+        if (!local_error.empty()) {
+            if (error) {
+                *error = local_error;
+            }
+            return false;
+        }
+    }
+    if (error) {
+        error->clear();
+    }
+    return false;
+}
+
+bool MdsServiceImpl::SaveOpticalFileLocation(uint64_t inode_id,
+                                             const zb::rpc::OpticalFileLocation& location,
                                              rocksdb::WriteBatch* batch) const {
-    if (!batch || location.inode_id() == 0) {
+    if (!batch || inode_id == 0) {
         return false;
     }
     std::string payload = MetaCodec::EncodeOpticalFileLocation(location);
     if (payload.empty()) {
         return false;
     }
-    return store_->BatchPutOpticalFileLocation(batch, location.inode_id(), payload, nullptr);
+    return store_->BatchPutOpticalFileLocation(batch, inode_id, payload, nullptr);
 }
 
 bool MdsServiceImpl::DeleteOpticalFileLocation(uint64_t inode_id,
@@ -1714,52 +2042,50 @@ bool MdsServiceImpl::DeleteOpticalFileLocation(uint64_t inode_id,
     return store_->BatchDeleteOpticalFileLocation(batch, inode_id, error);
 }
 
-zb::rpc::FileAnchorSet MdsServiceImpl::BuildCompatFileAnchorSet(const zb::rpc::DiskFileLocation* disk,
-                                                                const zb::rpc::OpticalFileLocation* optical) {
-    zb::rpc::FileAnchorSet anchors;
-    anchors.set_version(1);
-    uint32_t mask = 0;
-    if (disk && !disk->node_id().empty() && !disk->disk_id().empty()) {
-        *anchors.mutable_disk_anchor() = ToDiskAnchor(*disk);
-        mask |= kAnchorMaskDisk;
-    }
-    if (optical && !optical->node_id().empty() && !optical->disk_id().empty()) {
-        *anchors.mutable_optical_anchor() = ToOpticalAnchor(*optical);
-        mask |= kAnchorMaskOptical;
-    }
-    anchors.set_anchor_mask(mask);
-    anchors.set_primary_tier((mask & kAnchorMaskDisk) != 0U ? zb::rpc::STORAGE_TIER_DISK
-                                                            : zb::rpc::STORAGE_TIER_OPTICAL);
-    return anchors;
-}
-
-bool MdsServiceImpl::BuildCompatFileAnchorSet(uint64_t inode_id,
-                                              const zb::rpc::InodeAttr& attr,
-                                              zb::rpc::FileAnchorSet* anchors,
-                                              std::string* error) const {
-    if (!anchors || inode_id == 0) {
+bool MdsServiceImpl::BuildFileLocationView(uint64_t inode_id,
+                                           const zb::rpc::InodeAttr& attr,
+                                           zb::rpc::FileLocationView* view,
+                                           std::string* error) const {
+    if (!view || inode_id == 0) {
         if (error) {
-            *error = "invalid compat file anchor args";
+            *error = "invalid file location view args";
         }
         return false;
     }
+    view->Clear();
+    *view->mutable_attr() = attr;
     zb::rpc::DiskFileLocation disk;
     zb::rpc::OpticalFileLocation optical;
-    zb::rpc::DiskFileLocation* disk_ptr = nullptr;
-    zb::rpc::OpticalFileLocation* optical_ptr = nullptr;
-    if (ReplicaFlagHasDisk(attr.replica_flag())) {
-        if (!LoadDiskFileLocation(inode_id, &disk, error)) {
+    std::string disk_error;
+    const bool has_disk = LoadDiskFileLocation(inode_id, &disk, &disk_error);
+    if (has_disk) {
+        *view->mutable_disk_location() = disk;
+    } else if (!IsLocationMetadataMissing(disk_error)) {
+        if (error) {
+            *error = disk_error;
+        }
+        return false;
+    }
+    std::string optical_error;
+    const bool has_optical = LoadOpticalFileLocation(inode_id, &optical, &optical_error);
+    if (has_optical) {
+        *view->mutable_optical_location() = optical;
+    } else if (!IsLocationMetadataMissing(optical_error)) {
+        if (error) {
+            *error = optical_error;
+        }
+        return false;
+    } else {
+        std::string masstree_optical_error;
+        if (LoadMasstreeOpticalFileLocation(inode_id, &optical, &masstree_optical_error)) {
+            *view->mutable_optical_location() = optical;
+        } else if (!masstree_optical_error.empty()) {
+            if (error) {
+                *error = masstree_optical_error;
+            }
             return false;
         }
-        disk_ptr = &disk;
     }
-    if (ReplicaFlagHasOptical(attr.replica_flag())) {
-        if (!LoadOpticalFileLocation(inode_id, &optical, error)) {
-            return false;
-        }
-        optical_ptr = &optical;
-    }
-    *anchors = BuildCompatFileAnchorSet(disk_ptr, optical_ptr);
     return true;
 }
 
@@ -1773,21 +2099,40 @@ bool MdsServiceImpl::LoadFilePrimaryLocation(uint64_t inode_id,
         }
         return false;
     }
-    if (ReplicaFlagHasDisk(attr.replica_flag())) {
-        zb::rpc::DiskFileLocation disk;
-        if (!LoadDiskFileLocation(inode_id, &disk, error)) {
-            return false;
-        }
-        *anchor = ToReplicaLocation(disk);
+    zb::rpc::DiskFileLocation disk;
+    std::string disk_error;
+    if (LoadDiskFileLocation(inode_id, &disk, &disk_error)) {
+        *anchor = ToReplicaLocation(inode_id, attr.size(), disk);
         return true;
     }
-    if (ReplicaFlagHasOptical(attr.replica_flag())) {
-        zb::rpc::OpticalFileLocation optical;
-        if (!LoadOpticalFileLocation(inode_id, &optical, error)) {
-            return false;
+    if (!IsLocationMetadataMissing(disk_error)) {
+        if (error) {
+            *error = disk_error;
         }
-        *anchor = ToReplicaLocation(optical);
+        return false;
+    }
+    zb::rpc::OpticalFileLocation optical;
+    std::string optical_error;
+    if (LoadOpticalFileLocation(inode_id, &optical, &optical_error)) {
+        *anchor = ToReplicaLocation(inode_id, attr.size(), optical);
         return true;
+    }
+    if (!IsLocationMetadataMissing(optical_error)) {
+        if (error) {
+            *error = optical_error;
+        }
+        return false;
+    }
+    std::string masstree_optical_error;
+    if (LoadMasstreeOpticalFileLocation(inode_id, &optical, &masstree_optical_error)) {
+        *anchor = ToReplicaLocation(inode_id, attr.size(), optical);
+        return true;
+    }
+    if (!masstree_optical_error.empty()) {
+        if (error) {
+            *error = masstree_optical_error;
+        }
+        return false;
     }
     if (error) {
         *error = "file has no usable replica location";
@@ -1875,6 +2220,131 @@ bool MdsServiceImpl::DeleteFileMetaOnAnchor(const zb::rpc::ReplicaLocation& anch
     }
     if (error) {
         *error = resp.status().message();
+    }
+    return false;
+}
+
+bool MdsServiceImpl::ResolveMasstreeRoute(const std::string& namespace_id,
+                                          const std::string& path_prefix,
+                                          MasstreeNamespaceRoute* route,
+                                          std::string* error) const {
+    if (!route) {
+        if (error) {
+            *error = "masstree route output is null";
+        }
+        return false;
+    }
+    *route = MasstreeNamespaceRoute();
+    if (!path_prefix.empty()) {
+        return masstree_namespace_catalog_.LookupByPath(path_prefix, route, error);
+    }
+
+    std::vector<MasstreeNamespaceRoute> routes;
+    if (!masstree_namespace_catalog_.ListRoutes(&routes, error)) {
+        return false;
+    }
+    for (const auto& candidate : routes) {
+        if (candidate.namespace_id == namespace_id) {
+            *route = candidate;
+            if (error) {
+                error->clear();
+            }
+            return true;
+        }
+    }
+    if (error) {
+        error->clear();
+    }
+    return false;
+}
+
+bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
+                                            uint64_t* inode_id,
+                                            zb::rpc::InodeAttr* attr,
+                                            std::string* error) const {
+    if (!inode_id || !attr) {
+        if (error) {
+            *error = "masstree random file outputs are null";
+        }
+        return false;
+    }
+
+    MasstreeNamespaceManifest manifest;
+    if (route.manifest_path.empty() ||
+        !MasstreeNamespaceManifest::LoadFromFile(route.manifest_path, &manifest, error)) {
+        return false;
+    }
+    if (manifest.file_count == 0) {
+        if (error) {
+            *error = "masstree namespace has no files";
+        }
+        return false;
+    }
+
+    const uint64_t first_file_inode =
+        manifest.inode_min + 1ULL + manifest.level1_dir_count + manifest.leaf_dir_count;
+    if (first_file_inode == 0 || first_file_inode > manifest.inode_max) {
+        if (error) {
+            *error = "invalid masstree file inode range";
+        }
+        return false;
+    }
+
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    const uint64_t last_file_inode = first_file_inode + manifest.file_count - 1ULL;
+    std::uniform_int_distribution<uint64_t> dist(first_file_inode, last_file_inode);
+
+    const size_t attempts =
+        static_cast<size_t>(std::min<uint64_t>(manifest.file_count, 16ULL));
+    for (size_t i = 0; i < attempts; ++i) {
+        const uint64_t candidate_inode = dist(rng);
+        zb::rpc::InodeAttr candidate_attr;
+        std::string local_error;
+        if (!masstree_meta_store_.GetInode(route, candidate_inode, &candidate_attr, &local_error)) {
+            if (!local_error.empty()) {
+                if (error) {
+                    *error = local_error;
+                }
+                return false;
+            }
+            continue;
+        }
+        if (candidate_attr.type() != zb::rpc::INODE_FILE) {
+            continue;
+        }
+        *inode_id = candidate_inode;
+        *attr = std::move(candidate_attr);
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    for (uint64_t candidate_inode = first_file_inode; candidate_inode <= last_file_inode; ++candidate_inode) {
+        zb::rpc::InodeAttr candidate_attr;
+        std::string local_error;
+        if (!masstree_meta_store_.GetInode(route, candidate_inode, &candidate_attr, &local_error)) {
+            if (!local_error.empty()) {
+                if (error) {
+                    *error = local_error;
+                }
+                return false;
+            }
+            continue;
+        }
+        if (candidate_attr.type() != zb::rpc::INODE_FILE) {
+            continue;
+        }
+        *inode_id = candidate_inode;
+        *attr = std::move(candidate_attr);
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    if (error) {
+        error->clear();
     }
     return false;
 }

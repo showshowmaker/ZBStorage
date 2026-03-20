@@ -33,7 +33,6 @@ public:
 private:
     bool LoadOrInitRecordLocked(const std::string& lease_key,
                                 uint64_t inode_id,
-                                const std::string& object_id,
                                 zb::rpc::ArchiveLeaseRecord* record,
                                 std::string* error) const;
     bool PersistRecordLocked(const zb::rpc::ArchiveLeaseRecord& record, std::string* error) const;

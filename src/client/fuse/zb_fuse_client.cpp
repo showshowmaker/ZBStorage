@@ -18,6 +18,8 @@
 #include <mutex>
 #include <limits>
 #include <string>
+#include <sstream>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -34,6 +36,9 @@ DEFINE_uint32(default_replica, 1, "Default replica for create");
 DEFINE_uint64(default_object_unit_size, 4194304, "Default object unit size for create");
 DEFINE_int32(timeout_ms, 3000, "RPC timeout in ms");
 DEFINE_int32(max_retry, 0, "RPC max retry");
+DEFINE_bool(bootstrap_tier_dirs, true, "Create and configure tier-specific subdirectories on mount");
+DEFINE_string(real_dir_name, "real", "Top-level directory for real-node backed POSIX files");
+DEFINE_string(virtual_dir_name, "virtual", "Top-level directory for virtual-node backed POSIX files");
 
 namespace zb::client::fuse_client {
 
@@ -41,9 +46,12 @@ namespace {
 
 constexpr const char* kReadOnlyOpticalMessage = "READ_ONLY_OPTICAL";
 constexpr const char* kNoSpaceRealPolicyMessage = "NO_SPACE_REAL_POLICY";
+constexpr const char* kNoSpaceVirtualPolicyMessage = "NO_SPACE_VIRTUAL_POLICY";
+constexpr const char* kCrossTierRenameMessage = "CROSS_TIER_RENAME";
 
 int StatusToErrno(const zb::rpc::MdsStatus& status) {
-    if (status.message() == kNoSpaceRealPolicyMessage) {
+    if (status.message() == kNoSpaceRealPolicyMessage ||
+        status.message() == kNoSpaceVirtualPolicyMessage) {
         return ENOSPC;
     }
     switch (status.code()) {
@@ -52,6 +60,9 @@ int StatusToErrno(const zb::rpc::MdsStatus& status) {
         case zb::rpc::MDS_INVALID_ARGUMENT:
             if (status.message() == kReadOnlyOpticalMessage) {
                 return EROFS;
+            }
+            if (status.message() == kCrossTierRenameMessage) {
+                return EXDEV;
             }
             return EINVAL;
         case zb::rpc::MDS_NOT_FOUND:
@@ -65,6 +76,44 @@ int StatusToErrno(const zb::rpc::MdsStatus& status) {
         default:
             return EIO;
     }
+}
+
+bool NormalizeMountPath(const std::string& path, std::string* normalized) {
+    if (!normalized || path.empty()) {
+        return false;
+    }
+    std::string out = path;
+    std::replace(out.begin(), out.end(), '\\', '/');
+    if (out.empty() || out.front() != '/') {
+        out.insert(out.begin(), '/');
+    }
+    std::string collapsed;
+    collapsed.reserve(out.size());
+    bool prev_slash = false;
+    for (char ch : out) {
+        if (ch == '/') {
+            if (prev_slash) {
+                continue;
+            }
+            prev_slash = true;
+        } else {
+            prev_slash = false;
+        }
+        collapsed.push_back(ch);
+    }
+    while (collapsed.size() > 1 && collapsed.back() == '/') {
+        collapsed.pop_back();
+    }
+    *normalized = collapsed.empty() ? "/" : collapsed;
+    return true;
+}
+
+bool IsValidTierDirName(const std::string& name) {
+    return !name.empty() && name.find('/') == std::string::npos && name.find('\\') == std::string::npos;
+}
+
+std::string BuildTierRootPath(const std::string& dir_name) {
+    return "/" + dir_name;
 }
 
 int StatusToErrno(const zb::rpc::Status& status) {
@@ -108,8 +157,7 @@ std::string ReplicaObjectId(const zb::rpc::ReplicaLocation& replica) {
     return replica.object_id();
 }
 
-constexpr uint32_t kAnchorMaskDisk = 1U << 0U;
-constexpr uint32_t kAnchorMaskOptical = 1U << 1U;
+std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index);
 
 bool IsWriteOpenFlags(uint32_t flags) {
     const int access_mode = static_cast<int>(flags) & O_ACCMODE;
@@ -129,78 +177,57 @@ bool IsWriteOpenFlags(uint32_t flags) {
     return false;
 }
 
-bool HasOpticalAnchor(const zb::rpc::FileAnchorSet& anchors) {
-    const bool mask_has_optical = (anchors.anchor_mask() & kAnchorMaskOptical) != 0U;
-    const auto& optical = anchors.optical_anchor();
-    const bool lite_has_optical = !optical.node_id().empty() && !optical.disk_id().empty();
-    return mask_has_optical || lite_has_optical;
-}
-
-zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::DiskFileAnchor& lite) {
+zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::FileLocationView& view,
+                                           const zb::rpc::DiskFileLocation& location) {
     zb::rpc::ReplicaLocation replica;
-    replica.set_node_id(lite.node_id());
-    replica.set_disk_id(lite.disk_id());
-    replica.set_object_id(lite.object_id());
-    replica.set_size(lite.size());
+    replica.set_node_id(location.node_id());
+    replica.set_node_address(location.node_address());
+    replica.set_disk_id(location.disk_id());
+    replica.set_object_id(BuildStableObjectId(view.attr().inode_id(), 0));
+    replica.set_size(view.attr().size());
     replica.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
-    replica.set_replica_state(lite.replica_state());
+    replica.set_replica_state(zb::rpc::REPLICA_READY);
     return replica;
 }
 
-zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::OpticalFileAnchor& lite) {
+zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::FileLocationView& view,
+                                           const zb::rpc::OpticalFileLocation& location) {
     zb::rpc::ReplicaLocation replica;
-    replica.set_node_id(lite.node_id());
-    replica.set_disk_id(lite.disk_id());
-    replica.set_object_id(lite.object_id());
-    replica.set_size(lite.size());
+    replica.set_node_id(location.node_id());
+    replica.set_node_address(location.node_address());
+    replica.set_disk_id(location.disk_id());
+    replica.set_object_id(location.file_id().empty() ? BuildStableObjectId(view.attr().inode_id(), 0)
+                                                     : location.file_id());
+    replica.set_size(view.attr().size());
     replica.set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
-    replica.set_replica_state(lite.replica_state());
-    replica.set_image_id(lite.image_id());
-    replica.set_image_offset(lite.image_offset());
-    replica.set_image_length(lite.image_length());
+    replica.set_replica_state(zb::rpc::REPLICA_READY);
+    replica.set_image_id(location.image_id());
     return replica;
 }
 
-bool SelectAnchorForIo(const zb::rpc::FileAnchorSet& anchors, zb::rpc::ReplicaLocation* anchor) {
+bool HasOpticalLocation(const zb::rpc::FileLocationView& view) {
+    return !view.optical_location().node_id().empty() &&
+           !view.optical_location().disk_id().empty();
+}
+
+bool IsArchivedReadOnly(const zb::rpc::FileLocationView& view) {
+    return view.attr().file_archive_state() == zb::rpc::INODE_ARCHIVE_ARCHIVED;
+}
+
+bool SelectLocationForIo(const zb::rpc::FileLocationView& view, zb::rpc::ReplicaLocation* anchor) {
     if (!anchor) {
         return false;
     }
-
-    const bool disk_usable =
-        !anchors.disk_anchor().node_id().empty() && !anchors.disk_anchor().disk_id().empty();
-    const bool optical_usable =
-        !anchors.optical_anchor().node_id().empty() && !anchors.optical_anchor().disk_id().empty();
-
     const bool has_disk =
-        ((anchors.anchor_mask() & kAnchorMaskDisk) != 0U && disk_usable) || disk_usable;
+        !view.disk_location().node_id().empty() && !view.disk_location().disk_id().empty();
     const bool has_optical =
-        ((anchors.anchor_mask() & kAnchorMaskOptical) != 0U && optical_usable) || optical_usable;
-
+        !view.optical_location().node_id().empty() && !view.optical_location().disk_id().empty();
     if (has_disk) {
-        *anchor = ToReplicaLocation(anchors.disk_anchor());
-        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
-        if (anchor->replica_state() == zb::rpc::REPLICA_PENDING ||
-            anchor->replica_state() == zb::rpc::REPLICA_DEGRADED) {
-            anchor->set_replica_state(zb::rpc::REPLICA_READY);
-        }
-        return true;
-    }
-    if (anchors.primary_tier() == zb::rpc::STORAGE_TIER_OPTICAL && has_optical) {
-        *anchor = ToReplicaLocation(anchors.optical_anchor());
-        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
-        if (anchor->replica_state() == zb::rpc::REPLICA_PENDING ||
-            anchor->replica_state() == zb::rpc::REPLICA_DEGRADED) {
-            anchor->set_replica_state(zb::rpc::REPLICA_READY);
-        }
+        *anchor = ToReplicaLocation(view, view.disk_location());
         return true;
     }
     if (has_optical) {
-        *anchor = ToReplicaLocation(anchors.optical_anchor());
-        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
-        if (anchor->replica_state() == zb::rpc::REPLICA_PENDING ||
-            anchor->replica_state() == zb::rpc::REPLICA_DEGRADED) {
-            anchor->set_replica_state(zb::rpc::REPLICA_READY);
-        }
+        *anchor = ToReplicaLocation(view, view.optical_location());
         return true;
     }
     return false;
@@ -339,8 +366,8 @@ public:
     bool Open(const char* path,
               uint32_t flags,
               uint64_t* handle,
-              zb::rpc::InodeAttr* attr,
-              zb::rpc::ReplicaLocation* file_anchor,
+              zb::rpc::FileLocationView* location,
+              zb::rpc::ReplicaLocation* selected_location,
               zb::rpc::MdsStatus* status) {
         zb::rpc::OpenRequest request;
         request.set_path(path);
@@ -364,14 +391,14 @@ public:
         if (handle) {
             *handle = reply.handle_id();
         }
-        if (attr) {
-            *attr = reply.attr();
+        if (location) {
+            *location = reply.location();
         }
-        if (file_anchor) {
-            if (!SelectAnchorForIo(reply.file_anchor(), file_anchor)) {
+        if (selected_location) {
+            if (!SelectLocationForIo(reply.location(), selected_location)) {
                 if (status) {
                     status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
-                    status->set_message("Open returned empty file_anchor set");
+                    status->set_message("Open returned empty file location");
                 }
                 return false;
             }
@@ -402,8 +429,8 @@ public:
                 uint32_t mode,
                 uint32_t uid,
                 uint32_t gid,
-                zb::rpc::InodeAttr* attr,
-                zb::rpc::ReplicaLocation* file_anchor,
+                zb::rpc::FileLocationView* location,
+                zb::rpc::ReplicaLocation* selected_location,
                 zb::rpc::MdsStatus* status) {
         zb::rpc::CreateRequest request;
         request.set_path(path);
@@ -428,14 +455,14 @@ public:
         if (reply.status().code() != zb::rpc::MDS_OK) {
             return false;
         }
-        if (attr) {
-            *attr = reply.attr();
+        if (location) {
+            *location = reply.location();
         }
-        if (file_anchor) {
-            if (!SelectAnchorForIo(reply.file_anchor(), file_anchor)) {
+        if (selected_location) {
+            if (!SelectLocationForIo(reply.location(), selected_location)) {
                 if (status) {
                     status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
-                    status->set_message("Create returned empty file_anchor set");
+                    status->set_message("Create returned empty file location");
                 }
                 return false;
             }
@@ -555,14 +582,14 @@ public:
         return reply.status().code() == zb::rpc::MDS_OK;
     }
 
-    bool GetFileAnchorSet(uint64_t inode_id,
-                          zb::rpc::FileAnchorSet* anchor_set,
+    bool GetFileLocationView(uint64_t inode_id,
+                          zb::rpc::FileLocationView* location,
                           zb::rpc::MdsStatus* status) {
-        zb::rpc::GetFileAnchorRequest request;
+        zb::rpc::GetFileLocationRequest request;
         request.set_inode_id(inode_id);
-        zb::rpc::GetFileAnchorReply reply;
+        zb::rpc::GetFileLocationReply reply;
         brpc::Controller cntl;
-        stub_.GetFileAnchor(&cntl, &request, &reply, nullptr);
+        stub_.GetFileLocation(&cntl, &request, &reply, nullptr);
         if (cntl.Failed()) {
             SetRpcFailureStatus(cntl, status);
             return false;
@@ -573,24 +600,24 @@ public:
         if (reply.status().code() != zb::rpc::MDS_OK) {
             return false;
         }
-        if (anchor_set) {
-            *anchor_set = reply.anchor();
+        if (location) {
+            *location = reply.location();
         }
         return true;
     }
 
-    bool GetFileAnchor(uint64_t inode_id,
+    bool GetFileLocation(uint64_t inode_id,
                        zb::rpc::ReplicaLocation* anchor,
                        zb::rpc::MdsStatus* status) {
-        zb::rpc::FileAnchorSet anchor_set;
-        if (!GetFileAnchorSet(inode_id, &anchor_set, status)) {
+        zb::rpc::FileLocationView location;
+        if (!GetFileLocationView(inode_id, &location, status)) {
             return false;
         }
         if (anchor) {
-            if (!SelectAnchorForIo(anchor_set, anchor)) {
+            if (!SelectLocationForIo(location, anchor)) {
                 if (status) {
                     status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
-                    status->set_message("GetFileAnchor returned empty anchor set");
+                    status->set_message("GetFileLocation returned empty location");
                 }
                 return false;
             }
@@ -628,6 +655,27 @@ public:
             *attr = reply.attr();
         }
         return true;
+    }
+
+    bool SetPathPlacementPolicy(const std::string& path_prefix,
+                                zb::rpc::PathPlacementTarget target,
+                                bool strict,
+                                zb::rpc::MdsStatus* status) {
+        zb::rpc::SetPathPlacementPolicyRequest request;
+        request.mutable_policy()->set_path_prefix(path_prefix);
+        request.mutable_policy()->set_target(target);
+        request.mutable_policy()->set_strict(strict);
+        zb::rpc::SetPathPlacementPolicyReply reply;
+        brpc::Controller cntl;
+        stub_.SetPathPlacementPolicy(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            SetRpcFailureStatus(cntl, status);
+            return false;
+        }
+        if (status) {
+            *status = reply.status();
+        }
+        return reply.status().code() == zb::rpc::MDS_OK;
     }
 
 private:
@@ -1099,6 +1147,98 @@ bool RefreshNodeAddressCache(FuseState* state, bool force, std::string* error) {
     return true;
 }
 
+bool EnsureBootstrapDirectory(FuseState* state, const std::string& path, std::string* error) {
+    if (!state) {
+        if (error) {
+            *error = "invalid fuse state";
+        }
+        return false;
+    }
+    zb::rpc::InodeAttr attr;
+    zb::rpc::MdsStatus status;
+    if (state->mds.Lookup(path.c_str(), &attr, &status)) {
+        if (attr.type() != zb::rpc::INODE_DIR) {
+            if (error) {
+                *error = "bootstrap path exists and is not a directory: " + path;
+            }
+            return false;
+        }
+        return true;
+    }
+    if (status.code() != zb::rpc::MDS_NOT_FOUND) {
+        if (error) {
+            *error = status.message().empty() ? "Lookup failed for " + path : status.message();
+        }
+        return false;
+    }
+    if (!state->mds.Mkdir(path.c_str(),
+                          0755,
+                          static_cast<uint32_t>(::getuid()),
+                          static_cast<uint32_t>(::getgid()),
+                          &attr,
+                          &status)) {
+        if (status.code() == zb::rpc::MDS_ALREADY_EXISTS) {
+            return true;
+        }
+        if (error) {
+            *error = status.message().empty() ? "Mkdir failed for " + path : status.message();
+        }
+        return false;
+    }
+    return true;
+}
+
+bool EnsureTierBootstrap(FuseState* state, std::string* error) {
+    if (!state) {
+        if (error) {
+            *error = "invalid fuse state";
+        }
+        return false;
+    }
+    if (!IsValidTierDirName(FLAGS_real_dir_name) || !IsValidTierDirName(FLAGS_virtual_dir_name)) {
+        if (error) {
+            *error = "tier directory names must be non-empty and cannot contain path separators";
+        }
+        return false;
+    }
+    if (FLAGS_real_dir_name == FLAGS_virtual_dir_name) {
+        if (error) {
+            *error = "real_dir_name and virtual_dir_name must be different";
+        }
+        return false;
+    }
+
+    const std::string real_path = BuildTierRootPath(FLAGS_real_dir_name);
+    const std::string virtual_path = BuildTierRootPath(FLAGS_virtual_dir_name);
+    if (!EnsureBootstrapDirectory(state, real_path, error)) {
+        return false;
+    }
+    if (!EnsureBootstrapDirectory(state, virtual_path, error)) {
+        return false;
+    }
+
+    zb::rpc::MdsStatus status;
+    if (!state->mds.SetPathPlacementPolicy(real_path,
+                                           zb::rpc::PATH_PLACEMENT_REAL_ONLY,
+                                           true,
+                                           &status)) {
+        if (error) {
+            *error = status.message().empty() ? "failed to configure real tier policy" : status.message();
+        }
+        return false;
+    }
+    if (!state->mds.SetPathPlacementPolicy(virtual_path,
+                                           zb::rpc::PATH_PLACEMENT_VIRTUAL_ONLY,
+                                           true,
+                                           &status)) {
+        if (error) {
+            *error = status.message().empty() ? "failed to configure virtual tier policy" : status.message();
+        }
+        return false;
+    }
+    return true;
+}
+
 bool ResolveNodeAddress(FuseState* state, const std::string& node_id, std::string* address) {
     if (!state || node_id.empty() || !address) {
         return false;
@@ -1262,7 +1402,7 @@ bool GetOrFetchAnchor(FuseState* state,
     if (TryGetCachedAnchor(state, inode_id, anchor)) {
         return true;
     }
-    if (!state->mds.GetFileAnchor(inode_id, anchor, status)) {
+    if (!state->mds.GetFileLocation(inode_id, anchor, status)) {
         return false;
     }
     if (anchor->node_id().empty() || anchor->disk_id().empty()) {
@@ -1469,13 +1609,14 @@ int FuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offse
 
 int FuseOpen(const char* path, struct fuse_file_info* fi) {
     auto* state = GetState();
-    zb::rpc::InodeAttr attr;
+    zb::rpc::FileLocationView location;
     zb::rpc::ReplicaLocation open_anchor;
     zb::rpc::MdsStatus status;
     uint64_t handle_id = 0;
-    if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &attr, &open_anchor, &status)) {
+    if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &location, &open_anchor, &status)) {
         return -StatusToErrno(status);
     }
+    const zb::rpc::InodeAttr& attr = location.attr();
     {
         std::lock_guard<std::mutex> lock(state->mu);
         state->handle_to_inode[handle_id] = attr.inode_id();
@@ -1541,17 +1682,19 @@ int FuseRelease(const char* path, struct fuse_file_info* fi) {
 int FuseCreate(const char* path, mode_t mode, struct fuse_file_info* fi) {
     auto* state = GetState();
     struct fuse_context* ctx = fuse_get_context();
-    zb::rpc::InodeAttr attr;
+    zb::rpc::FileLocationView create_location;
     zb::rpc::ReplicaLocation create_anchor;
     zb::rpc::MdsStatus status;
-    if (!state->mds.Create(path, static_cast<uint32_t>(mode), ctx->uid, ctx->gid, &attr, &create_anchor, &status)) {
+    if (!state->mds.Create(path, static_cast<uint32_t>(mode), ctx->uid, ctx->gid, &create_location, &create_anchor, &status)) {
         return -StatusToErrno(status);
     }
     uint64_t handle_id = 0;
+    zb::rpc::FileLocationView open_location;
     zb::rpc::ReplicaLocation open_anchor;
-    if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &attr, &open_anchor, &status)) {
+    if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &open_location, &open_anchor, &status)) {
         return -StatusToErrno(status);
     }
+    const zb::rpc::InodeAttr& attr = open_location.attr();
     {
         std::lock_guard<std::mutex> lock(state->mu);
         state->handle_to_inode[handle_id] = attr.inode_id();
@@ -1671,14 +1814,14 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
         return -StatusToErrno(status);
     }
     const uint64_t request_offset = static_cast<uint64_t>(offset);
-    zb::rpc::FileAnchorSet anchor_set;
-    if (!state->mds.GetFileAnchorSet(inode_id, &anchor_set, &status)) {
+    zb::rpc::FileLocationView location;
+    if (!state->mds.GetFileLocationView(inode_id, &location, &status)) {
         return -StatusToErrno(status);
     }
     zb::rpc::ReplicaLocation anchor;
-    if (!SelectAnchorForIo(anchor_set, &anchor)) {
+    if (!SelectLocationForIo(location, &anchor)) {
         status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
-        status.set_message("GetFileAnchor returned empty anchor set");
+        status.set_message("GetFileLocation returned empty location");
         return -StatusToErrno(status);
     }
     UpdateInodeAnchorCache(state, inode_id, anchor);
@@ -1803,17 +1946,17 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
         return -StatusToErrno(status);
     }
 
-    zb::rpc::FileAnchorSet anchor_set;
-    if (!state->mds.GetFileAnchorSet(inode_id, &anchor_set, &status)) {
+    zb::rpc::FileLocationView location;
+    if (!state->mds.GetFileLocationView(inode_id, &location, &status)) {
         return -StatusToErrno(status);
     }
-    if (HasOpticalAnchor(anchor_set)) {
+    if (IsArchivedReadOnly(location)) {
         return -EROFS;
     }
     zb::rpc::ReplicaLocation anchor;
-    if (!SelectAnchorForIo(anchor_set, &anchor)) {
+    if (!SelectLocationForIo(location, &anchor)) {
         status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
-        status.set_message("GetFileAnchor returned empty anchor set");
+        status.set_message("GetFileLocation returned empty location");
         return -StatusToErrno(status);
     }
     UpdateInodeAnchorCache(state, inode_id, anchor);
@@ -1914,17 +2057,17 @@ int FuseTruncate(const char* path, off_t size, struct fuse_file_info* fi) {
     if (inode_id == 0) {
         return -StatusToErrno(status);
     }
-    zb::rpc::FileAnchorSet anchor_set;
-    if (!state->mds.GetFileAnchorSet(inode_id, &anchor_set, &status)) {
+    zb::rpc::FileLocationView location;
+    if (!state->mds.GetFileLocationView(inode_id, &location, &status)) {
         return -StatusToErrno(status);
     }
-    if (HasOpticalAnchor(anchor_set)) {
+    if (IsArchivedReadOnly(location)) {
         return -EROFS;
     }
     zb::rpc::ReplicaLocation anchor;
-    if (!SelectAnchorForIo(anchor_set, &anchor)) {
+    if (!SelectLocationForIo(location, &anchor)) {
         status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
-        status.set_message("GetFileAnchor returned empty anchor set");
+        status.set_message("GetFileLocation returned empty location");
         return -StatusToErrno(status);
     }
     UpdateInodeAnchorCache(state, inode_id, anchor);
@@ -1992,6 +2135,13 @@ int main(int argc, char* argv[]) {
         [&state](const std::string& node_id, std::string* address) {
             return zb::client::fuse_client::ResolveNodeAddress(&state, node_id, address);
         });
+    if (FLAGS_bootstrap_tier_dirs) {
+        std::string bootstrap_error;
+        if (!zb::client::fuse_client::EnsureTierBootstrap(&state, &bootstrap_error)) {
+            std::fprintf(stderr, "Failed to bootstrap tier directories: %s\n", bootstrap_error.c_str());
+            return 1;
+        }
+    }
 
     static struct fuse_operations ops = {};
     ops.getattr = zb::client::fuse_client::FuseGetattr;

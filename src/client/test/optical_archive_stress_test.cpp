@@ -248,17 +248,17 @@ public:
             return false;
         }
         if (inode_id) {
-            *inode_id = resp.attr().inode_id();
+            *inode_id = resp.location().attr().inode_id();
         }
         return true;
     }
 
-    bool GetFileAnchor(uint64_t inode_id, zb::rpc::ReplicaLocation* anchor, std::string* err) {
-        zb::rpc::GetFileAnchorRequest req;
+    bool GetFileLocation(uint64_t inode_id, zb::rpc::ReplicaLocation* anchor, std::string* err) {
+        zb::rpc::GetFileLocationRequest req;
         req.set_inode_id(inode_id);
-        zb::rpc::GetFileAnchorReply resp;
+        zb::rpc::GetFileLocationReply resp;
         brpc::Controller cntl;
-        stub_.GetFileAnchor(&cntl, &req, &resp, nullptr);
+        stub_.GetFileLocation(&cntl, &req, &resp, nullptr);
         if (cntl.Failed()) {
             if (err) {
                 *err = cntl.ErrorText();
@@ -272,22 +272,25 @@ public:
             return false;
         }
         if (anchor) {
-            const auto& set = resp.anchor();
-            if (!set.disk_anchor().node_id().empty() && !set.disk_anchor().disk_id().empty()) {
-                anchor->set_node_id(set.disk_anchor().node_id());
-                anchor->set_disk_id(set.disk_anchor().disk_id());
-                anchor->set_object_id(set.disk_anchor().object_id());
+            const auto& view = resp.location();
+            if (!view.disk_location().node_id().empty() && !view.disk_location().disk_id().empty()) {
+                anchor->set_node_id(view.disk_location().node_id());
+                anchor->set_node_address(view.disk_location().node_address());
+                anchor->set_disk_id(view.disk_location().disk_id());
+                anchor->set_object_id("obj-" + std::to_string(view.attr().inode_id()) + "-0");
                 anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
-                anchor->set_replica_state(set.disk_anchor().replica_state());
-            } else if (!set.optical_anchor().node_id().empty() && !set.optical_anchor().disk_id().empty()) {
-                anchor->set_node_id(set.optical_anchor().node_id());
-                anchor->set_disk_id(set.optical_anchor().disk_id());
-                anchor->set_object_id(set.optical_anchor().object_id());
+                anchor->set_replica_state(zb::rpc::REPLICA_READY);
+            } else if (!view.optical_location().node_id().empty() && !view.optical_location().disk_id().empty()) {
+                anchor->set_node_id(view.optical_location().node_id());
+                anchor->set_node_address(view.optical_location().node_address());
+                anchor->set_disk_id(view.optical_location().disk_id());
+                anchor->set_object_id(view.optical_location().file_id());
                 anchor->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
-                anchor->set_replica_state(set.optical_anchor().replica_state());
+                anchor->set_replica_state(zb::rpc::REPLICA_READY);
+                anchor->set_image_id(view.optical_location().image_id());
             } else {
                 if (err) {
-                    *err = "GetFileAnchor returned empty anchor set";
+                    *err = "GetFileLocation returned empty location";
                 }
                 return false;
             }
@@ -724,8 +727,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "Create failed: " << state.path << " err=" << err << std::endl;
             return 1;
         }
-        if (!mds.GetFileAnchor(state.inode_id, &state.anchor, &err)) {
-            std::cerr << "GetFileAnchor failed: " << state.path << " err=" << err << std::endl;
+        if (!mds.GetFileLocation(state.inode_id, &state.anchor, &err)) {
+            std::cerr << "GetFileLocation failed: " << state.path << " err=" << err << std::endl;
             return 1;
         }
         files.push_back(std::move(state));

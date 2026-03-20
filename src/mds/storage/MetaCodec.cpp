@@ -198,19 +198,6 @@ bool MetaCodec::DecodeInodeAttr(const std::string& data, zb::rpc::InodeAttr* att
     return attr->ParseFromString(data);
 }
 
-std::string MetaCodec::EncodeObjectMeta(const zb::rpc::ObjectMeta& meta) {
-    std::string out;
-    meta.SerializeToString(&out);
-    return out;
-}
-
-bool MetaCodec::DecodeObjectMeta(const std::string& data, zb::rpc::ObjectMeta* meta) {
-    if (!meta) {
-        return false;
-    }
-    return meta->ParseFromString(data);
-}
-
 std::string MetaCodec::EncodeDiskFileLocation(const zb::rpc::DiskFileLocation& location) {
     std::string out;
     location.SerializeToString(&out);

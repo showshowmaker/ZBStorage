@@ -35,9 +35,6 @@ public:
     static std::string EncodeInodeAttr(const zb::rpc::InodeAttr& attr);
     static bool DecodeInodeAttr(const std::string& data, zb::rpc::InodeAttr* attr);
 
-    static std::string EncodeObjectMeta(const zb::rpc::ObjectMeta& meta);
-    static bool DecodeObjectMeta(const std::string& data, zb::rpc::ObjectMeta* meta);
-
     static std::string EncodeDiskFileLocation(const zb::rpc::DiskFileLocation& location);
     static bool DecodeDiskFileLocation(const std::string& data, zb::rpc::DiskFileLocation* location);
 

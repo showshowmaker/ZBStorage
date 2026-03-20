@@ -12,7 +12,6 @@
 #include "../allocator/NodeStateCache.h"
 #include "../allocator/PGManager.h"
 #include "../archive/ArchiveBatchStager.h"
-#include "../archive/ArchiveCandidateQueue.h"
 #include "../archive/FileArchiveCandidateQueue.h"
 #include "../archive/ArchiveLeaseManager.h"
 #include "../archive/OpticalArchiveManager.h"
@@ -66,7 +65,18 @@ int main(int argc, char* argv[]) {
     lease_options.max_lease_ms = cfg.archive_lease_max_ms;
     zb::mds::ArchiveLeaseManager lease_manager(&store, lease_options);
     zb::mds::ArchiveBatchStager batch_stager;
-    zb::mds::MdsServiceImpl service(&store, &allocator, cfg.object_unit_size, &candidate_queue, &lease_manager);
+    zb::mds::ArchiveMetaStore::Options archive_meta_options;
+    archive_meta_options.max_cached_generations = cfg.archive_meta_cache_generations;
+    archive_meta_options.max_cached_bytes = cfg.archive_meta_cache_bytes;
+    zb::mds::MdsServiceImpl service(&store,
+                                    &allocator,
+                                    cfg.object_unit_size,
+                                    cfg.archive_meta_root,
+                                    cfg.masstree_root,
+                                    archive_meta_options,
+                                    cfg.archive_import_page_size_bytes,
+                                    &candidate_queue,
+                                    &lease_manager);
     std::unique_ptr<zb::mds::OpticalArchiveManager> archive_manager;
     if (cfg.enable_optical_archive) {
         zb::mds::ArchiveBatchStager::Options stager_options;

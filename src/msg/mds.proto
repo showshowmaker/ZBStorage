@@ -30,13 +30,6 @@ enum InodeArchiveState {
   INODE_ARCHIVE_ARCHIVED = 2;
 }
 
-enum FileReplicaFlag {
-  FILE_REPLICA_NONE = 0;
-  FILE_REPLICA_DISK_ONLY = 1;
-  FILE_REPLICA_OPTICAL_ONLY = 2;
-  FILE_REPLICA_DISK_AND_OPTICAL = 3;
-}
-
 message InodeAttr {
   uint64 inode_id = 1;
   InodeType type = 2;
@@ -52,7 +45,6 @@ message InodeAttr {
   uint32 replica = 12;
   uint64 version = 13;
   InodeArchiveState file_archive_state = 14;
-  FileReplicaFlag replica_flag = 15;
 }
 
 message Dentry {
@@ -94,65 +86,31 @@ message ReplicaLocation {
   uint64 image_length = 18;
 }
 
-message ObjectMeta {
-  uint32 index = 1;
-  repeated ReplicaLocation replicas = 2;
-}
-
-message DiskFileAnchor {
-  string node_id = 1;
-  string disk_id = 2;
-  string object_id = 3;
-  uint64 size = 4;
-  ReplicaState replica_state = 5;
-}
-
-message OpticalFileAnchor {
-  string node_id = 1;
-  string disk_id = 2;
-  string object_id = 3;
-  uint64 size = 4;
-  ReplicaState replica_state = 5;
-  string image_id = 6;
-  uint64 image_offset = 7;
-  uint64 image_length = 8;
-}
-
-message FileAnchorSet {
-  uint32 version = 1;
-  uint32 anchor_mask = 2;
-  StorageTier primary_tier = 3;
-  DiskFileAnchor disk_anchor = 4;
-  OpticalFileAnchor optical_anchor = 5;
-}
-
 message DiskFileLocation {
-  uint64 inode_id = 1;
-  string node_id = 2;
-  string node_address = 3;
-  string disk_id = 4;
-  uint64 file_size = 5;
-  uint64 object_unit_size = 6;
-  uint32 object_count = 7;
-  uint64 version = 8;
+  string node_id = 1;
+  string node_address = 2;
+  string disk_id = 3;
 }
 
 message OpticalFileLocation {
-  uint64 inode_id = 1;
-  string node_id = 2;
-  string node_address = 3;
-  string disk_id = 4;
-  string image_id = 5;
-  string file_id = 6;
-  string file_path = 7;
-  uint64 file_size = 8;
-  uint64 version = 9;
-  uint64 mtime_sec = 10;
+  string node_id = 1;
+  string node_address = 2;
+  string disk_id = 3;
+  string image_id = 4;
+  string file_id = 5;
+  string file_path = 6;
+}
+
+message FileLocationView {
+  InodeAttr attr = 1;
+  DiskFileLocation disk_location = 2;
+  OpticalFileLocation optical_location = 3;
 }
 
 enum PathPlacementTarget {
   PATH_PLACEMENT_UNSPECIFIED = 0;
   PATH_PLACEMENT_REAL_ONLY = 1;
+  PATH_PLACEMENT_VIRTUAL_ONLY = 2;
 }
 
 message PathPlacementPolicyRecord {
@@ -187,8 +145,7 @@ message OpenRequest {
 message OpenReply {
   MdsStatus status = 1;
   uint64 handle_id = 2;
-  InodeAttr attr = 3;
-  FileAnchorSet file_anchor = 4;
+  FileLocationView location = 3;
 }
 
 message CloseRequest {
@@ -210,8 +167,7 @@ message CreateRequest {
 
 message CreateReply {
   MdsStatus status = 1;
-  InodeAttr attr = 2;
-  FileAnchorSet file_anchor = 3;
+  FileLocationView location = 2;
 }
 
 message MkdirRequest {
@@ -228,11 +184,15 @@ message MkdirReply {
 
 message ReaddirRequest {
   string path = 1;
+  uint32 limit = 2;
+  string start_after = 3;
 }
 
 message ReaddirReply {
   MdsStatus status = 1;
   repeated Dentry entries = 2;
+  bool has_more = 3;
+  string next_token = 4;
 }
 
 message RenameRequest {
@@ -260,13 +220,13 @@ message RmdirReply {
   MdsStatus status = 1;
 }
 
-message GetFileAnchorRequest {
+message GetFileLocationRequest {
   uint64 inode_id = 1;
 }
 
-message GetFileAnchorReply {
+message GetFileLocationReply {
   MdsStatus status = 1;
-  FileAnchorSet anchor = 2;
+  FileLocationView location = 2;
 }
 
 message UpdateInodeStatRequest {
@@ -436,6 +396,105 @@ message GetPathPlacementPolicyReply {
   string matched_prefix = 4;
 }
 
+message ImportArchiveNamespaceRequest {
+  string path_prefix = 1;
+  string namespace_id = 2;
+  string generation_id = 3;
+  uint32 page_size_bytes = 4;
+  bool publish_route = 5;
+}
+
+message ImportArchiveNamespaceReply {
+  MdsStatus status = 1;
+  string manifest_path = 2;
+  uint64 inode_count = 3;
+  uint64 dentry_count = 4;
+  uint64 inode_min = 5;
+  uint64 inode_max = 6;
+}
+
+message ImportMasstreeNamespaceRequest {
+  string path_prefix = 1;
+  string namespace_id = 2;
+  string generation_id = 3;
+  uint64 inode_start = 4;
+  uint64 file_count = 5;
+  uint32 max_files_per_leaf_dir = 6;
+  uint32 max_subdirs_per_dir = 7;
+  uint32 verify_inode_samples = 8;
+  uint32 verify_dentry_samples = 9;
+  bool publish_route = 10;
+}
+
+message ImportMasstreeNamespaceReply {
+  MdsStatus status = 1;
+  string manifest_path = 2;
+  uint64 root_inode_id = 3;
+  uint64 inode_count = 4;
+  uint64 dentry_count = 5;
+  uint64 inode_min = 6;
+  uint64 inode_max = 7;
+  uint64 inode_blob_bytes = 8;
+}
+
+message GetRandomMasstreeFileAttrRequest {
+  string namespace_id = 1;
+  string path_prefix = 2;
+}
+
+message GetRandomMasstreeFileAttrReply {
+  MdsStatus status = 1;
+  string namespace_id = 2;
+  string path_prefix = 3;
+  string generation_id = 4;
+  uint64 inode_id = 5;
+  InodeAttr attr = 6;
+}
+
+message GetMasstreeClusterStatsRequest {
+}
+
+message GetMasstreeClusterStatsReply {
+  MdsStatus status = 1;
+  uint64 disk_node_count = 2;
+  uint64 optical_node_count = 3;
+  uint64 disk_device_count = 4;
+  uint64 optical_device_count = 5;
+  string total_capacity_bytes = 6;
+  string used_capacity_bytes = 7;
+  string free_capacity_bytes = 8;
+  uint64 total_file_count = 9;
+  string total_file_bytes = 10;
+  uint64 avg_file_size_bytes = 11;
+  uint32 cursor_node_index = 12;
+  uint32 cursor_disk_index = 13;
+  uint32 cursor_image_index = 14;
+  uint64 cursor_image_used_bytes = 15;
+}
+
+message GetMasstreeNamespaceStatsRequest {
+  string namespace_id = 1;
+}
+
+message GetMasstreeNamespaceStatsReply {
+  MdsStatus status = 1;
+  string namespace_id = 2;
+  string generation_id = 3;
+  uint64 file_count = 4;
+  string total_file_bytes = 5;
+  uint64 avg_file_size_bytes = 6;
+  uint64 start_global_image_id = 7;
+  uint64 end_global_image_id = 8;
+  uint32 start_cursor_node_index = 9;
+  uint32 start_cursor_disk_index = 10;
+  uint32 start_cursor_image_index = 11;
+  uint64 start_cursor_image_used_bytes = 12;
+  uint32 end_cursor_node_index = 13;
+  uint32 end_cursor_disk_index = 14;
+  uint32 end_cursor_image_index = 15;
+  uint64 end_cursor_image_used_bytes = 16;
+}
+
 service MdsService {
   rpc Lookup(LookupRequest) returns (LookupReply);
   rpc Getattr(GetattrRequest) returns (GetattrReply);
@@ -447,7 +506,7 @@ service MdsService {
   rpc Rename(RenameRequest) returns (RenameReply);
   rpc Unlink(UnlinkRequest) returns (UnlinkReply);
   rpc Rmdir(RmdirRequest) returns (RmdirReply);
-  rpc GetFileAnchor(GetFileAnchorRequest) returns (GetFileAnchorReply);
+  rpc GetFileLocation(GetFileLocationRequest) returns (GetFileLocationReply);
   rpc UpdateInodeStat(UpdateInodeStatRequest) returns (UpdateInodeStatReply);
   rpc ReportArchiveCandidates(ReportArchiveCandidatesRequest) returns (ReportArchiveCandidatesReply);
   rpc ReportFileArchiveCandidates(ReportFileArchiveCandidatesRequest) returns (ReportFileArchiveCandidatesReply);
@@ -457,4 +516,9 @@ service MdsService {
   rpc SetPathPlacementPolicy(SetPathPlacementPolicyRequest) returns (SetPathPlacementPolicyReply);
   rpc DeletePathPlacementPolicy(DeletePathPlacementPolicyRequest) returns (DeletePathPlacementPolicyReply);
   rpc GetPathPlacementPolicy(GetPathPlacementPolicyRequest) returns (GetPathPlacementPolicyReply);
+  rpc ImportArchiveNamespace(ImportArchiveNamespaceRequest) returns (ImportArchiveNamespaceReply);
+  rpc ImportMasstreeNamespace(ImportMasstreeNamespaceRequest) returns (ImportMasstreeNamespaceReply);
+  rpc GetRandomMasstreeFileAttr(GetRandomMasstreeFileAttrRequest) returns (GetRandomMasstreeFileAttrReply);
+  rpc GetMasstreeClusterStats(GetMasstreeClusterStatsRequest) returns (GetMasstreeClusterStatsReply);
+  rpc GetMasstreeNamespaceStats(GetMasstreeNamespaceStatsRequest) returns (GetMasstreeNamespaceStatsReply);
 }

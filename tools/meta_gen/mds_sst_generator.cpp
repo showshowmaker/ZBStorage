@@ -33,9 +33,6 @@ namespace zb::meta_gen {
 
 namespace {
 
-constexpr uint32_t kAnchorMaskDisk = 1U << 0U;
-constexpr uint32_t kAnchorMaskOptical = 1U << 1U;
-
 struct KvPair {
     std::string key;
     std::string value;
@@ -142,8 +139,12 @@ std::string DentryKey(uint64_t parent_inode, const std::string& name) {
     return "D/" + std::to_string(parent_inode) + "/" + name;
 }
 
-std::string FileAnchorKey(uint64_t inode_id) {
-    return "FA/" + std::to_string(inode_id);
+std::string DiskFileLocationKey(uint64_t inode_id) {
+    return "DF/" + std::to_string(inode_id);
+}
+
+std::string OpticalFileLocationKey(uint64_t inode_id) {
+    return "OF/" + std::to_string(inode_id);
 }
 
 std::string NextInodeKey() {
@@ -510,47 +511,50 @@ bool EmitFileMeta(GeneratorRuntime* rt,
     }
     ++rt->stats->inode_count;
 
-    zb::rpc::FileAnchorSet anchor_set;
-    anchor_set.set_version(1);
-    anchor_set.set_primary_tier(has_disk_anchor ? zb::rpc::STORAGE_TIER_DISK
-                                                : zb::rpc::STORAGE_TIER_OPTICAL);
-    anchor_set.set_anchor_mask(kAnchorMaskOptical | (has_disk_anchor ? kAnchorMaskDisk : 0U));
+    zb::rpc::OpticalFileLocation optical_location;
     {
         std::string node_id;
         std::string disc_id;
         SelectOpticalReplica(inode_id, *rt->cluster, &node_id, &disc_id);
-        zb::rpc::OpticalFileAnchor* optical = anchor_set.mutable_optical_anchor();
-        optical->set_node_id(node_id);
-        optical->set_disk_id(disc_id);
-        optical->set_object_id(BuildObjectId(inode_id));
-        optical->set_size(file_size);
-        optical->set_replica_state(zb::rpc::REPLICA_READY);
-        optical->set_image_id("img-" + disc_id);
-        optical->set_image_offset(0);
-        optical->set_image_length(file_size);
+        optical_location.set_node_id(node_id);
+        optical_location.set_node_address(node_id + ":0");
+        optical_location.set_disk_id(disc_id);
+        optical_location.set_image_id("img-" + disc_id);
+        optical_location.set_file_id(BuildObjectId(inode_id));
+        optical_location.set_file_path("/inode/" + std::to_string(inode_id));
     }
+    std::string optical_payload;
+    if (!EncodeProto(optical_location, &optical_payload)) {
+        if (rt->error) {
+            *rt->error = "failed to serialize optical file location";
+        }
+        return false;
+    }
+    if (!EmitKv(rt, OpticalFileLocationKey(inode_id), std::move(optical_payload))) {
+        return false;
+    }
+    ++rt->stats->anchor_count;
+
     if (has_disk_anchor) {
         std::string node_id;
         std::string disk_id;
         SelectDiskReplica(inode_id, *rt->cluster, &node_id, &disk_id);
-        zb::rpc::DiskFileAnchor* disk = anchor_set.mutable_disk_anchor();
-        disk->set_node_id(node_id);
-        disk->set_disk_id(disk_id);
-        disk->set_object_id(BuildObjectId(inode_id));
-        disk->set_size(file_size);
-        disk->set_replica_state(zb::rpc::REPLICA_READY);
-    }
-    std::string anchor_payload;
-    if (!EncodeProto(anchor_set, &anchor_payload)) {
-        if (rt->error) {
-            *rt->error = "failed to serialize file anchor";
+        zb::rpc::DiskFileLocation disk_location;
+        disk_location.set_node_id(node_id);
+        disk_location.set_node_address(node_id + ":0");
+        disk_location.set_disk_id(disk_id);
+        std::string disk_payload;
+        if (!EncodeProto(disk_location, &disk_payload)) {
+            if (rt->error) {
+                *rt->error = "failed to serialize disk file location";
+            }
+            return false;
         }
-        return false;
+        if (!EmitKv(rt, DiskFileLocationKey(inode_id), std::move(disk_payload))) {
+            return false;
+        }
+        ++rt->stats->anchor_count;
     }
-    if (!EmitKv(rt, FileAnchorKey(inode_id), std::move(anchor_payload))) {
-        return false;
-    }
-    ++rt->stats->anchor_count;
 
     rt->stats->sampled_total_bytes += static_cast<long double>(file_size);
     ++rt->files_emitted;

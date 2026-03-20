@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "ArchiveCandidateQueue.h"
 #include "ArchiveBatchStager.h"
 #include "FileArchiveCandidateQueue.h"
 #include "ArchiveLeaseManager.h"
@@ -44,14 +43,11 @@ private:
     bool LoadInodeAttr(uint64_t inode_id, zb::rpc::InodeAttr* attr, std::string* error) const;
     bool LoadDiskFileLocation(uint64_t inode_id, zb::rpc::DiskFileLocation* location, std::string* error) const;
     bool LoadOpticalFileLocation(uint64_t inode_id, zb::rpc::OpticalFileLocation* location, std::string* error) const;
-    bool SaveOpticalFileLocation(const zb::rpc::OpticalFileLocation& location,
+    bool SaveOpticalFileLocation(uint64_t inode_id,
+                                 const zb::rpc::OpticalFileLocation& location,
                                  rocksdb::WriteBatch* batch,
                                  std::string* error) const;
     bool DeleteDiskFileLocation(uint64_t inode_id, rocksdb::WriteBatch* batch, std::string* error) const;
-    bool UpdateInodeReplicaFlag(uint64_t inode_id,
-                                zb::rpc::FileReplicaFlag replica_flag,
-                                rocksdb::WriteBatch* batch,
-                                std::string* error);
     bool ReadObjectFromReplica(const zb::rpc::ReplicaLocation& source,
                                uint64_t read_size,
                                std::string* data,
@@ -65,13 +61,13 @@ private:
                               const zb::rpc::InodeAttr* inode_attr,
                               zb::rpc::ReplicaLocation* optical_location,
                               std::string* error);
-    bool DeleteDiskFile(const zb::rpc::DiskFileLocation& location, std::string* error);
+    bool DeleteDiskFile(uint64_t inode_id, const zb::rpc::DiskFileLocation& location, std::string* error);
     bool BurnSealedBatch(const NodeSelection& optical,
                          uint32_t* archived_count,
                          std::unordered_set<std::string>* touched_object_keys,
                          std::string* error);
     bool ReconcileArchiveStates(uint32_t max_records, std::string* error);
-    bool IsFileFullyArchived(uint64_t inode_id, bool* archived, std::string* error);
+    bool HasUsableOpticalLocation(uint64_t inode_id, bool* archived, std::string* error);
     bool ClaimFileLease(const FileArchiveCandidateEntry& candidate,
                         const std::string& request_id,
                         std::string* lease_id,
