@@ -27,6 +27,11 @@ DEFINE_int32(max_retry, 0, "RPC max retry");
 
 namespace {
 
+uint64_t NowMilliseconds() {
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
+
 struct CaseSummary {
     int total{0};
     int pass{0};
@@ -177,7 +182,7 @@ bool TestMdsNamespace(const std::string& endpoint, const std::string& uniq, std:
             }
             return false;
         }
-        inode_id = resp.attr().inode_id();
+        inode_id = resp.location().attr().inode_id();
     }
 
     {
@@ -201,33 +206,33 @@ bool TestMdsNamespace(const std::string& endpoint, const std::string& uniq, std:
     }
 
     {
-        zb::rpc::GetFileAnchorRequest req;
+        zb::rpc::GetFileLocationRequest req;
         req.set_inode_id(inode_id);
-        zb::rpc::GetFileAnchorReply resp;
+        zb::rpc::GetFileLocationReply resp;
         brpc::Controller cntl;
-        stub.GetFileAnchor(&cntl, &req, &resp, nullptr);
+        stub.GetFileLocation(&cntl, &req, &resp, nullptr);
         if (cntl.Failed()) {
             if (detail) {
-                *detail = "GetFileAnchor rpc failed: " + cntl.ErrorText();
+                *detail = "GetFileLocation rpc failed: " + cntl.ErrorText();
             }
             return false;
         }
         if (resp.status().code() != zb::rpc::MDS_OK) {
             if (detail) {
-                *detail = "GetFileAnchor status=" + std::to_string(resp.status().code()) +
+                *detail = "GetFileLocation status=" + std::to_string(resp.status().code()) +
                           " msg=" + resp.status().message();
             }
             return false;
         }
         const bool has_disk_anchor =
-            !resp.anchor().disk_anchor().node_id().empty() &&
-            !resp.anchor().disk_anchor().disk_id().empty();
+            !resp.location().disk_location().node_id().empty() &&
+            !resp.location().disk_location().disk_id().empty();
         const bool has_optical_anchor =
-            !resp.anchor().optical_anchor().node_id().empty() &&
-            !resp.anchor().optical_anchor().disk_id().empty();
+            !resp.location().optical_location().node_id().empty() &&
+            !resp.location().optical_location().disk_id().empty();
         if (!has_disk_anchor && !has_optical_anchor) {
             if (detail) {
-                *detail = "GetFileAnchor returns empty anchor set";
+                *detail = "GetFileLocation returns empty location";
             }
             return false;
         }

@@ -43,6 +43,11 @@ DEFINE_uint32(cluster_view_refresh_ms, 2000, "Scheduler cluster-view refresh int
 
 namespace {
 
+uint64_t NowMilliseconds() {
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
+
 struct FileState {
     std::string path;
     uint64_t inode_id{0};
