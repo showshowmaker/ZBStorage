@@ -612,7 +612,7 @@ private:
                 std::cout << "inode_count=" << job.inode_count() << '\n';
                 std::cout << "dentry_count=" << job.dentry_count() << '\n';
                 std::cout << "inode_range=[" << job.inode_min() << ", " << job.inode_max() << "]\n";
-                std::cout << "inode_blob_bytes=" << job.inode_blob_bytes() << '\n';
+                std::cout << "inode_pages_bytes=" << job.inode_pages_bytes() << '\n';
                 return true;
             }
             if (job.state() == zb::rpc::MASSTREE_IMPORT_JOB_FAILED) {

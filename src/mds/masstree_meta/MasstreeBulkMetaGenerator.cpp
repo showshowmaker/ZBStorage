@@ -9,6 +9,7 @@
 #include "MasstreeDecimalUtils.h"
 #include "MasstreeManifest.h"
 #include "MasstreeOpticalProfile.h"
+#include "MasstreePageLayout.h"
 #include "mds.pb.h"
 
 namespace fs = std::filesystem;
@@ -436,9 +437,12 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
     manifest.manifest_path = manifest_path.string();
     manifest.inode_records_path = inode_records_path.string();
     manifest.dentry_records_path = dentry_records_path.string();
+    manifest.inode_pages_path = (staging_dir / "inode_pages.seg").string();
+    manifest.inode_sparse_index_path = (staging_dir / "inode_sparse.idx").string();
+    manifest.dentry_pages_path = (staging_dir / "dentry_pages.seg").string();
+    manifest.dentry_sparse_index_path = (staging_dir / "dentry_sparse.idx").string();
     manifest.verify_manifest_path = verify_manifest_path.string();
-    manifest.inode_blob_path = (staging_dir / "inode_blob.bin").string();
-    manifest.dentry_data_path = (staging_dir / "dentry_data.bin").string();
+    manifest.page_size_bytes = kMasstreeDefaultPageSizeBytes;
     manifest.root_inode_id = root_inode_id;
     manifest.inode_min = inode_min;
     manifest.inode_max = inode_max;

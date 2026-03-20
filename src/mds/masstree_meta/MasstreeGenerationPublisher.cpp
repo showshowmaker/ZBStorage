@@ -433,9 +433,11 @@ bool MasstreeGenerationPublisher::RewriteManifestPaths(const std::string& final_
     manifest->manifest_path = (final_path / "manifest.txt").string();
     manifest->inode_records_path = RewritePathToFinalDir(final_path, manifest->inode_records_path);
     manifest->dentry_records_path = RewritePathToFinalDir(final_path, manifest->dentry_records_path);
+    manifest->inode_pages_path = RewritePathToFinalDir(final_path, manifest->inode_pages_path);
+    manifest->inode_sparse_index_path = RewritePathToFinalDir(final_path, manifest->inode_sparse_index_path);
+    manifest->dentry_pages_path = RewritePathToFinalDir(final_path, manifest->dentry_pages_path);
+    manifest->dentry_sparse_index_path = RewritePathToFinalDir(final_path, manifest->dentry_sparse_index_path);
     manifest->verify_manifest_path = RewritePathToFinalDir(final_path, manifest->verify_manifest_path);
-    manifest->inode_blob_path = RewritePathToFinalDir(final_path, manifest->inode_blob_path);
-    manifest->dentry_data_path = RewritePathToFinalDir(final_path, manifest->dentry_data_path);
     manifest->cluster_stats_path = RewritePathToFinalDir(final_path, manifest->cluster_stats_path);
     manifest->allocation_summary_path = RewritePathToFinalDir(final_path, manifest->allocation_summary_path);
     if (error) {

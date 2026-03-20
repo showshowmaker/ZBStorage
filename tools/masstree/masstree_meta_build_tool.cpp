@@ -152,6 +152,6 @@ int main(int argc, char* argv[]) {
     std::cout << "inode_max=" << result.inode_max << "\n";
     std::cout << "inode_count=" << result.inode_count << "\n";
     std::cout << "dentry_count=" << result.dentry_count << "\n";
-    std::cout << "inode_blob_bytes=" << result.inode_blob_bytes << "\n";
+    std::cout << "inode_pages_bytes=" << result.inode_pages_bytes << "\n";
     return 0;
 }

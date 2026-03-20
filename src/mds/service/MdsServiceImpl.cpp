@@ -2453,7 +2453,7 @@ void MdsServiceImpl::FillMasstreeImportJobInfo(const MasstreeImportJob& job,
     info->set_dentry_count(job.result.dentry_count);
     info->set_inode_min(job.result.inode_min);
     info->set_inode_max(job.result.inode_max);
-    info->set_inode_blob_bytes(job.result.inode_blob_bytes);
+    info->set_inode_pages_bytes(job.result.inode_pages_bytes);
 }
 
 brpc::Channel* MdsServiceImpl::GetDataChannel(const std::string& address, std::string* error) {

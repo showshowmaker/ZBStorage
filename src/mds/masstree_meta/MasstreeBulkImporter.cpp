@@ -10,6 +10,8 @@
 #include "MasstreeInodeRecordCodec.h"
 #include "MasstreeManifest.h"
 #include "MasstreeOpticalAllocator.h"
+#include "MasstreePageLayout.h"
+#include "MasstreePageReader.h"
 #include "MasstreeOpticalProfile.h"
 #include "mds.pb.h"
 
@@ -170,6 +172,334 @@ bool WriteExact(std::ofstream* output, const std::string& data) {
     return output && output->write(data.data(), static_cast<std::streamsize>(data.size())).good();
 }
 
+bool WriteLengthPrefixedRecord(std::ofstream* output, const std::string& payload) {
+    std::string wire_record;
+    wire_record.reserve(sizeof(uint32_t) + payload.size());
+    AppendLe32(&wire_record, static_cast<uint32_t>(payload.size()));
+    wire_record.append(payload);
+    return WriteExact(output, wire_record);
+}
+
+bool BuildDentryPages(std::ifstream* dentry_in,
+                      const MasstreeNamespaceManifest& manifest,
+                      MasstreeIndexRuntime* runtime,
+                      uint32_t verify_dentry_samples,
+                      uint64_t* dentry_imported,
+                      uint64_t* dentry_page_count,
+                      uint64_t* verified_dentry_samples,
+                      std::string* error) {
+    if (!dentry_in || !runtime || !dentry_imported || !dentry_page_count || !verified_dentry_samples) {
+        if (error) {
+            *error = "invalid masstree dentry sparse build args";
+        }
+        return false;
+    }
+    std::ofstream pages_out(manifest.dentry_pages_path, std::ios::binary | std::ios::trunc);
+    std::ofstream sparse_out(manifest.dentry_sparse_index_path, std::ios::binary | std::ios::trunc);
+    if (!pages_out || !sparse_out) {
+        if (error) {
+            *error = "failed to open masstree dentry sparse outputs";
+        }
+        return false;
+    }
+
+    std::vector<MasstreeDentryPageEntry> current_page;
+    current_page.reserve(1024);
+    size_t current_payload_bytes = sizeof(uint32_t);
+    std::vector<DentryRecordView> verify_samples;
+    verify_samples.reserve(verify_dentry_samples);
+    DentryRecordView dentry_record;
+
+    auto flush_page = [&](std::string* flush_error) -> bool {
+        if (current_page.empty()) {
+            return true;
+        }
+        std::string page_payload;
+        if (!EncodeMasstreeDentryPage(current_page, &page_payload, flush_error)) {
+            return false;
+        }
+        const uint64_t page_offset = static_cast<uint64_t>(pages_out.tellp());
+        if (!WriteLengthPrefixedRecord(&pages_out, page_payload)) {
+            if (flush_error) {
+                *flush_error = "failed to write masstree dentry page";
+            }
+            return false;
+        }
+        MasstreeDentrySparseEntry sparse_entry;
+        sparse_entry.page_offset = page_offset;
+        sparse_entry.max_parent_inode = current_page.back().parent_inode;
+        sparse_entry.max_name = current_page.back().name;
+        std::string sparse_payload;
+        if (!EncodeMasstreeDentrySparseEntry(sparse_entry, &sparse_payload, flush_error) ||
+            !WriteLengthPrefixedRecord(&sparse_out, sparse_payload) ||
+            !runtime->PutDentryPageBoundary(manifest.namespace_id,
+                                            sparse_entry.max_parent_inode,
+                                            sparse_entry.max_name,
+                                            sparse_entry.page_offset,
+                                            flush_error)) {
+            return false;
+        }
+        ++(*dentry_page_count);
+        current_page.clear();
+        current_payload_bytes = sizeof(uint32_t);
+        return true;
+    };
+
+    while (ReadDentryRecord(dentry_in, &dentry_record, error)) {
+        MasstreeDentryPageEntry page_entry;
+        page_entry.parent_inode = dentry_record.parent_inode;
+        page_entry.name = dentry_record.name;
+        page_entry.child_inode = dentry_record.child_inode;
+        page_entry.type = dentry_record.type;
+        const size_t encoded_size = EncodedMasstreeDentryPageEntrySize(page_entry);
+        const size_t total_with_entry = current_payload_bytes + encoded_size;
+        if (!current_page.empty() && total_with_entry > manifest.page_size_bytes) {
+            if (!flush_page(error)) {
+                return false;
+            }
+        }
+        current_page.push_back(std::move(page_entry));
+        current_payload_bytes += encoded_size;
+        ++(*dentry_imported);
+        if (verify_samples.size() < verify_dentry_samples) {
+            verify_samples.push_back(dentry_record);
+        }
+    }
+    if (error && !error->empty()) {
+        return false;
+    }
+    if (!flush_page(error)) {
+        return false;
+    }
+    pages_out.flush();
+    sparse_out.flush();
+    if (!pages_out.good() || !sparse_out.good()) {
+        if (error) {
+            *error = "failed to flush masstree dentry sparse outputs";
+        }
+        return false;
+    }
+
+    for (const auto& sample : verify_samples) {
+        MasstreeDentrySparseEntry sparse_entry;
+        if (!runtime->FindDentryPageBoundary(manifest.namespace_id,
+                                             sample.parent_inode,
+                                             sample.name,
+                                             &sparse_entry,
+                                             error)) {
+            if (error && error->empty()) {
+                *error = "masstree importer dentry sparse verification failed";
+            }
+            return false;
+        }
+        MasstreeDentryPage page;
+        if (!MasstreePageReader::LoadDentryPage(manifest.dentry_pages_path,
+                                                sparse_entry.page_offset,
+                                                &page,
+                                                error)) {
+            return false;
+        }
+        MasstreeDentryPageEntry found;
+        if (!MasstreePageReader::FindDentryInPage(page,
+                                                  sample.parent_inode,
+                                                  sample.name,
+                                                  &found,
+                                                  error)) {
+            if (error && error->empty()) {
+                *error = "masstree importer dentry page verification failed";
+            }
+            return false;
+        }
+        if (found.child_inode != sample.child_inode || found.type != sample.type) {
+            if (error) {
+                *error = "masstree importer dentry page verification mismatch";
+            }
+            return false;
+        }
+        ++(*verified_dentry_samples);
+    }
+    return true;
+}
+
+bool BuildInodePages(std::ifstream* inode_in,
+                     const MasstreeNamespaceManifest& manifest,
+                     MasstreeIndexRuntime* runtime,
+                     const MasstreeOpticalProfile& optical_profile,
+                     const MasstreeOpticalClusterCursor& start_cursor,
+                     uint32_t verify_inode_samples,
+                     uint64_t* inode_imported,
+                     uint64_t* inode_page_count,
+                     uint64_t* inode_pages_bytes,
+                     uint64_t* verified_inode_samples,
+                     uint64_t* file_count,
+                     uint64_t* start_global_image_id,
+                     uint64_t* end_global_image_id,
+                     uint64_t* avg_file_size_bytes,
+                     std::string* total_file_bytes,
+                     MasstreeOpticalClusterCursor* end_cursor,
+                     std::string* error) {
+    if (!inode_in || !runtime || !inode_imported || !inode_page_count || !inode_pages_bytes ||
+        !verified_inode_samples || !file_count || !start_global_image_id || !end_global_image_id ||
+        !avg_file_size_bytes || !total_file_bytes || !end_cursor) {
+        if (error) {
+            *error = "invalid masstree inode sparse build args";
+        }
+        return false;
+    }
+    std::ofstream pages_out(manifest.inode_pages_path, std::ios::binary | std::ios::trunc);
+    std::ofstream sparse_out(manifest.inode_sparse_index_path, std::ios::binary | std::ios::trunc);
+    if (!pages_out || !sparse_out) {
+        if (error) {
+            *error = "failed to open masstree inode sparse outputs";
+        }
+        return false;
+    }
+
+    MasstreeOpticalAllocator allocator(optical_profile, start_cursor);
+    MasstreeDecimalAccumulator total_file_bytes_accumulator;
+    std::vector<MasstreeInodePageEntry> current_page;
+    current_page.reserve(1024);
+    size_t current_payload_bytes = sizeof(uint32_t);
+    std::vector<uint64_t> verify_samples;
+    verify_samples.reserve(verify_inode_samples);
+    InodeRecordView inode_record;
+
+    auto flush_page = [&](std::string* flush_error) -> bool {
+        if (current_page.empty()) {
+            return true;
+        }
+        std::string page_payload;
+        if (!EncodeMasstreeInodePage(current_page, &page_payload, flush_error)) {
+            return false;
+        }
+        const uint64_t page_offset = static_cast<uint64_t>(pages_out.tellp());
+        if (!WriteLengthPrefixedRecord(&pages_out, page_payload)) {
+            if (flush_error) {
+                *flush_error = "failed to write masstree inode page";
+            }
+            return false;
+        }
+        MasstreeInodeSparseEntry sparse_entry;
+        sparse_entry.page_offset = page_offset;
+        sparse_entry.max_inode_id = current_page.back().inode_id;
+        std::string sparse_payload;
+        if (!EncodeMasstreeInodeSparseEntry(sparse_entry, &sparse_payload, flush_error) ||
+            !WriteLengthPrefixedRecord(&sparse_out, sparse_payload) ||
+            !runtime->PutInodePageBoundary(manifest.namespace_id,
+                                           sparse_entry.max_inode_id,
+                                           sparse_entry.page_offset,
+                                           flush_error)) {
+            return false;
+        }
+        *inode_pages_bytes += sizeof(uint32_t) + page_payload.size();
+        ++(*inode_page_count);
+        current_page.clear();
+        current_payload_bytes = sizeof(uint32_t);
+        return true;
+    };
+
+    while (ReadInodeRecord(inode_in, &inode_record, error)) {
+        zb::rpc::InodeAttr attr;
+        if (!attr.ParseFromString(inode_record.payload)) {
+            if (error) {
+                *error = "failed to parse inode record payload";
+            }
+            return false;
+        }
+
+        MasstreeInodeRecord blob_record;
+        blob_record.attr = attr;
+        if (attr.type() == zb::rpc::INODE_FILE) {
+            uint64_t global_image_id = 0;
+            if (!allocator.Allocate(attr.size(), &global_image_id, error)) {
+                return false;
+            }
+            blob_record.has_optical_image = true;
+            blob_record.optical_image_global_id = global_image_id;
+            if (*file_count == 0) {
+                *start_global_image_id = global_image_id;
+            }
+            *end_global_image_id = global_image_id;
+            ++(*file_count);
+            total_file_bytes_accumulator.Add(attr.size());
+        }
+
+        std::string encoded_record_payload;
+        if (!MasstreeInodeRecordCodec::Encode(blob_record, &encoded_record_payload, error)) {
+            return false;
+        }
+
+        MasstreeInodePageEntry page_entry;
+        page_entry.inode_id = inode_record.inode_id;
+        page_entry.payload = std::move(encoded_record_payload);
+        const size_t encoded_size = EncodedMasstreeInodePageEntrySize(page_entry);
+        const size_t total_with_entry = current_payload_bytes + encoded_size;
+        if (!current_page.empty() && total_with_entry > manifest.page_size_bytes) {
+            if (!flush_page(error)) {
+                return false;
+            }
+        }
+        current_page.push_back(std::move(page_entry));
+        current_payload_bytes += encoded_size;
+        ++(*inode_imported);
+        if (verify_samples.size() < verify_inode_samples) {
+            verify_samples.push_back(inode_record.inode_id);
+        }
+    }
+    if (error && !error->empty()) {
+        return false;
+    }
+    if (!flush_page(error)) {
+        return false;
+    }
+    pages_out.flush();
+    sparse_out.flush();
+    if (!pages_out.good() || !sparse_out.good()) {
+        if (error) {
+            *error = "failed to flush masstree inode sparse outputs";
+        }
+        return false;
+    }
+
+    for (uint64_t inode_id : verify_samples) {
+        MasstreeInodeSparseEntry sparse_entry;
+        if (!runtime->FindInodePageBoundary(manifest.namespace_id, inode_id, &sparse_entry, error)) {
+            if (error && error->empty()) {
+                *error = "masstree importer inode sparse verification failed";
+            }
+            return false;
+        }
+        MasstreeInodePage page;
+        if (!MasstreePageReader::LoadInodePage(manifest.inode_pages_path,
+                                               sparse_entry.page_offset,
+                                               &page,
+                                               error)) {
+            return false;
+        }
+        MasstreeInodePageEntry found;
+        if (!MasstreePageReader::FindInodeInPage(page, inode_id, &found, error)) {
+            if (error && error->empty()) {
+                *error = "masstree importer inode page verification failed";
+            }
+            return false;
+        }
+        MasstreeInodeRecord decoded;
+        if (!MasstreeInodeRecordCodec::Decode(found.payload, &decoded, error) ||
+            decoded.attr.inode_id() != inode_id) {
+            if (error && error->empty()) {
+                *error = "masstree importer inode page verification mismatch";
+            }
+            return false;
+        }
+        ++(*verified_inode_samples);
+    }
+
+    *total_file_bytes = total_file_bytes_accumulator.ToString();
+    *avg_file_size_bytes = *file_count == 0 ? 0 : total_file_bytes_accumulator.DivideBy(*file_count);
+    *end_cursor = allocator.cursor();
+    return true;
+}
+
 bool WriteImportSummary(const std::string& summary_path,
                         const MasstreeNamespaceManifest& manifest,
                         const MasstreeBulkImporter::Result& result,
@@ -186,7 +516,9 @@ bool WriteImportSummary(const std::string& summary_path,
     out << "generation_id=" << manifest.generation_id << "\n";
     out << "inode_imported=" << result.inode_imported << "\n";
     out << "dentry_imported=" << result.dentry_imported << "\n";
-    out << "inode_blob_bytes=" << result.inode_blob_bytes << "\n";
+    out << "dentry_page_count=" << result.dentry_page_count << "\n";
+    out << "inode_page_count=" << result.inode_page_count << "\n";
+    out << "inode_pages_bytes=" << result.inode_pages_bytes << "\n";
     out << "verified_inode_samples=" << result.verified_inode_samples << "\n";
     out << "verified_dentry_samples=" << result.verified_dentry_samples << "\n";
     out << "file_count=" << result.file_count << "\n";
@@ -298,151 +630,62 @@ bool MasstreeBulkImporter::Import(const Request& request,
 
     std::ifstream inode_in(manifest.inode_records_path, std::ios::binary);
     std::ifstream dentry_in(manifest.dentry_records_path, std::ios::binary);
-    std::ofstream inode_blob_out(manifest.inode_blob_path, std::ios::binary | std::ios::trunc);
-    if (!inode_in || !dentry_in || !inode_blob_out) {
+    if (!inode_in || !dentry_in) {
         if (error) {
             *error = "failed to open masstree importer inputs/outputs";
         }
         return false;
     }
 
-    std::vector<uint64_t> inode_samples;
-    std::vector<DentryRecordView> dentry_samples;
-    inode_samples.reserve(request.verify_inode_samples);
-    dentry_samples.reserve(request.verify_dentry_samples);
-
     Result local_result;
     local_result.start_cursor = request.start_cursor;
     local_result.end_cursor = request.start_cursor;
     local_result.total_file_bytes = "0";
-
-    MasstreeOpticalAllocator allocator(optical_profile, request.start_cursor);
-    MasstreeDecimalAccumulator total_file_bytes_accumulator;
-    InodeRecordView inode_record;
-    while (ReadInodeRecord(&inode_in, &inode_record, error)) {
-        zb::rpc::InodeAttr attr;
-        if (!attr.ParseFromString(inode_record.payload)) {
-            if (error) {
-                *error = "failed to parse inode record payload";
-            }
-            return false;
-        }
-
-        MasstreeInodeRecord blob_record;
-        blob_record.attr = attr;
-        if (attr.type() == zb::rpc::INODE_FILE) {
-            uint64_t global_image_id = 0;
-            if (!allocator.Allocate(attr.size(), &global_image_id, error)) {
-                return false;
-            }
-            blob_record.has_optical_image = true;
-            blob_record.optical_image_global_id = global_image_id;
-            if (local_result.file_count == 0) {
-                local_result.start_global_image_id = global_image_id;
-            }
-            local_result.end_global_image_id = global_image_id;
-            ++local_result.file_count;
-            total_file_bytes_accumulator.Add(attr.size());
-        }
-
-        std::string encoded_blob_payload;
-        if (!MasstreeInodeRecordCodec::Encode(blob_record, &encoded_blob_payload, error)) {
-            return false;
-        }
-
-        const uint64_t current_offset = local_result.inode_blob_bytes;
-        std::string blob_wire_record;
-        blob_wire_record.reserve(sizeof(uint32_t) + encoded_blob_payload.size());
-        AppendLe32(&blob_wire_record, static_cast<uint32_t>(encoded_blob_payload.size()));
-        blob_wire_record.append(encoded_blob_payload);
-        if (!WriteExact(&inode_blob_out, blob_wire_record)) {
-            if (error) {
-                *error = "failed to write inode blob payload";
-            }
-            return false;
-        }
-        if (!active_runtime->PutInodeOffset(manifest.namespace_id, inode_record.inode_id, current_offset, error)) {
-            return false;
-        }
-        local_result.inode_blob_bytes += blob_wire_record.size();
-        ++local_result.inode_imported;
-        if (inode_samples.size() < request.verify_inode_samples) {
-            inode_samples.push_back(inode_record.inode_id);
-        }
+    if (manifest.page_size_bytes == 0) {
+        manifest.page_size_bytes = kMasstreeDefaultPageSizeBytes;
     }
-    if (error && !error->empty()) {
+    const std::filesystem::path staging_dir_path = std::filesystem::path(request.manifest_path).parent_path();
+    if (manifest.inode_pages_path.empty()) {
+        manifest.inode_pages_path = (staging_dir_path / "inode_pages.seg").string();
+    }
+    if (manifest.inode_sparse_index_path.empty()) {
+        manifest.inode_sparse_index_path = (staging_dir_path / "inode_sparse.idx").string();
+    }
+    if (manifest.dentry_pages_path.empty()) {
+        manifest.dentry_pages_path = (staging_dir_path / "dentry_pages.seg").string();
+    }
+    if (manifest.dentry_sparse_index_path.empty()) {
+        manifest.dentry_sparse_index_path = (staging_dir_path / "dentry_sparse.idx").string();
+    }
+    if (!BuildInodePages(&inode_in,
+                         manifest,
+                         active_runtime,
+                         optical_profile,
+                         request.start_cursor,
+                         request.verify_inode_samples,
+                         &local_result.inode_imported,
+                         &local_result.inode_page_count,
+                         &local_result.inode_pages_bytes,
+                         &local_result.verified_inode_samples,
+                         &local_result.file_count,
+                         &local_result.start_global_image_id,
+                         &local_result.end_global_image_id,
+                         &local_result.avg_file_size_bytes,
+                         &local_result.total_file_bytes,
+                         &local_result.end_cursor,
+                         error)) {
         return false;
     }
 
-    DentryRecordView dentry_record;
-    while (ReadDentryRecord(&dentry_in, &dentry_record, error)) {
-        if (!active_runtime->PutDentryValue(manifest.namespace_id,
-                                            dentry_record.parent_inode,
-                                            dentry_record.name,
-                                            dentry_record.child_inode,
-                                            dentry_record.type,
-                                            error)) {
-            return false;
-        }
-        ++local_result.dentry_imported;
-        if (dentry_samples.size() < request.verify_dentry_samples) {
-            dentry_samples.push_back(dentry_record);
-        }
-    }
-    if (error && !error->empty()) {
+    if (!BuildDentryPages(&dentry_in,
+                          manifest,
+                          active_runtime,
+                          request.verify_dentry_samples,
+                          &local_result.dentry_imported,
+                          &local_result.dentry_page_count,
+                          &local_result.verified_dentry_samples,
+                          error)) {
         return false;
-    }
-
-    inode_blob_out.flush();
-    if (!inode_blob_out.good()) {
-        if (error) {
-            *error = "failed to flush inode blob";
-        }
-        return false;
-    }
-    inode_blob_out.close();
-    if (inode_blob_out.fail()) {
-        if (error) {
-            *error = "failed to close inode blob";
-        }
-        return false;
-    }
-
-    local_result.total_file_bytes = total_file_bytes_accumulator.ToString();
-    local_result.avg_file_size_bytes = local_result.file_count == 0 ? 0 :
-                                       total_file_bytes_accumulator.DivideBy(local_result.file_count);
-    local_result.end_cursor = allocator.cursor();
-
-    for (uint64_t inode_id : inode_samples) {
-        uint64_t offset = 0;
-        if (!active_runtime->GetInodeOffset(manifest.namespace_id, inode_id, &offset, error)) {
-            if (error && error->empty()) {
-                *error = "masstree importer inode verification failed";
-            }
-            return false;
-        }
-        ++local_result.verified_inode_samples;
-    }
-
-    for (const auto& sample : dentry_samples) {
-        MasstreePackedDentryValue value;
-        if (!active_runtime->GetDentryValue(manifest.namespace_id,
-                                            sample.parent_inode,
-                                            sample.name,
-                                            &value,
-                                            error)) {
-            if (error && error->empty()) {
-                *error = "masstree importer dentry verification failed";
-            }
-            return false;
-        }
-        if (value.child_inode != sample.child_inode || value.type != sample.type) {
-            if (error) {
-                *error = "masstree importer dentry verification mismatch";
-            }
-            return false;
-        }
-        ++local_result.verified_dentry_samples;
     }
 
     if (local_result.inode_imported != manifest.inode_count) {
@@ -464,10 +707,9 @@ bool MasstreeBulkImporter::Import(const Request& request,
         return false;
     }
 
-    const std::filesystem::path staging_dir = std::filesystem::path(request.manifest_path).parent_path();
-    const std::string summary_path = (staging_dir / "import_summary.txt").string();
-    const std::string cluster_stats_path = (staging_dir / "cluster_stats.txt").string();
-    const std::string allocation_summary_path = (staging_dir / "allocation_summary.txt").string();
+    const std::string summary_path = (staging_dir_path / "import_summary.txt").string();
+    const std::string cluster_stats_path = (staging_dir_path / "cluster_stats.txt").string();
+    const std::string allocation_summary_path = (staging_dir_path / "allocation_summary.txt").string();
 
     manifest.cluster_stats_path = cluster_stats_path;
     manifest.allocation_summary_path = allocation_summary_path;
@@ -485,6 +727,9 @@ bool MasstreeBulkImporter::Import(const Request& request,
     manifest.end_cursor_disk_index = local_result.end_cursor.disk_index;
     manifest.end_cursor_image_index = local_result.end_cursor.image_index_in_disk;
     manifest.end_cursor_image_used_bytes = local_result.end_cursor.image_used_bytes;
+    manifest.layout_version = 3;
+    manifest.inode_page_count = local_result.inode_page_count;
+    manifest.dentry_page_count = local_result.dentry_page_count;
 
     if (!manifest.SaveToFile(request.manifest_path, error) ||
         !WriteImportSummary(summary_path, manifest, local_result, error) ||

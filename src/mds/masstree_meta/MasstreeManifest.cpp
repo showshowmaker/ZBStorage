@@ -82,6 +82,15 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
         const std::string value = Trim(trimmed.substr(eq + 1));
         if (key == "namespace_id") {
             parsed.namespace_id = value;
+        } else if (key == "layout_version") {
+            uint64_t parsed_value = 0;
+            if (!ParseU64Field(value, &parsed_value)) {
+                if (error) {
+                    *error = "invalid layout_version in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+            parsed.layout_version = static_cast<uint32_t>(parsed_value);
         } else if (key == "path_prefix") {
             parsed.path_prefix = value;
         } else if (key == "generation_id") {
@@ -90,12 +99,16 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
             parsed.inode_records_path = value;
         } else if (key == "dentry_records_path") {
             parsed.dentry_records_path = value;
+        } else if (key == "inode_pages_path") {
+            parsed.inode_pages_path = value;
+        } else if (key == "inode_sparse_index_path") {
+            parsed.inode_sparse_index_path = value;
+        } else if (key == "dentry_pages_path") {
+            parsed.dentry_pages_path = value;
+        } else if (key == "dentry_sparse_index_path") {
+            parsed.dentry_sparse_index_path = value;
         } else if (key == "verify_manifest_path") {
             parsed.verify_manifest_path = value;
-        } else if (key == "inode_blob_path") {
-            parsed.inode_blob_path = value;
-        } else if (key == "dentry_data_path") {
-            parsed.dentry_data_path = value;
         } else if (key == "cluster_stats_path") {
             parsed.cluster_stats_path = value;
         } else if (key == "allocation_summary_path") {
@@ -132,6 +145,27 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
             if (!ParseU64Field(value, &parsed.dentry_count)) {
                 if (error) {
                     *error = "invalid dentry_count in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+        } else if (key == "inode_page_count") {
+            if (!ParseU64Field(value, &parsed.inode_page_count)) {
+                if (error) {
+                    *error = "invalid inode_page_count in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+        } else if (key == "page_size_bytes") {
+            if (!ParseU64Field(value, &parsed.page_size_bytes)) {
+                if (error) {
+                    *error = "invalid page_size_bytes in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+        } else if (key == "dentry_page_count") {
+            if (!ParseU64Field(value, &parsed.dentry_page_count)) {
+                if (error) {
+                    *error = "invalid dentry_page_count in masstree namespace manifest: " + manifest_path;
                 }
                 return false;
             }
@@ -308,9 +342,27 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
         }
         return false;
     }
-    if (parsed.inode_blob_path.empty()) {
+    if (parsed.inode_pages_path.empty()) {
         if (error) {
-            *error = "masstree namespace manifest missing inode_blob_path: " + manifest_path;
+            *error = "masstree namespace manifest missing inode_pages_path: " + manifest_path;
+        }
+        return false;
+    }
+    if (parsed.inode_sparse_index_path.empty()) {
+        if (error) {
+            *error = "masstree namespace manifest missing inode_sparse_index_path: " + manifest_path;
+        }
+        return false;
+    }
+    if (parsed.dentry_pages_path.empty()) {
+        if (error) {
+            *error = "masstree namespace manifest missing dentry_pages_path: " + manifest_path;
+        }
+        return false;
+    }
+    if (parsed.dentry_sparse_index_path.empty()) {
+        if (error) {
+            *error = "masstree namespace manifest missing dentry_sparse_index_path: " + manifest_path;
         }
         return false;
     }
@@ -332,14 +384,17 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     }
 
     out << "masstree_namespace_manifest_v1\n";
+    out << "layout_version=" << layout_version << "\n";
     out << "namespace_id=" << namespace_id << "\n";
     out << "path_prefix=" << path_prefix << "\n";
     out << "generation_id=" << generation_id << "\n";
     out << "inode_records_path=" << inode_records_path << "\n";
     out << "dentry_records_path=" << dentry_records_path << "\n";
+    out << "inode_pages_path=" << inode_pages_path << "\n";
+    out << "inode_sparse_index_path=" << inode_sparse_index_path << "\n";
+    out << "dentry_pages_path=" << dentry_pages_path << "\n";
+    out << "dentry_sparse_index_path=" << dentry_sparse_index_path << "\n";
     out << "verify_manifest_path=" << verify_manifest_path << "\n";
-    out << "inode_blob_path=" << inode_blob_path << "\n";
-    out << "dentry_data_path=" << dentry_data_path << "\n";
     out << "cluster_stats_path=" << cluster_stats_path << "\n";
     out << "allocation_summary_path=" << allocation_summary_path << "\n";
     out << "root_inode_id=" << root_inode_id << "\n";
@@ -347,6 +402,9 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     out << "inode_max=" << inode_max << "\n";
     out << "inode_count=" << inode_count << "\n";
     out << "dentry_count=" << dentry_count << "\n";
+    out << "inode_page_count=" << inode_page_count << "\n";
+    out << "page_size_bytes=" << page_size_bytes << "\n";
+    out << "dentry_page_count=" << dentry_page_count << "\n";
     out << "file_count=" << file_count << "\n";
     out << "level1_dir_count=" << level1_dir_count << "\n";
     out << "leaf_dir_count=" << leaf_dir_count << "\n";

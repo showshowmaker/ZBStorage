@@ -33,10 +33,10 @@ bool MasstreeIndexRuntime::Init(std::string* error) {
 #endif
 }
 
-bool MasstreeIndexRuntime::PutInodeOffset(const std::string& namespace_id,
-                                          uint64_t inode_id,
-                                          uint64_t offset,
-                                          std::string* error) {
+bool MasstreeIndexRuntime::PutInodePageBoundary(const std::string& namespace_id,
+                                                uint64_t max_inode_id,
+                                                uint64_t page_offset,
+                                                std::string* error) {
 #ifdef ZBSTORAGE_ENABLE_MASSTREE_INDEX
     if (!inode_tree_) {
         if (error) {
@@ -47,15 +47,15 @@ bool MasstreeIndexRuntime::PutInodeOffset(const std::string& namespace_id,
     if (!EnsureThreadInitialized(error)) {
         return false;
     }
-    inode_tree_->insert(MasstreeInodeIndexKey(namespace_id, inode_id), offset);
+    inode_tree_->insert(MasstreeInodeIndexKey(namespace_id, max_inode_id), page_offset);
     if (error) {
         error->clear();
     }
     return true;
 #else
     (void)namespace_id;
-    (void)inode_id;
-    (void)offset;
+    (void)max_inode_id;
+    (void)page_offset;
     if (error) {
         *error = "masstree index support is unavailable in this build";
     }
@@ -63,12 +63,12 @@ bool MasstreeIndexRuntime::PutInodeOffset(const std::string& namespace_id,
 #endif
 }
 
-bool MasstreeIndexRuntime::GetInodeOffset(const std::string& namespace_id,
-                                          uint64_t inode_id,
-                                          uint64_t* offset,
-                                          std::string* error) const {
+bool MasstreeIndexRuntime::FindInodePageBoundary(const std::string& namespace_id,
+                                                 uint64_t inode_id,
+                                                 MasstreeInodeSparseEntry* entry,
+                                                 std::string* error) const {
 #ifdef ZBSTORAGE_ENABLE_MASSTREE_INDEX
-    if (!inode_tree_ || !offset) {
+    if (!inode_tree_ || !entry) {
         if (error) {
             *error = "masstree inode lookup args are invalid";
         }
@@ -77,12 +77,24 @@ bool MasstreeIndexRuntime::GetInodeOffset(const std::string& namespace_id,
     if (!EnsureThreadInitialized(error)) {
         return false;
     }
-    if (!inode_tree_->search(MasstreeInodeIndexKey(namespace_id, inode_id), *offset)) {
+    const std::string seek_key = MasstreeInodeIndexKey(namespace_id, inode_id);
+    std::vector<std::pair<std::string, uint64_t>> hits;
+    inode_tree_->scan(seek_key, 1, hits);
+    if (hits.empty()) {
         if (error) {
             error->clear();
         }
         return false;
     }
+    const std::string prefix = MasstreeInodeIndexPrefix(namespace_id);
+    if (hits.front().first.rfind(prefix, 0) != 0) {
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+    entry->page_offset = hits.front().second;
+    entry->max_inode_id = std::stoull(hits.front().first.substr(prefix.size()));
     if (error) {
         error->clear();
     }
@@ -90,7 +102,7 @@ bool MasstreeIndexRuntime::GetInodeOffset(const std::string& namespace_id,
 #else
     (void)namespace_id;
     (void)inode_id;
-    (void)offset;
+    (void)entry;
     if (error) {
         *error = "masstree index support is unavailable in this build";
     }
@@ -98,24 +110,22 @@ bool MasstreeIndexRuntime::GetInodeOffset(const std::string& namespace_id,
 #endif
 }
 
-bool MasstreeIndexRuntime::PutDentryValue(const std::string& namespace_id,
-                                          uint64_t parent_inode,
-                                          const std::string& name,
-                                          uint64_t child_inode,
-                                          zb::rpc::InodeType type,
-                                          std::string* error) {
+bool MasstreeIndexRuntime::PutDentryPageBoundary(const std::string& namespace_id,
+                                                 uint64_t parent_inode,
+                                                 const std::string& max_name,
+                                                 uint64_t page_offset,
+                                                 std::string* error) {
 #ifdef ZBSTORAGE_ENABLE_MASSTREE_INDEX
     if (!dentry_tree_) {
         if (error) {
-            *error = "masstree dentry index runtime is not initialized";
+            *error = "masstree dentry sparse runtime is not initialized";
         }
         return false;
     }
     if (!EnsureThreadInitialized(error)) {
         return false;
     }
-    dentry_tree_->insert(MasstreeDentryIndexKey(namespace_id, parent_inode, name),
-                         PackMasstreeDentryValue(child_inode, type));
+    dentry_tree_->insert(MasstreeDentryIndexKey(namespace_id, parent_inode, max_name), page_offset);
     if (error) {
         error->clear();
     }
@@ -123,9 +133,8 @@ bool MasstreeIndexRuntime::PutDentryValue(const std::string& namespace_id,
 #else
     (void)namespace_id;
     (void)parent_inode;
-    (void)name;
-    (void)child_inode;
-    (void)type;
+    (void)max_name;
+    (void)page_offset;
     if (error) {
         *error = "masstree index support is unavailable in this build";
     }
@@ -133,34 +142,40 @@ bool MasstreeIndexRuntime::PutDentryValue(const std::string& namespace_id,
 #endif
 }
 
-bool MasstreeIndexRuntime::GetDentryValue(const std::string& namespace_id,
-                                          uint64_t parent_inode,
-                                          const std::string& name,
-                                          MasstreePackedDentryValue* value,
-                                          std::string* error) const {
+bool MasstreeIndexRuntime::FindDentryPageBoundary(const std::string& namespace_id,
+                                                  uint64_t parent_inode,
+                                                  const std::string& name,
+                                                  MasstreeDentrySparseEntry* entry,
+                                                  std::string* error) const {
 #ifdef ZBSTORAGE_ENABLE_MASSTREE_INDEX
-    if (!dentry_tree_ || !value) {
+    if (!dentry_tree_ || !entry) {
         if (error) {
-            *error = "masstree dentry lookup args are invalid";
+            *error = "masstree dentry sparse lookup args are invalid";
         }
         return false;
     }
     if (!EnsureThreadInitialized(error)) {
         return false;
     }
-    uint64_t packed = 0;
-    if (!dentry_tree_->search(MasstreeDentryIndexKey(namespace_id, parent_inode, name), packed)) {
+    const std::string seek_key = MasstreeDentryIndexKey(namespace_id, parent_inode, name);
+    std::vector<std::pair<std::string, uint64_t>> hits;
+    dentry_tree_->scan(seek_key, 1, hits);
+    if (hits.empty()) {
         if (error) {
             error->clear();
         }
         return false;
     }
-    if (!UnpackMasstreeDentryValue(packed, value)) {
+    const std::string expected_prefix = MasstreeDentryIndexPrefix(namespace_id, parent_inode);
+    if (hits.front().first.rfind(expected_prefix, 0) != 0) {
         if (error) {
-            *error = "invalid packed masstree dentry value";
+            error->clear();
         }
         return false;
     }
+    entry->page_offset = hits.front().second;
+    entry->max_parent_inode = parent_inode;
+    entry->max_name = hits.front().first.substr(expected_prefix.size());
     if (error) {
         error->clear();
     }
@@ -169,131 +184,7 @@ bool MasstreeIndexRuntime::GetDentryValue(const std::string& namespace_id,
     (void)namespace_id;
     (void)parent_inode;
     (void)name;
-    (void)value;
-    if (error) {
-        *error = "masstree index support is unavailable in this build";
-    }
-    return false;
-#endif
-}
-
-bool MasstreeIndexRuntime::ScanDentryValues(const std::string& namespace_id,
-                                            uint64_t parent_inode,
-                                            const std::string& start_after,
-                                            uint32_t limit,
-                                            std::vector<DentryScanEntry>* entries,
-                                            bool* has_more,
-                                            std::string* next_name,
-                                            std::string* error) const {
-#ifdef ZBSTORAGE_ENABLE_MASSTREE_INDEX
-    if (!dentry_tree_ || !entries) {
-        if (error) {
-            *error = "masstree dentry scan args are invalid";
-        }
-        return false;
-    }
-    entries->clear();
-    if (has_more) {
-        *has_more = false;
-    }
-    if (next_name) {
-        next_name->clear();
-    }
-    if (!EnsureThreadInitialized(error)) {
-        return false;
-    }
-
-    constexpr size_t kScanBatchSize = 256;
-    const std::string prefix = MasstreeDentryIndexPrefix(namespace_id, parent_inode);
-    std::string seek_key = start_after.empty()
-                               ? prefix
-                               : MasstreeDentryIndexKey(namespace_id, parent_inode, start_after);
-    std::string skip_until_key = start_after.empty() ? std::string() : seek_key;
-    const size_t target = limit == 0 ? 0 : static_cast<size_t>(limit);
-
-    std::vector<std::pair<std::string, uint64_t>> raw_hits;
-    while (true) {
-        raw_hits.clear();
-        const size_t remaining = target == 0
-                                     ? kScanBatchSize
-                                     : std::max<size_t>(1, std::min(kScanBatchSize, target + 1 - entries->size()));
-        dentry_tree_->scan(seek_key, static_cast<int>(remaining), raw_hits);
-        if (raw_hits.empty()) {
-            break;
-        }
-
-        bool saw_prefix_entry = false;
-        std::string last_prefix_key;
-        for (const auto& hit : raw_hits) {
-            const std::string& full_key = hit.first;
-            if (!skip_until_key.empty() && full_key <= skip_until_key) {
-                continue;
-            }
-            if (full_key.rfind(prefix, 0) != 0) {
-                if (error) {
-                    error->clear();
-                }
-                return true;
-            }
-            MasstreePackedDentryValue decoded;
-            if (!UnpackMasstreeDentryValue(hit.second, &decoded)) {
-                if (error) {
-                    *error = "invalid packed masstree dentry value";
-                }
-                return false;
-            }
-
-            saw_prefix_entry = true;
-            last_prefix_key = full_key;
-            const std::string name = full_key.substr(prefix.size());
-            if (target != 0 && entries->size() >= target) {
-                if (has_more) {
-                    *has_more = true;
-                }
-                if (error) {
-                    error->clear();
-                }
-                return true;
-            }
-
-            DentryScanEntry entry;
-            entry.name = name;
-            entry.value = decoded;
-            entries->push_back(std::move(entry));
-            if (next_name) {
-                *next_name = name;
-            }
-        }
-
-        if (!saw_prefix_entry) {
-            break;
-        }
-        if (target != 0 && entries->size() > target) {
-            entries->resize(target);
-            if (has_more) {
-                *has_more = true;
-            }
-            break;
-        }
-        seek_key = last_prefix_key;
-        skip_until_key = last_prefix_key;
-        if (raw_hits.size() < remaining) {
-            break;
-        }
-    }
-
-    if (error) {
-        error->clear();
-    }
-    return true;
-#else
-    (void)namespace_id;
-    (void)parent_inode;
-    (void)start_after;
-    (void)limit;
-    (void)entries;
-    (void)has_more;
-    (void)next_name;
+    (void)entry;
     if (error) {
         *error = "masstree index support is unavailable in this build";
     }

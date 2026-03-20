@@ -8,6 +8,7 @@
 
 #include "MasstreeInodeRecordCodec.h"
 #include "MasstreeOpticalProfile.h"
+#include "MasstreePageReader.h"
 
 namespace zb::mds {
 
@@ -461,29 +462,67 @@ bool MasstreeMetaStore::Readdir(const MasstreeNamespaceRoute& route,
         decoded_start_after = start_after;
     }
 
-    std::vector<MasstreeIndexRuntime::DentryScanEntry> scanned;
-    std::string raw_next_name;
-    if (!generation->runtime->ScanDentryValues(generation->manifest->namespace_id,
-                                               inode_id,
-                                               decoded_start_after,
-                                               limit,
-                                               &scanned,
-                                               has_more,
-                                               &raw_next_name,
-                                               error)) {
-        return false;
+    MasstreeDentrySparseEntry sparse_entry;
+    if (!generation->runtime->FindDentryPageBoundary(generation->manifest->namespace_id,
+                                                     inode_id,
+                                                     decoded_start_after,
+                                                     &sparse_entry,
+                                                     error)) {
+        if (error) {
+            error->clear();
+        }
+        return true;
     }
-
-    entries->reserve(scanned.size());
-    for (const auto& hit : scanned) {
-        zb::rpc::Dentry entry;
-        entry.set_name(hit.name);
-        entry.set_inode_id(hit.value.child_inode);
-        entry.set_type(hit.value.type);
-        entries->push_back(std::move(entry));
-    }
-    if (next_token && has_more && *has_more && !raw_next_name.empty()) {
-        *next_token = EncodeMasstreeReaddirToken(generation->manifest->generation_id, raw_next_name);
+    uint64_t page_offset = sparse_entry.page_offset;
+    while (entries->size() < limit) {
+        MasstreeDentryPage page;
+        if (!MasstreePageReader::LoadDentryPage(generation->manifest->dentry_pages_path,
+                                                page_offset,
+                                                &page,
+                                                error)) {
+            return false;
+        }
+        size_t index = entries->empty()
+                           ? MasstreePageReader::LowerBoundDentryInPage(page, inode_id, decoded_start_after)
+                           : 0;
+        if (entries->empty() && !decoded_start_after.empty() && index < page.entries.size() &&
+            page.entries[index].parent_inode == inode_id &&
+            page.entries[index].name == decoded_start_after) {
+            ++index;
+        }
+        for (; index < page.entries.size(); ++index) {
+            const auto& hit = page.entries[index];
+            if (hit.parent_inode != inode_id) {
+                if (error) {
+                    error->clear();
+                }
+                return true;
+            }
+            zb::rpc::Dentry entry;
+            entry.set_name(hit.name);
+            entry.set_inode_id(hit.child_inode);
+            entry.set_type(hit.type);
+            entries->push_back(std::move(entry));
+            if (entries->size() == limit) {
+                if (has_more) {
+                    *has_more = index + 1 < page.entries.size() ||
+                                (page.next_page_offset > page.page_offset);
+                }
+                if (next_token && has_more && *has_more) {
+                    *next_token = EncodeMasstreeReaddirToken(generation->manifest->generation_id, hit.name);
+                }
+                if (error) {
+                    error->clear();
+                }
+                return true;
+            }
+        }
+        if (page.entries.empty() ||
+            page.entries.back().parent_inode != inode_id ||
+            page.next_page_offset <= page.page_offset) {
+            break;
+        }
+        page_offset = page.next_page_offset;
     }
     if (error) {
         error->clear();
@@ -556,74 +595,90 @@ bool MasstreeMetaStore::LoadGenerationData(const MasstreeNamespaceManifest& mani
         return false;
     }
 
-    std::ifstream inode_blob_in(manifest.inode_blob_path, std::ios::binary);
-    std::ifstream dentry_in(manifest.dentry_records_path, std::ios::binary);
-    if (!inode_blob_in || !dentry_in) {
+    uint64_t inode_page_count = 0;
+    uint64_t dentry_page_count = 0;
+
+    std::ifstream inode_sparse_in(manifest.inode_sparse_index_path, std::ios::binary);
+    std::ifstream dentry_sparse_in(manifest.dentry_sparse_index_path, std::ios::binary);
+    if (!inode_sparse_in || !dentry_sparse_in) {
         if (error) {
-            *error = "failed to open masstree generation materialization inputs";
+            *error = "failed to open masstree sparse index files";
         }
         return false;
     }
 
-    uint64_t inode_count = 0;
-    uint64_t dentry_count = 0;
-    uint64_t current_offset = 0;
     while (true) {
         char len_buf[sizeof(uint32_t)] = {};
-        if (!ReadExact(&inode_blob_in, len_buf, sizeof(len_buf))) {
-            if (inode_blob_in.eof()) {
+        if (!ReadExact(&inode_sparse_in, len_buf, sizeof(len_buf))) {
+            if (inode_sparse_in.eof()) {
                 break;
             }
             if (error) {
-                *error = "failed to read masstree inode blob header";
+                *error = "failed to read masstree inode sparse index header";
             }
             return false;
         }
         const uint32_t payload_len = DecodeLe32(len_buf);
         std::string payload(payload_len, '\0');
         if (payload_len != 0 &&
-            !inode_blob_in.read(&payload[0], static_cast<std::streamsize>(payload_len)).good()) {
+            !inode_sparse_in.read(&payload[0], static_cast<std::streamsize>(payload_len)).good()) {
             if (error) {
-                *error = "failed to read masstree inode blob payload";
+                *error = "failed to read masstree inode sparse index payload";
             }
             return false;
         }
-        MasstreeInodeRecord inode_record;
-        if (!MasstreeInodeRecordCodec::Decode(payload, &inode_record, error)) {
+        MasstreeInodeSparseEntry entry;
+        if (!DecodeMasstreeInodeSparseEntry(payload, &entry, error) ||
+            !runtime->PutInodePageBoundary(manifest.namespace_id,
+                                           entry.max_inode_id,
+                                           entry.page_offset,
+                                           error)) {
             return false;
         }
-        if (!runtime->PutInodeOffset(manifest.namespace_id, inode_record.attr.inode_id(), current_offset, error)) {
-            return false;
-        }
-        current_offset += static_cast<uint64_t>(sizeof(uint32_t) + payload_len);
-        ++inode_count;
+        ++inode_page_count;
     }
 
-    DentryRecordView dentry_record;
-    while (ReadDentryRecord(&dentry_in, &dentry_record, error)) {
-        if (!runtime->PutDentryValue(manifest.namespace_id,
-                                     dentry_record.parent_inode,
-                                     dentry_record.name,
-                                     dentry_record.child_inode,
-                                     dentry_record.type,
-                                     error)) {
+    while (true) {
+        char len_buf[sizeof(uint32_t)] = {};
+        if (!ReadExact(&dentry_sparse_in, len_buf, sizeof(len_buf))) {
+            if (dentry_sparse_in.eof()) {
+                break;
+            }
+            if (error) {
+                *error = "failed to read masstree dentry sparse index header";
+            }
             return false;
         }
-        ++dentry_count;
-    }
-    if (error && !error->empty()) {
-        return false;
+        const uint32_t payload_len = DecodeLe32(len_buf);
+        std::string payload(payload_len, '\0');
+        if (payload_len != 0 &&
+            !dentry_sparse_in.read(&payload[0], static_cast<std::streamsize>(payload_len)).good()) {
+            if (error) {
+                *error = "failed to read masstree dentry sparse index payload";
+            }
+            return false;
+        }
+        MasstreeDentrySparseEntry entry;
+        if (!DecodeMasstreeDentrySparseEntry(payload, &entry, error) ||
+            !runtime->PutDentryPageBoundary(manifest.namespace_id,
+                                            entry.max_parent_inode,
+                                            entry.max_name,
+                                            entry.page_offset,
+                                            error)) {
+            return false;
+        }
+        ++dentry_page_count;
     }
 
-    if (inode_count != manifest.inode_count) {
+    if (manifest.inode_page_count != 0 && inode_page_count != manifest.inode_page_count) {
         if (error) {
-            *error = "masstree generation inode count mismatch";
+            *error = "masstree generation inode sparse page count mismatch";
         }
         return false;
     }
-    if (dentry_count != manifest.dentry_count) {
+    if (manifest.dentry_page_count != 0 && dentry_page_count != manifest.dentry_page_count) {
         if (error) {
-            *error = "masstree generation dentry count mismatch";
+            *error = "masstree generation dentry sparse page count mismatch";
         }
         return false;
     }
@@ -652,54 +707,43 @@ bool MasstreeMetaStore::ReadInodeRecord(const LoadedGeneration& generation,
                                         uint64_t inode_id,
                                         MasstreeInodeRecord* record,
                                         std::string* error) const {
+    return ReadInodeRecordFromSparsePages(generation, inode_id, record, error);
+}
+
+bool MasstreeMetaStore::ReadInodeRecordFromSparsePages(const LoadedGeneration& generation,
+                                                       uint64_t inode_id,
+                                                       MasstreeInodeRecord* record,
+                                                       std::string* error) const {
     if (!record || inode_id == 0) {
         if (error) {
             *error = "invalid masstree inode record read args";
         }
         return false;
     }
-    uint64_t offset = 0;
-    if (!generation.runtime->GetInodeOffset(generation.manifest->namespace_id, inode_id, &offset, error)) {
+    MasstreeInodeSparseEntry sparse_entry;
+    if (!generation.runtime->FindInodePageBoundary(generation.manifest->namespace_id,
+                                                   inode_id,
+                                                   &sparse_entry,
+                                                   error)) {
         return false;
     }
-
-    std::ifstream blob(generation.manifest->inode_blob_path, std::ios::binary);
-    if (!blob) {
-        if (error) {
-            *error = "failed to open masstree inode blob: " + generation.manifest->inode_blob_path;
-        }
+    MasstreeInodePage page;
+    if (!MasstreePageReader::LoadInodePage(generation.manifest->inode_pages_path,
+                                           sparse_entry.page_offset,
+                                           &page,
+                                           error)) {
         return false;
     }
-    blob.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-    if (!blob.good()) {
-        if (error) {
-            *error = "failed to seek masstree inode blob";
-        }
+    MasstreeInodePageEntry found;
+    if (!MasstreePageReader::FindInodeInPage(page, inode_id, &found, error)) {
         return false;
     }
-
-    char len_buf[sizeof(uint32_t)] = {};
-    if (!blob.read(len_buf, static_cast<std::streamsize>(sizeof(len_buf))).good()) {
-        if (error) {
-            *error = "failed to read masstree inode blob header";
-        }
-        return false;
-    }
-    const uint32_t payload_len = DecodeLe32(len_buf);
-    std::string payload(payload_len, '\0');
-    if (payload_len != 0 &&
-        !blob.read(&payload[0], static_cast<std::streamsize>(payload_len)).good()) {
-        if (error) {
-            *error = "failed to read masstree inode blob payload";
-        }
-        return false;
-    }
-    if (!MasstreeInodeRecordCodec::Decode(payload, record, error)) {
+    if (!MasstreeInodeRecordCodec::Decode(found.payload, record, error)) {
         return false;
     }
     if (record->attr.inode_id() != inode_id) {
         if (error) {
-            *error = "masstree inode blob payload inode mismatch";
+            *error = "masstree inode page payload inode mismatch";
         }
         return false;
     }
@@ -715,19 +759,39 @@ bool MasstreeMetaStore::FindDentry(const LoadedGeneration& generation,
                                    uint64_t* child_inode,
                                    zb::rpc::InodeType* type,
                                    std::string* error) const {
-    MasstreePackedDentryValue value;
-    if (!generation.runtime->GetDentryValue(generation.manifest->namespace_id,
-                                            parent_inode,
-                                            name,
-                                            &value,
+    return FindDentryInSparsePages(generation, parent_inode, name, child_inode, type, error);
+}
+
+bool MasstreeMetaStore::FindDentryInSparsePages(const LoadedGeneration& generation,
+                                                uint64_t parent_inode,
+                                                const std::string& name,
+                                                uint64_t* child_inode,
+                                                zb::rpc::InodeType* type,
+                                                std::string* error) const {
+    MasstreeDentrySparseEntry sparse_entry;
+    if (!generation.runtime->FindDentryPageBoundary(generation.manifest->namespace_id,
+                                                    parent_inode,
+                                                    name,
+                                                    &sparse_entry,
+                                                    error)) {
+        return false;
+    }
+    MasstreeDentryPage page;
+    if (!MasstreePageReader::LoadDentryPage(generation.manifest->dentry_pages_path,
+                                            sparse_entry.page_offset,
+                                            &page,
                                             error)) {
         return false;
     }
+    MasstreeDentryPageEntry found;
+    if (!MasstreePageReader::FindDentryInPage(page, parent_inode, name, &found, error)) {
+        return false;
+    }
     if (child_inode) {
-        *child_inode = value.child_inode;
+        *child_inode = found.child_inode;
     }
     if (type) {
-        *type = value.type;
+        *type = found.type;
     }
     if (error) {
         error->clear();

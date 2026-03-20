@@ -447,6 +447,8 @@ add_executable(masstree_meta_import_tool
     src/mds/masstree_meta/MasstreeInodeRecordCodec.cpp
     src/mds/masstree_meta/MasstreeManifest.cpp
     src/mds/masstree_meta/MasstreeOpticalAllocator.cpp
+    src/mds/masstree_meta/MasstreePageLayout.cpp
+    src/mds/masstree_meta/MasstreePageReader.cpp
 )
 set_target_properties(masstree_meta_import_tool PROPERTIES
     CXX_STANDARD 20
@@ -490,6 +492,8 @@ add_executable(masstree_meta_build_tool
     src/mds/masstree_meta/MasstreeManifest.cpp
     src/mds/masstree_meta/MasstreeNamespaceCatalog.cpp
     src/mds/masstree_meta/MasstreeOpticalAllocator.cpp
+    src/mds/masstree_meta/MasstreePageLayout.cpp
+    src/mds/masstree_meta/MasstreePageReader.cpp
     src/mds/masstree_meta/MasstreeStatsStore.cpp
     src/mds/storage/MetaCodec.cpp
     src/mds/storage/RocksMetaStore.cpp
@@ -627,6 +631,8 @@ add_executable(mds_server
     src/mds/masstree_meta/MasstreeMetaStore.cpp
     src/mds/masstree_meta/MasstreeNamespaceCatalog.cpp
     src/mds/masstree_meta/MasstreeOpticalAllocator.cpp
+    src/mds/masstree_meta/MasstreePageLayout.cpp
+    src/mds/masstree_meta/MasstreePageReader.cpp
     src/mds/masstree_meta/MasstreeStatsStore.cpp
     src/mds/storage/MetaCodec.cpp
     src/mds/storage/MetaStoreRouter.cpp

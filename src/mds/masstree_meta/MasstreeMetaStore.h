@@ -10,6 +10,7 @@
 #include "MasstreeInodeRecordCodec.h"
 #include "MasstreeManifest.h"
 #include "MasstreeNamespaceCatalog.h"
+#include "MasstreePageLayout.h"
 #include "mds.pb.h"
 
 namespace zb::mds {
@@ -60,12 +61,22 @@ private:
                          uint64_t inode_id,
                          MasstreeInodeRecord* record,
                          std::string* error) const;
+    bool ReadInodeRecordFromSparsePages(const LoadedGeneration& generation,
+                                        uint64_t inode_id,
+                                        MasstreeInodeRecord* record,
+                                        std::string* error) const;
     bool FindDentry(const LoadedGeneration& generation,
                     uint64_t parent_inode,
                     const std::string& name,
                     uint64_t* child_inode,
                     zb::rpc::InodeType* type,
                     std::string* error) const;
+    bool FindDentryInSparsePages(const LoadedGeneration& generation,
+                                 uint64_t parent_inode,
+                                 const std::string& name,
+                                 uint64_t* child_inode,
+                                 zb::rpc::InodeType* type,
+                                 std::string* error) const;
     bool StripRoutePrefix(const std::string& route_prefix,
                           const std::string& path,
                           std::string* relative_path,

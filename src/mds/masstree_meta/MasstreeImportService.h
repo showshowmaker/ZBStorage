@@ -37,7 +37,7 @@ public:
         uint64_t inode_max{0};
         uint64_t inode_count{0};
         uint64_t dentry_count{0};
-        uint64_t inode_blob_bytes{0};
+        uint64_t inode_pages_bytes{0};
         uint64_t avg_file_size_bytes{0};
         std::string total_file_bytes;
     };

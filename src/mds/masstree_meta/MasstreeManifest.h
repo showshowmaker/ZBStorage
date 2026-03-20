@@ -6,22 +6,28 @@
 namespace zb::mds {
 
 struct MasstreeNamespaceManifest {
+    uint32_t layout_version{1};
     std::string namespace_id;
     std::string path_prefix;
     std::string generation_id;
     std::string manifest_path;
     std::string inode_records_path;
     std::string dentry_records_path;
+    std::string inode_pages_path;
+    std::string inode_sparse_index_path;
+    std::string dentry_pages_path;
+    std::string dentry_sparse_index_path;
     std::string verify_manifest_path;
-    std::string inode_blob_path;
-    std::string dentry_data_path;
     std::string cluster_stats_path;
     std::string allocation_summary_path;
+    uint64_t page_size_bytes{0};
     uint64_t root_inode_id{0};
     uint64_t inode_min{0};
     uint64_t inode_max{0};
     uint64_t inode_count{0};
     uint64_t dentry_count{0};
+    uint64_t inode_page_count{0};
+    uint64_t dentry_page_count{0};
     uint64_t file_count{0};
     uint64_t level1_dir_count{0};
     uint64_t leaf_dir_count{0};

@@ -21,7 +21,9 @@ public:
     struct Result {
         uint64_t inode_imported{0};
         uint64_t dentry_imported{0};
-        uint64_t inode_blob_bytes{0};
+        uint64_t inode_page_count{0};
+        uint64_t dentry_page_count{0};
+        uint64_t inode_pages_bytes{0};
         uint64_t verified_inode_samples{0};
         uint64_t verified_dentry_samples{0};
         uint64_t file_count{0};

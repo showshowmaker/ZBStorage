@@ -434,7 +434,7 @@ message ImportMasstreeNamespaceReply {
   uint64 dentry_count = 5;
   uint64 inode_min = 6;
   uint64 inode_max = 7;
-  uint64 inode_blob_bytes = 8;
+  uint64 inode_pages_bytes = 8;
   string job_id = 9;
 }
 
@@ -459,7 +459,7 @@ message MasstreeImportJobInfo {
   uint64 dentry_count = 11;
   uint64 inode_min = 12;
   uint64 inode_max = 13;
-  uint64 inode_blob_bytes = 14;
+  uint64 inode_pages_bytes = 14;
 }
 
 message GetMasstreeImportJobRequest {

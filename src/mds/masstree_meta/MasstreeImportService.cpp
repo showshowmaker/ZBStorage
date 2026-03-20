@@ -206,7 +206,7 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
         result->inode_max = generate_result.inode_max;
         result->inode_count = generate_result.inode_count;
         result->dentry_count = generate_result.dentry_count;
-        result->inode_blob_bytes = import_result.inode_blob_bytes;
+        result->inode_pages_bytes = import_result.inode_pages_bytes;
         result->avg_file_size_bytes = import_result.avg_file_size_bytes;
         result->total_file_bytes = import_result.total_file_bytes;
     }

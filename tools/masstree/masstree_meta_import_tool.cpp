@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
 
     std::cout << "inode_imported=" << result.inode_imported << "\n";
     std::cout << "dentry_imported=" << result.dentry_imported << "\n";
-    std::cout << "inode_blob_bytes=" << result.inode_blob_bytes << "\n";
+    std::cout << "inode_pages_bytes=" << result.inode_pages_bytes << "\n";
     std::cout << "verified_inode_samples=" << result.verified_inode_samples << "\n";
     std::cout << "verified_dentry_samples=" << result.verified_dentry_samples << "\n";
     return 0;
