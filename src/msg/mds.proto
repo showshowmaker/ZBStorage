@@ -435,6 +435,41 @@ message ImportMasstreeNamespaceReply {
   uint64 inode_min = 6;
   uint64 inode_max = 7;
   uint64 inode_blob_bytes = 8;
+  string job_id = 9;
+}
+
+enum MasstreeImportJobState {
+  MASSTREE_IMPORT_JOB_PENDING = 0;
+  MASSTREE_IMPORT_JOB_RUNNING = 1;
+  MASSTREE_IMPORT_JOB_COMPLETED = 2;
+  MASSTREE_IMPORT_JOB_FAILED = 3;
+}
+
+message MasstreeImportJobInfo {
+  string job_id = 1;
+  string namespace_id = 2;
+  string generation_id = 3;
+  string path_prefix = 4;
+  uint64 file_count = 5;
+  MasstreeImportJobState state = 6;
+  string error_message = 7;
+  string manifest_path = 8;
+  uint64 root_inode_id = 9;
+  uint64 inode_count = 10;
+  uint64 dentry_count = 11;
+  uint64 inode_min = 12;
+  uint64 inode_max = 13;
+  uint64 inode_blob_bytes = 14;
+}
+
+message GetMasstreeImportJobRequest {
+  string job_id = 1;
+}
+
+message GetMasstreeImportJobReply {
+  MdsStatus status = 1;
+  bool found = 2;
+  MasstreeImportJobInfo job = 3;
 }
 
 message GetRandomMasstreeFileAttrRequest {
@@ -518,6 +553,7 @@ service MdsService {
   rpc GetPathPlacementPolicy(GetPathPlacementPolicyRequest) returns (GetPathPlacementPolicyReply);
   rpc ImportArchiveNamespace(ImportArchiveNamespaceRequest) returns (ImportArchiveNamespaceReply);
   rpc ImportMasstreeNamespace(ImportMasstreeNamespaceRequest) returns (ImportMasstreeNamespaceReply);
+  rpc GetMasstreeImportJob(GetMasstreeImportJobRequest) returns (GetMasstreeImportJobReply);
   rpc GetRandomMasstreeFileAttr(GetRandomMasstreeFileAttrRequest) returns (GetRandomMasstreeFileAttrReply);
   rpc GetMasstreeClusterStats(GetMasstreeClusterStatsRequest) returns (GetMasstreeClusterStatsReply);
   rpc GetMasstreeNamespaceStats(GetMasstreeNamespaceStatsRequest) returns (GetMasstreeNamespaceStatsReply);

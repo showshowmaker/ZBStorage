@@ -13,6 +13,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -35,6 +36,7 @@ DEFINE_uint32(masstree_max_files_per_leaf_dir, 2048, "Masstree max files per lea
 DEFINE_uint32(masstree_max_subdirs_per_dir, 256, "Masstree max subdirs per dir");
 DEFINE_uint32(masstree_verify_inode_samples, 32, "Masstree import inode verify sample count");
 DEFINE_uint32(masstree_verify_dentry_samples, 32, "Masstree import dentry verify sample count");
+DEFINE_uint32(masstree_job_poll_interval_ms, 1000, "Masstree import job poll interval in ms");
 DEFINE_int32(timeout_ms, 5000, "RPC timeout in ms");
 DEFINE_int32(max_retry, 0, "RPC max retry");
 
@@ -250,6 +252,23 @@ public:
         zb::rpc::GetMasstreeClusterStatsReply reply;
         brpc::Controller cntl;
         stub_.GetMasstreeClusterStats(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            reply.mutable_status()->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+            reply.mutable_status()->set_message(cntl.ErrorText());
+        }
+        if (reply_out) {
+            *reply_out = reply;
+        }
+        return !cntl.Failed() && reply.status().code() == zb::rpc::MDS_OK;
+    }
+
+    bool GetMasstreeImportJob(const std::string& job_id,
+                              zb::rpc::GetMasstreeImportJobReply* reply_out) {
+        zb::rpc::GetMasstreeImportJobRequest request;
+        request.set_job_id(job_id);
+        zb::rpc::GetMasstreeImportJobReply reply;
+        brpc::Controller cntl;
+        stub_.GetMasstreeImportJob(&cntl, &request, &reply, nullptr);
         if (cntl.Failed()) {
             reply.mutable_status()->set_code(zb::rpc::MDS_INTERNAL_ERROR);
             reply.mutable_status()->set_message(cntl.ErrorText());
@@ -572,12 +591,37 @@ private:
         std::cout << "namespace_id=" << namespace_id << '\n';
         std::cout << "generation_id=" << generation_id << '\n';
         std::cout << "path_prefix=" << path_prefix << '\n';
-        std::cout << "manifest_path=" << reply.manifest_path() << '\n';
-        std::cout << "root_inode_id=" << reply.root_inode_id() << '\n';
-        std::cout << "inode_count=" << reply.inode_count() << '\n';
-        std::cout << "dentry_count=" << reply.dentry_count() << '\n';
-        std::cout << "inode_range=[" << reply.inode_min() << ", " << reply.inode_max() << "]\n";
-        return true;
+        std::cout << "job_id=" << reply.job_id() << '\n';
+
+        while (true) {
+            zb::rpc::GetMasstreeImportJobReply job_reply;
+            if (!mds_.GetMasstreeImportJob(reply.job_id(), &job_reply)) {
+                std::cerr << "GetMasstreeImportJob failed: " << job_reply.status().message() << '\n';
+                return false;
+            }
+            if (!job_reply.found()) {
+                std::cerr << "Masstree import job disappeared: " << reply.job_id() << '\n';
+                return false;
+            }
+
+            const auto& job = job_reply.job();
+            std::cout << "job_state=" << job.state() << '\n';
+            if (job.state() == zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED) {
+                std::cout << "manifest_path=" << job.manifest_path() << '\n';
+                std::cout << "root_inode_id=" << job.root_inode_id() << '\n';
+                std::cout << "inode_count=" << job.inode_count() << '\n';
+                std::cout << "dentry_count=" << job.dentry_count() << '\n';
+                std::cout << "inode_range=[" << job.inode_min() << ", " << job.inode_max() << "]\n";
+                std::cout << "inode_blob_bytes=" << job.inode_blob_bytes() << '\n';
+                return true;
+            }
+            if (job.state() == zb::rpc::MASSTREE_IMPORT_JOB_FAILED) {
+                std::cerr << "Masstree import job failed: " << job.error_message() << '\n';
+                return false;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(std::max<uint32_t>(1, FLAGS_masstree_job_poll_interval_ms)));
+        }
     }
 
     bool RunMasstreeQueryDemo() {

@@ -3,8 +3,11 @@
 #include <brpc/channel.h>
 
 #include <memory>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -38,6 +41,7 @@ public:
                    uint32_t archive_import_page_size_bytes,
                    FileArchiveCandidateQueue* candidate_queue = nullptr,
                    ArchiveLeaseManager* lease_manager = nullptr);
+    ~MdsServiceImpl() override;
 
     void Lookup(google::protobuf::RpcController* cntl_base,
                 const zb::rpc::LookupRequest* request,
@@ -137,6 +141,10 @@ public:
                                  const zb::rpc::ImportMasstreeNamespaceRequest* request,
                                  zb::rpc::ImportMasstreeNamespaceReply* response,
                                  google::protobuf::Closure* done) override;
+    void GetMasstreeImportJob(google::protobuf::RpcController* cntl_base,
+                              const zb::rpc::GetMasstreeImportJobRequest* request,
+                              zb::rpc::GetMasstreeImportJobReply* response,
+                              google::protobuf::Closure* done) override;
     void GetRandomMasstreeFileAttr(google::protobuf::RpcController* cntl_base,
                                    const zb::rpc::GetRandomMasstreeFileAttrRequest* request,
                                    zb::rpc::GetRandomMasstreeFileAttrReply* response,
@@ -151,6 +159,14 @@ public:
                                    google::protobuf::Closure* done) override;
 
 private:
+    struct MasstreeImportJob {
+        std::string job_id;
+        MasstreeImportService::Request request;
+        MasstreeImportService::Result result;
+        zb::rpc::MasstreeImportJobState state{zb::rpc::MASSTREE_IMPORT_JOB_PENDING};
+        std::string error_message;
+    };
+
     bool RecoverArchiveCatalog(std::string* error);
     bool EnsureRoot(std::string* error);
     bool ResolvePath(const std::string& path, uint64_t* inode_id, zb::rpc::InodeAttr* attr, std::string* error);
@@ -218,6 +234,10 @@ private:
                                 uint64_t* inode_id,
                                 zb::rpc::InodeAttr* attr,
                                 std::string* error) const;
+    void RunMasstreeImportWorker();
+    std::shared_ptr<MasstreeImportJob> EnqueueMasstreeImportJob(const MasstreeImportService::Request& request);
+    std::shared_ptr<MasstreeImportJob> FindMasstreeImportJob(const std::string& job_id) const;
+    static void FillMasstreeImportJobInfo(const MasstreeImportJob& job, zb::rpc::MasstreeImportJobInfo* info);
     brpc::Channel* GetDataChannel(const std::string& address, std::string* error);
 
     uint64_t AllocateInodeId(std::string* error);
@@ -241,6 +261,13 @@ private:
     MasstreeMetaStore masstree_meta_store_;
     ArchiveImportService archive_import_service_;
     MetaStoreRouter meta_router_;
+    mutable std::mutex masstree_import_job_mu_;
+    std::condition_variable masstree_import_job_cv_;
+    std::deque<std::shared_ptr<MasstreeImportJob>> masstree_import_job_queue_;
+    std::unordered_map<std::string, std::shared_ptr<MasstreeImportJob>> masstree_import_jobs_;
+    std::thread masstree_import_worker_;
+    uint64_t masstree_import_next_job_id_{1};
+    bool stop_masstree_import_worker_{false};
     mutable std::mutex channel_mu_;
     std::unordered_map<std::string, std::unique_ptr<brpc::Channel>> channels_;
 };

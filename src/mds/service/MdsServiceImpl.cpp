@@ -255,6 +255,18 @@ MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
     archive_meta_store_.Init(archive_meta_root, archive_meta_options, &error);
     RecoverArchiveCatalog(&error);
     EnsureRoot(&error);
+    masstree_import_worker_ = std::thread(&MdsServiceImpl::RunMasstreeImportWorker, this);
+}
+
+MdsServiceImpl::~MdsServiceImpl() {
+    {
+        std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
+        stop_masstree_import_worker_ = true;
+    }
+    masstree_import_job_cv_.notify_all();
+    if (masstree_import_worker_.joinable()) {
+        masstree_import_worker_.join();
+    }
 }
 
 bool MdsServiceImpl::RecoverArchiveCatalog(std::string* error) {
@@ -1231,21 +1243,37 @@ void MdsServiceImpl::ImportMasstreeNamespace(google::protobuf::RpcController* cn
     import_request.verify_dentry_samples = request->verify_dentry_samples();
     import_request.publish_route = true;
 
-    MasstreeImportService::Result result;
-    std::string error;
-    if (!masstree_import_service_.ImportNamespace(import_request, &result, &error)) {
-        FillStatus(response->mutable_status(),
+    std::shared_ptr<MasstreeImportJob> job = EnqueueMasstreeImportJob(import_request);
+    response->set_job_id(job->job_id);
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "QUEUED");
+}
+
+void MdsServiceImpl::GetMasstreeImportJob(google::protobuf::RpcController* cntl_base,
+                                          const zb::rpc::GetMasstreeImportJobRequest* request,
+                                          zb::rpc::GetMasstreeImportJobReply* response,
+                                          google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!request || !response) {
+        FillStatus(response ? response->mutable_status() : nullptr,
                    zb::rpc::MDS_INTERNAL_ERROR,
-                   error.empty() ? "masstree import failed" : error);
+                   "Service not initialized");
         return;
     }
-    response->set_manifest_path(result.manifest_path);
-    response->set_root_inode_id(result.root_inode_id);
-    response->set_inode_count(result.inode_count);
-    response->set_dentry_count(result.dentry_count);
-    response->set_inode_min(result.inode_min);
-    response->set_inode_max(result.inode_max);
-    response->set_inode_blob_bytes(result.inode_blob_bytes);
+    if (request->job_id().empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INVALID_ARGUMENT,
+                   "job_id is required");
+        return;
+    }
+    std::shared_ptr<MasstreeImportJob> job = FindMasstreeImportJob(request->job_id());
+    if (!job) {
+        response->set_found(false);
+        FillStatus(response->mutable_status(), zb::rpc::MDS_NOT_FOUND, "job not found");
+        return;
+    }
+    response->set_found(true);
+    FillMasstreeImportJobInfo(*job, response->mutable_job());
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
@@ -2347,6 +2375,85 @@ bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
         error->clear();
     }
     return false;
+}
+
+void MdsServiceImpl::RunMasstreeImportWorker() {
+    while (true) {
+        std::shared_ptr<MasstreeImportJob> job;
+        {
+            std::unique_lock<std::mutex> lock(masstree_import_job_mu_);
+            masstree_import_job_cv_.wait(lock, [this]() {
+                return stop_masstree_import_worker_ || !masstree_import_job_queue_.empty();
+            });
+            if (stop_masstree_import_worker_ && masstree_import_job_queue_.empty()) {
+                return;
+            }
+            job = masstree_import_job_queue_.front();
+            masstree_import_job_queue_.pop_front();
+            job->state = zb::rpc::MASSTREE_IMPORT_JOB_RUNNING;
+        }
+
+        std::string error;
+        MasstreeImportService::Result result;
+        if (masstree_import_service_.ImportNamespace(job->request, &result, &error)) {
+            std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
+            job->result = std::move(result);
+            job->error_message.clear();
+            job->state = zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED;
+        } else {
+            std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
+            job->error_message = error.empty() ? "masstree import failed" : error;
+            job->state = zb::rpc::MASSTREE_IMPORT_JOB_FAILED;
+        }
+    }
+}
+
+std::shared_ptr<MdsServiceImpl::MasstreeImportJob>
+MdsServiceImpl::EnqueueMasstreeImportJob(const MasstreeImportService::Request& request) {
+    auto job = std::make_shared<MasstreeImportJob>();
+    {
+        std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
+        std::ostringstream oss;
+        oss << "masstree-job-" << NowMilliseconds() << "-" << masstree_import_next_job_id_++;
+        job->job_id = oss.str();
+        job->request = request;
+        masstree_import_jobs_[job->job_id] = job;
+        masstree_import_job_queue_.push_back(job);
+    }
+    masstree_import_job_cv_.notify_one();
+    return job;
+}
+
+std::shared_ptr<MdsServiceImpl::MasstreeImportJob>
+MdsServiceImpl::FindMasstreeImportJob(const std::string& job_id) const {
+    std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
+    auto it = masstree_import_jobs_.find(job_id);
+    if (it == masstree_import_jobs_.end()) {
+        return nullptr;
+    }
+    return it->second;
+}
+
+void MdsServiceImpl::FillMasstreeImportJobInfo(const MasstreeImportJob& job,
+                                               zb::rpc::MasstreeImportJobInfo* info) {
+    if (!info) {
+        return;
+    }
+    info->Clear();
+    info->set_job_id(job.job_id);
+    info->set_namespace_id(job.request.namespace_id);
+    info->set_generation_id(job.request.generation_id);
+    info->set_path_prefix(job.request.path_prefix);
+    info->set_file_count(job.request.file_count);
+    info->set_state(job.state);
+    info->set_error_message(job.error_message);
+    info->set_manifest_path(job.result.manifest_path);
+    info->set_root_inode_id(job.result.root_inode_id);
+    info->set_inode_count(job.result.inode_count);
+    info->set_dentry_count(job.result.dentry_count);
+    info->set_inode_min(job.result.inode_min);
+    info->set_inode_max(job.result.inode_max);
+    info->set_inode_blob_bytes(job.result.inode_blob_bytes);
 }
 
 brpc::Channel* MdsServiceImpl::GetDataChannel(const std::string& address, std::string* error) {
