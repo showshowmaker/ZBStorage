@@ -619,6 +619,8 @@ add_executable(mds_server
     src/mds/archive_meta/ArchiveNamespaceCatalog.cpp
     src/mds/masstree_meta/MasstreeBulkMetaGenerator.cpp
     src/mds/masstree_meta/MasstreeBulkImporter.cpp
+    src/mds/masstree_meta/MasstreeGenerationPublisher.cpp
+    src/mds/masstree_meta/MasstreeImportService.cpp
     src/mds/masstree_meta/MasstreeIndexRuntime.cpp
     src/mds/masstree_meta/MasstreeInodeRecordCodec.cpp
     src/mds/masstree_meta/MasstreeManifest.cpp
