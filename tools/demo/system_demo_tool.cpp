@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -122,6 +123,42 @@ std::string FormatBytes(uint64_t bytes) {
         oss << std::fixed << std::setprecision(2) << value << units[unit];
     }
     return oss.str();
+}
+
+std::string FormatDurationSeconds(uint64_t seconds) {
+    const uint64_t hours = seconds / 3600ULL;
+    const uint64_t minutes = (seconds % 3600ULL) / 60ULL;
+    const uint64_t secs = seconds % 60ULL;
+    std::ostringstream oss;
+    if (hours != 0) {
+        oss << hours << "h";
+    }
+    if (hours != 0 || minutes != 0) {
+        if (hours != 0) {
+            oss << " ";
+        }
+        oss << minutes << "m";
+    }
+    if (hours != 0 || minutes != 0) {
+        oss << " ";
+    }
+    oss << secs << "s";
+    return oss.str();
+}
+
+const char* MasstreeJobStateName(zb::rpc::MasstreeImportJobState state) {
+    switch (state) {
+    case zb::rpc::MASSTREE_IMPORT_JOB_PENDING:
+        return "PENDING";
+    case zb::rpc::MASSTREE_IMPORT_JOB_RUNNING:
+        return "RUNNING";
+    case zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED:
+        return "COMPLETED";
+    case zb::rpc::MASSTREE_IMPORT_JOB_FAILED:
+        return "FAILED";
+    default:
+        return "UNKNOWN";
+    }
 }
 
 std::string NodeTypeName(zb::rpc::NodeType type) {
@@ -593,6 +630,11 @@ private:
         std::cout << "path_prefix=" << path_prefix << '\n';
         std::cout << "job_id=" << reply.job_id() << '\n';
 
+        const auto poll_started_at = std::chrono::steady_clock::now();
+        zb::rpc::MasstreeImportJobState last_state = zb::rpc::MASSTREE_IMPORT_JOB_PENDING;
+        bool has_last_state = false;
+        uint64_t last_printed_elapsed_bucket = std::numeric_limits<uint64_t>::max();
+
         while (true) {
             zb::rpc::GetMasstreeImportJobReply job_reply;
             if (!mds_.GetMasstreeImportJob(reply.job_id(), &job_reply)) {
@@ -605,7 +647,17 @@ private:
             }
 
             const auto& job = job_reply.job();
-            std::cout << "job_state=" << job.state() << '\n';
+            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - poll_started_at);
+            const uint64_t elapsed_seconds = static_cast<uint64_t>(elapsed.count());
+            const uint64_t elapsed_bucket = elapsed_seconds / 10ULL;
+            if (!has_last_state || job.state() != last_state || elapsed_bucket != last_printed_elapsed_bucket) {
+                std::cout << "job_status=" << MasstreeJobStateName(job.state())
+                          << " elapsed=" << FormatDurationSeconds(elapsed_seconds) << '\n';
+                last_state = job.state();
+                has_last_state = true;
+                last_printed_elapsed_bucket = elapsed_bucket;
+            }
             if (job.state() == zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED) {
                 std::cout << "manifest_path=" << job.manifest_path() << '\n';
                 std::cout << "root_inode_id=" << job.root_inode_id() << '\n';
