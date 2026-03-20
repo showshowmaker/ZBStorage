@@ -1,7 +1,9 @@
 ﻿NAMESPACE_PREFIX=test-ns scripts/import_masstree_demo.sh 2
 scripts/run_system_demo.sh
 
-scripts/start_demo_stack.sh start
+<!-- scripts/start_demo_stack.sh start -->
+RUN_DIR=/mnt/md0/wjh/zb_data MOUNT_POINT=/mnt/md0/wjh/mp bash scripts/start_demo_stack.sh start
+RUN_DIR=/mnt/md0/wjh/zb_data bash scripts/start_demo_stack.sh stop
 NAMESPACE_PREFIX=test-ns scripts/import_masstree_demo.sh 2
 scripts/run_system_demo.sh
 
