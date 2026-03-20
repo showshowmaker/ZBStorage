@@ -1,8 +1,8 @@
-﻿scripts/import_masstree_demo.sh <file_count> [namespace_id]
+﻿NAMESPACE_PREFIX=test-ns scripts/import_masstree_demo.sh 2
 scripts/run_system_demo.sh
 
 scripts/start_demo_stack.sh start
-scripts/import_masstree_demo.sh 100000
+NAMESPACE_PREFIX=test-ns scripts/import_masstree_demo.sh 2
 scripts/run_system_demo.sh
 
 

@@ -6,12 +6,13 @@ BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 MDS_ADDR="${MDS_ADDR:-127.0.0.1:9000}"
 SCHEDULER_ADDR="${SCHEDULER_ADDR:-127.0.0.1:9100}"
 MOUNT_POINT="${MOUNT_POINT:-${ROOT_DIR}/.demo_run/mnt}"
+NAMESPACE_PREFIX="${NAMESPACE_PREFIX:-demo-ns}"
+FILES_PER_NAMESPACE=100000000
 
-FILE_COUNT="${1:-}"
-NAMESPACE_ID="${2:-demo-ns-$(date +%Y%m%d_%H%M%S)}"
+NAMESPACE_COUNT="${1:-}"
 
-if [[ -z "${FILE_COUNT}" ]]; then
-  echo "Usage: $0 <file_count> [namespace_id]"
+if [[ -z "${NAMESPACE_COUNT}" ]]; then
+  echo "Usage: $0 <namespace_count>"
   exit 1
 fi
 
@@ -20,10 +21,20 @@ if [[ ! -x "${BUILD_DIR}/system_demo_tool" ]]; then
   exit 1
 fi
 
-exec "${BUILD_DIR}/system_demo_tool" \
-  --mds="${MDS_ADDR}" \
-  --scheduler="${SCHEDULER_ADDR}" \
-  --mount_point="${MOUNT_POINT}" \
-  --scenario=masstree_import \
-  --masstree_namespace_id="${NAMESPACE_ID}" \
-  --masstree_file_count="${FILE_COUNT}"
+if ! [[ "${NAMESPACE_COUNT}" =~ ^[0-9]+$ ]] || [[ "${NAMESPACE_COUNT}" -le 0 ]]; then
+  echo "namespace_count must be a positive integer"
+  exit 1
+fi
+
+for ((i=1; i<=NAMESPACE_COUNT; ++i)); do
+  NAMESPACE_ID="$(printf "%s-%06d" "${NAMESPACE_PREFIX}" "${i}")"
+  echo "==== importing namespace ${i}/${NAMESPACE_COUNT}: ${NAMESPACE_ID} (${FILES_PER_NAMESPACE} files) ===="
+
+  "${BUILD_DIR}/system_demo_tool" \
+    --mds="${MDS_ADDR}" \
+    --scheduler="${SCHEDULER_ADDR}" \
+    --mount_point="${MOUNT_POINT}" \
+    --scenario=masstree_import \
+    --masstree_namespace_id="${NAMESPACE_ID}" \
+    --masstree_file_count="${FILES_PER_NAMESPACE}"
+done
