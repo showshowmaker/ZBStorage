@@ -465,6 +465,7 @@ target_link_libraries(masstree_meta_import_tool
 )
 if(UNIX)
     target_sources(masstree_meta_import_tool PRIVATE
+        masstree/index/masstree/clp.c
         masstree/index/masstree/compiler.cc
         masstree/index/masstree/kvthread.cc
         masstree/index/masstree/masstree_wrapper.cc
@@ -512,6 +513,7 @@ target_link_libraries(masstree_meta_build_tool
 )
 if(UNIX)
     target_sources(masstree_meta_build_tool PRIVATE
+        masstree/index/masstree/clp.c
         masstree/index/masstree/compiler.cc
         masstree/index/masstree/kvthread.cc
         masstree/index/masstree/masstree_wrapper.cc
@@ -663,6 +665,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 if(UNIX)
     target_sources(mds_server PRIVATE
+        masstree/index/masstree/clp.c
         masstree/index/masstree/compiler.cc
         masstree/index/masstree/kvthread.cc
         masstree/index/masstree/masstree_wrapper.cc
