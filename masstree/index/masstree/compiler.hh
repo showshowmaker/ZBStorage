@@ -15,6 +15,7 @@
  */
 #ifndef MASSTREE_COMPILER_HH
 #define MASSTREE_COMPILER_HH 1
+#include "config.h"
 #include <stdint.h>
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
