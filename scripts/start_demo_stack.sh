@@ -19,6 +19,10 @@ REAL_NODE_ID="${REAL_NODE_ID:-node-real-01}"
 VIRTUAL_NODE_ID="${VIRTUAL_NODE_ID:-vpool}"
 REAL_DIR_NAME="${REAL_DIR_NAME:-real}"
 VIRTUAL_DIR_NAME="${VIRTUAL_DIR_NAME:-virtual}"
+REAL_DISK_COUNT="${REAL_DISK_COUNT:-24}"
+VIRTUAL_NODE_COUNT="${VIRTUAL_NODE_COUNT:-99}"
+VIRTUAL_DISK_COUNT="${VIRTUAL_DISK_COUNT:-24}"
+ONLINE_DISK_CAPACITY_BYTES="${ONLINE_DISK_CAPACITY_BYTES:-2000000000000}"
 
 MODE="${1:-start}"
 
@@ -26,6 +30,38 @@ mkdir -p "${CFG_DIR}" "${LOG_DIR}" "${PID_DIR}" "${DATA_DIR}" "${MOUNT_POINT}"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+build_real_disk_list() {
+  local count="$1"
+  local width=2
+  if (( count >= 100 )); then
+    width=3
+  fi
+  local result=""
+  local i
+  for ((i=1; i<=count; ++i)); do
+    local disk
+    disk="$(printf "disk-%0${width}d" "${i}")"
+    if [[ -n "${result}" ]]; then
+      result+=","
+    fi
+    result+="${disk}"
+  done
+  echo "${result}"
+}
+
+build_virtual_disk_list() {
+  local count="$1"
+  local result=""
+  local i
+  for ((i=0; i<count; ++i)); do
+    if [[ -n "${result}" ]]; then
+      result+=","
+    fi
+    result+="disk${i}"
+  done
+  echo "${result}"
 }
 
 require_bin() {
@@ -95,6 +131,10 @@ stop_by_name() {
 
 render_configs() {
   mkdir -p "${DATA_DIR}/real/disks" "${DATA_DIR}/virtual/meta" "${DATA_DIR}/mds"
+  local real_disks
+  local virtual_disks
+  real_disks="$(build_real_disk_list "${REAL_DISK_COUNT}")"
+  virtual_disks="$(build_virtual_disk_list "${VIRTUAL_DISK_COUNT}")"
 
   cat > "${CFG_DIR}/scheduler.conf" <<EOF
 SUSPECT_TIMEOUT_MS=6000
@@ -104,8 +144,8 @@ EOF
 
   cat > "${CFG_DIR}/real_node.conf" <<EOF
 DISK_BASE_DIR=${DATA_DIR}/real/disks
-DISK_COUNT=3
-DISK_CAPACITY_BYTES=2199023255552
+DISK_COUNT=${REAL_DISK_COUNT}
+DISK_CAPACITY_BYTES=${ONLINE_DISK_CAPACITY_BYTES}
 REPLICATION_ENABLED=false
 NODE_ID=${REAL_NODE_ID}
 NODE_ADDRESS=127.0.0.1:${REAL_PORT}
@@ -124,18 +164,18 @@ GROUP_ID=${VIRTUAL_NODE_ID}
 NODE_ROLE=PRIMARY
 REPLICATION_ENABLED=false
 NODE_WEIGHT=8
-VIRTUAL_NODE_COUNT=1000
+VIRTUAL_NODE_COUNT=${VIRTUAL_NODE_COUNT}
 SCHEDULER_ADDR=127.0.0.1:${SCHEDULER_PORT}
 MDS_ADDR=127.0.0.1:${MDS_PORT}
 HEARTBEAT_INTERVAL_MS=2000
 ALLOW_DYNAMIC_DISKS=true
-DISKS=disk0,disk1,disk2
+DISKS=${virtual_disks}
 READ_MBPS=800
 WRITE_MBPS=600
 READ_BASE_LATENCY_MS=2
 WRITE_BASE_LATENCY_MS=3
 JITTER_MS=1
-DISK_CAPACITY_BYTES=2199023255552
+DISK_CAPACITY_BYTES=${ONLINE_DISK_CAPACITY_BYTES}
 MOUNT_POINT_PREFIX=${DATA_DIR}/virtual/mount
 ARCHIVE_META_DIR=${DATA_DIR}/virtual/meta
 ARCHIVE_META_SNAPSHOT_INTERVAL_OPS=20000
@@ -156,8 +196,8 @@ ARCHIVE_SCAN_INTERVAL_MS=5000
 ARCHIVE_MAX_OBJECTS_PER_ROUND=64
 ARCHIVE_META_ROOT=${DATA_DIR}/mds/archive_meta
 MASSTREE_ROOT=${DATA_DIR}/mds/masstree_meta
-NODES=${REAL_NODE_ID}@127.0.0.1:${REAL_PORT},type=REAL,weight=1;${VIRTUAL_NODE_ID}@127.0.0.1:${VIRTUAL_PORT},type=VIRTUAL,weight=8,virtual_node_count=1000
-DISKS=${REAL_NODE_ID}:disk-01,disk-02,disk-03;${VIRTUAL_NODE_ID}:disk0,disk1,disk2
+NODES=${REAL_NODE_ID}@127.0.0.1:${REAL_PORT},type=REAL,weight=1;${VIRTUAL_NODE_ID}@127.0.0.1:${VIRTUAL_PORT},type=VIRTUAL,weight=8,virtual_node_count=${VIRTUAL_NODE_COUNT}
+DISKS=${REAL_NODE_ID}:${real_disks};${VIRTUAL_NODE_ID}:${virtual_disks}
 EOF
 }
 
@@ -208,6 +248,7 @@ start_all() {
   sleep 3
   log "[OK] fuse client started mount=${MOUNT_POINT}"
   log "[INFO] logs=${LOG_DIR}"
+  log "[INFO] online topology: real_nodes=1 virtual_nodes=${VIRTUAL_NODE_COUNT} real_disks_per_node=${REAL_DISK_COUNT} virtual_disks_per_pool=${VIRTUAL_DISK_COUNT} disk_capacity_bytes=${ONLINE_DISK_CAPACITY_BYTES}"
 }
 
 stop_all() {
