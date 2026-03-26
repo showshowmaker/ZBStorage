@@ -40,12 +40,12 @@ ls build/zb_fuse_client
 启动脚本在 [start_demo_stack.sh](C:/Users/w1j2h/Desktop/AllZB/ZBPro/ZBStorage/scripts/start_demo_stack.sh)。
 
 ```bash
-bash scripts/start_demo_stack.sh start
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/start_demo_stack.sh start
 ```
 
 查看状态：
 ```bash
-bash scripts/start_demo_stack.sh status
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/start_demo_stack.sh status
 ```
 
 现在默认在线层已经按文档口径改成：
@@ -59,12 +59,12 @@ bash scripts/start_demo_stack.sh status
 
 先铺 `100亿`：
 ```bash
-bash scripts/import_masstree_demo.sh 100
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/import_masstree_demo.sh 100
 ```
 
 先铺 `1000亿`：
 ```bash
-bash scripts/import_masstree_demo.sh 1000
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/import_masstree_demo.sh 1000
 ```
 
 它的逻辑是：每个 namespace 导入 `1亿` 文件元数据，所以：
@@ -75,7 +75,7 @@ bash scripts/import_masstree_demo.sh 1000
 脚本在 [run_system_demo.sh](C:/Users/w1j2h/Desktop/AllZB/ZBPro/ZBStorage/scripts/run_system_demo.sh)。
 
 ```bash
-bash scripts/run_system_demo.sh
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/run_system_demo.sh
 ```
 
 进入菜单后，推荐这样演示：
@@ -147,7 +147,13 @@ logs/system_demo.log
 
 **9. 结束后关闭环境**
 ```bash
-bash scripts/start_demo_stack.sh stop
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/start_demo_stack.sh stop
 ```
 
 如果你要，我可以下一步直接给你一套“从 0 到演示完 P1~P5 的可复制命令清单”，按你要的 `100亿` 或 `1000亿` 版本各写一套。
+
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/start_demo_stack.sh start
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/start_demo_stack.sh status
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/import_masstree_demo.sh 100
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/run_system_demo.sh
+RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/start_demo_stack.sh stop

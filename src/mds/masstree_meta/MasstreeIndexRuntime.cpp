@@ -13,6 +13,35 @@
 
 namespace zb::mds {
 
+namespace {
+
+bool ParseDentryBoundaryKey(const std::string& key,
+                           const std::string& namespace_id,
+                           uint64_t* max_parent_inode,
+                           std::string* max_name) {
+    if (!max_parent_inode || !max_name) {
+        return false;
+    }
+    const std::string namespace_prefix = "MTD/" + namespace_id + "/";
+    if (key.rfind(namespace_prefix, 0) != 0) {
+        return false;
+    }
+    const size_t parent_begin = namespace_prefix.size();
+    const size_t parent_end = key.find('/', parent_begin);
+    if (parent_end == std::string::npos || parent_end == parent_begin) {
+        return false;
+    }
+    try {
+        *max_parent_inode = std::stoull(key.substr(parent_begin, parent_end - parent_begin));
+    } catch (...) {
+        return false;
+    }
+    *max_name = key.substr(parent_end + 1);
+    return true;
+}
+
+} // namespace
+
 MasstreeIndexRuntime::MasstreeIndexRuntime() = default;
 
 MasstreeIndexRuntime::~MasstreeIndexRuntime() = default;
@@ -166,16 +195,17 @@ bool MasstreeIndexRuntime::FindDentryPageBoundary(const std::string& namespace_i
         }
         return false;
     }
-    const std::string expected_prefix = MasstreeDentryIndexPrefix(namespace_id, parent_inode);
-    if (hits.front().first.rfind(expected_prefix, 0) != 0) {
+    const auto& hit = hits.front();
+    if (!ParseDentryBoundaryKey(hit.first,
+                                namespace_id,
+                                &entry->max_parent_inode,
+                                &entry->max_name)) {
         if (error) {
             error->clear();
         }
         return false;
     }
-    entry->page_offset = hits.front().second;
-    entry->max_parent_inode = parent_inode;
-    entry->max_name = hits.front().first.substr(expected_prefix.size());
+    entry->page_offset = hit.second;
     if (error) {
         error->clear();
     }
