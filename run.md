@@ -62,6 +62,13 @@ RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/start_demo_stack.sh status
 **5. 如果要先铺 Masstree 基线数据**
 批量导入脚本在 [import_masstree_demo.sh](C:/Users/w1j2h/Desktop/AllZB/ZBPro/ZBStorage/scripts/import_masstree_demo.sh)。
 
+一键导入1000亿
+cd /mnt/md0/Projects/wjh/ZBStorage
+nohup env RUN_DIR=/mnt/md0/wjh/zb_run_dir MASSTREE_TEMPLATE_ID=template-100m-v1 MASSTREE_TEMPLATE_MODE=legacy_records bash scripts/run_import_1000yi_once.sh > /mnt/md0/wjh/zb_run_dir/logs/run_import_1000yi_once.nohup.log 2>&1 &
+echo $! > /mnt/md0/wjh/zb_run_dir/logs/run_import_1000yi_once.pid
+
+
+
 先铺 `100亿`：
 ```bash
 RUN_DIR=/mnt/md0/wjh/zb_run_dir MASSTREE_TEMPLATE_ID=template-100m-v1 bash scripts/import_masstree_demo.sh 2

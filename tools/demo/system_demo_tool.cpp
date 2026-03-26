@@ -41,6 +41,9 @@ DEFINE_string(masstree_namespace_id, "demo-ns", "Masstree demo namespace id");
 DEFINE_string(masstree_generation_id, "", "Masstree demo generation id; auto-generated if empty");
 DEFINE_string(masstree_path_prefix, "", "Masstree demo path prefix; defaults to /masstree_demo/<namespace>");
 DEFINE_string(masstree_template_id, "", "Masstree import template id; empty disables template reuse");
+DEFINE_string(masstree_template_mode,
+              "",
+              "Masstree import template mode: empty|page_fast|legacy_records; empty preserves the current fast path");
 DEFINE_uint64(masstree_file_count, 100000000, "Masstree demo file count");
 DEFINE_uint32(masstree_max_files_per_leaf_dir, 2048, "Masstree max files per leaf dir");
 DEFINE_uint32(masstree_max_subdirs_per_dir, 256, "Masstree max subdirs per dir");
@@ -1045,7 +1048,7 @@ private:
         actions_.push_back({"5",
                             "TC-P4 Masstree 导入",
                             "执行 Masstree namespace 批量导入",
-                            "5 namespace=<id> generation=<id> file_count=<n> [template_id=<id>] [key=value ...]",
+	                            "5 namespace=<id> generation=<id> file_count=<n> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
                             {"import", "p4"}});
         actions_.push_back({"6",
                             "TC-P5 Masstree 查询",
@@ -1151,7 +1154,7 @@ private:
         }
         out << "\n示例:\n";
         out << "  2 tc_p1_expected_real_node_count=1 tc_p1_expected_virtual_node_count=99\n";
-        out << "  5 namespace=demo-ns generation=gen-report-001 file_count=100000000 template_id=template-100m-v1\n";
+	        out << "  5 namespace=demo-ns generation=gen-report-001 file_count=100000000 template_id=template-100m-v1 template_mode=legacy_records\n";
         out << "  6 namespace=demo-ns n=1000\n";
         out << "  6 namespace=demo-ns n=1000 log_file=logs/p5_run.log\n";
         return out.str();
@@ -1194,11 +1197,13 @@ private:
                 FLAGS_masstree_namespace_id = value;
             } else if (key == "generation" || key == "masstree_generation_id") {
                 FLAGS_masstree_generation_id = value;
-            } else if (key == "path_prefix" || key == "masstree_path_prefix") {
-                FLAGS_masstree_path_prefix = value;
-            } else if (key == "template_id" || key == "masstree_template_id") {
-                FLAGS_masstree_template_id = value;
-            } else if (key == "file_count" || key == "masstree_file_count") {
+	            } else if (key == "path_prefix" || key == "masstree_path_prefix") {
+	                FLAGS_masstree_path_prefix = value;
+	            } else if (key == "template_id" || key == "masstree_template_id") {
+	                FLAGS_masstree_template_id = value;
+	            } else if (key == "template_mode" || key == "masstree_template_mode") {
+	                FLAGS_masstree_template_mode = value;
+	            } else if (key == "file_count" || key == "masstree_file_count") {
                 if (!ParseUint64Value(key, value, &parsed_u64, error)) {
                     return false;
                 }
@@ -1743,11 +1748,12 @@ private:
         }
 
         zb::rpc::ImportMasstreeNamespaceRequest request;
-        request.set_namespace_id(namespace_id);
-        request.set_generation_id(generation_id);
-        request.set_path_prefix(path_prefix);
-        request.set_template_id(FLAGS_masstree_template_id);
-        request.set_file_count(FLAGS_masstree_file_count);
+	        request.set_namespace_id(namespace_id);
+	        request.set_generation_id(generation_id);
+	        request.set_path_prefix(path_prefix);
+	        request.set_template_id(FLAGS_masstree_template_id);
+	        request.set_template_mode(FLAGS_masstree_template_mode);
+	        request.set_file_count(FLAGS_masstree_file_count);
         request.set_max_files_per_leaf_dir(FLAGS_masstree_max_files_per_leaf_dir);
         request.set_max_subdirs_per_dir(FLAGS_masstree_max_subdirs_per_dir);
         request.set_verify_inode_samples(FLAGS_masstree_verify_inode_samples);
@@ -1765,10 +1771,13 @@ private:
         std::cout << "namespace_id=" << namespace_id << '\n';
         std::cout << "generation_id=" << generation_id << '\n';
         std::cout << "path_prefix=" << path_prefix << '\n';
-        if (!FLAGS_masstree_template_id.empty()) {
-            std::cout << "template_id=" << FLAGS_masstree_template_id << '\n';
-        }
-        std::cout << "job_id=" << reply.job_id() << '\n';
+	        if (!FLAGS_masstree_template_id.empty()) {
+	            std::cout << "template_id=" << FLAGS_masstree_template_id << '\n';
+	        }
+	        if (!FLAGS_masstree_template_mode.empty()) {
+	            std::cout << "template_mode=" << FLAGS_masstree_template_mode << '\n';
+	        }
+	        std::cout << "job_id=" << reply.job_id() << '\n';
 
         const auto poll_started_at = std::chrono::steady_clock::now();
         zb::rpc::MasstreeImportJobState last_state = zb::rpc::MASSTREE_IMPORT_JOB_PENDING;

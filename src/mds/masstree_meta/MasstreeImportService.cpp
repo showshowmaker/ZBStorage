@@ -1,6 +1,7 @@
 #include "MasstreeImportService.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 
 #include "MasstreeManifest.h"
@@ -14,6 +15,8 @@ namespace {
 namespace fs = std::filesystem;
 
 constexpr const char* kMasstreeTemplateGenerationId = "template";
+constexpr const char* kMasstreeTemplateModePageFast = "page_fast";
+constexpr const char* kMasstreeTemplateModeLegacyRecords = "legacy_records";
 
 bool NormalizePath(std::string path, std::string* normalized) {
     if (!normalized || path.empty()) {
@@ -60,6 +63,21 @@ fs::path TemplateDirectoryPath(const std::string& masstree_root, const std::stri
 
 std::string TemplatePathPrefix(const std::string& template_id) {
     return "/__masstree_template__/" + template_id;
+}
+
+std::string NormalizeTemplateMode(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return mode;
+}
+
+bool IsTemplateModeValid(const std::string& mode) {
+    return mode.empty() || mode == kMasstreeTemplateModePageFast || mode == kMasstreeTemplateModeLegacyRecords;
+}
+
+bool UseLegacyTemplateRecordsMode(const std::string& mode) {
+    return NormalizeTemplateMode(mode) == kMasstreeTemplateModeLegacyRecords;
 }
 
 bool ValidateTemplateManifest(const MasstreeImportService::Request& request,
@@ -237,6 +255,13 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     if (!NormalizePathPrefix(request.path_prefix, &normalized.path_prefix, error)) {
         return false;
     }
+    normalized.template_mode = NormalizeTemplateMode(request.template_mode);
+    if (!IsTemplateModeValid(normalized.template_mode)) {
+        if (error) {
+            *error = "unsupported masstree template_mode: " + normalized.template_mode;
+        }
+        return false;
+    }
 
     const uint64_t leaf_dir_count =
         (normalized.file_count + normalized.max_files_per_leaf_dir - 1ULL) / normalized.max_files_per_leaf_dir;
@@ -336,13 +361,22 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     MasstreeBulkImporter::Request import_request;
     import_request.manifest_path = working_manifest_path;
     if (!normalized.template_id.empty()) {
-        import_request.source_inode_pages_path = template_manifest.inode_pages_path;
-        import_request.source_dentry_pages_path = template_manifest.dentry_pages_path;
-        import_request.source_dentry_sparse_path = template_manifest.dentry_sparse_index_path;
-        import_request.source_optical_layout_path = template_manifest.optical_layout_path;
+        if (UseLegacyTemplateRecordsMode(normalized.template_mode)) {
+            import_request.source_inode_records_path = template_manifest.inode_records_path;
+            import_request.source_dentry_records_path = template_manifest.dentry_records_path;
+        } else {
+            import_request.source_inode_pages_path = template_manifest.inode_pages_path;
+            import_request.source_dentry_pages_path = template_manifest.dentry_pages_path;
+            import_request.source_dentry_sparse_path = template_manifest.dentry_sparse_index_path;
+            import_request.source_optical_layout_path = template_manifest.optical_layout_path;
+            import_request.source_inode_records_path = template_manifest.inode_records_path;
+            import_request.source_dentry_records_path = template_manifest.dentry_records_path;
+        }
     }
-    import_request.source_inode_records_path = source_inode_records_path;
-    import_request.source_dentry_records_path = source_dentry_records_path;
+    if (normalized.template_id.empty()) {
+        import_request.source_inode_records_path = source_inode_records_path;
+        import_request.source_dentry_records_path = source_dentry_records_path;
+    }
     import_request.inode_id_offset = inode_id_offset;
     import_request.verify_inode_samples = normalized.verify_inode_samples;
     import_request.verify_dentry_samples = normalized.verify_dentry_samples;

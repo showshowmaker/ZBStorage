@@ -9,6 +9,7 @@ MOUNT_POINT="${MOUNT_POINT:-${ROOT_DIR}/.demo_run/mnt}"
 NAMESPACE_PREFIX="${NAMESPACE_PREFIX:-demo-ns}"
 FILES_PER_NAMESPACE=100000000
 TEMPLATE_ID="${MASSTREE_TEMPLATE_ID:-template-100m-v1}"
+TEMPLATE_MODE="${MASSTREE_TEMPLATE_MODE:-legacy_records}"
 VERIFY_INODE_SAMPLES="${MASSTREE_VERIFY_INODE_SAMPLES:-32}"
 VERIFY_DENTRY_SAMPLES="${MASSTREE_VERIFY_DENTRY_SAMPLES:-32}"
 
@@ -41,6 +42,7 @@ for ((i=1; i<=NAMESPACE_COUNT; ++i)); do
     --masstree_namespace_id="${NAMESPACE_ID}" \
     --masstree_file_count="${FILES_PER_NAMESPACE}" \
     --masstree_template_id="${TEMPLATE_ID}" \
+    --masstree_template_mode="${TEMPLATE_MODE}" \
     --masstree_verify_inode_samples="${VERIFY_INODE_SAMPLES}" \
     --masstree_verify_dentry_samples="${VERIFY_DENTRY_SAMPLES}"
 done
