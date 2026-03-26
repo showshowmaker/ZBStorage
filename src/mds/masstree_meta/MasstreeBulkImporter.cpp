@@ -190,6 +190,40 @@ bool WriteLengthPrefixedRecord(std::ofstream* output, const std::string& payload
     return WriteExact(output, wire_record);
 }
 
+bool ReadLengthPrefixedPayload(std::ifstream* input, std::string* payload, std::string* error) {
+    if (!input || !payload) {
+        if (error) {
+            *error = "invalid length-prefixed payload read args";
+        }
+        return false;
+    }
+    char len_buf[sizeof(uint32_t)] = {};
+    if (!ReadExact(input, len_buf, sizeof(len_buf))) {
+        if (input->eof()) {
+            if (error) {
+                error->clear();
+            }
+            return false;
+        }
+        if (error) {
+            *error = "failed to read length-prefixed payload size";
+        }
+        return false;
+    }
+    const uint32_t payload_len = DecodeLe32(len_buf);
+    payload->assign(payload_len, '\0');
+    if (payload_len != 0 && !ReadExact(input, payload->data(), payload_len)) {
+        if (error) {
+            *error = "failed to read length-prefixed payload body";
+        }
+        return false;
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
 bool BuildDentryPages(std::ifstream* dentry_in,
                       const MasstreeNamespaceManifest& manifest,
                       MasstreeIndexRuntime* runtime,
@@ -333,6 +367,145 @@ bool BuildDentryPages(std::ifstream* dentry_in,
         if (found.child_inode != sample.child_inode || found.type != sample.type) {
             if (error) {
                 *error = "masstree importer dentry page verification mismatch";
+            }
+            return false;
+        }
+        ++(*verified_dentry_samples);
+    }
+    return true;
+}
+
+bool BuildDentryPagesFromTemplate(std::ifstream* source_pages_in,
+                                  const MasstreeNamespaceManifest& manifest,
+                                  MasstreeIndexRuntime* runtime,
+                                  uint64_t inode_id_offset,
+                                  uint32_t verify_dentry_samples,
+                                  uint64_t* dentry_imported,
+                                  uint64_t* dentry_page_count,
+                                  uint64_t* verified_dentry_samples,
+                                  std::string* error) {
+    if (!source_pages_in || !runtime || !dentry_imported || !dentry_page_count || !verified_dentry_samples) {
+        if (error) {
+            *error = "invalid masstree dentry template import args";
+        }
+        return false;
+    }
+    std::ofstream pages_out;
+    std::ofstream sparse_out;
+    std::vector<char> pages_buffer(kMasstreeIoBufferBytes);
+    std::vector<char> sparse_buffer(kMasstreeIoBufferBytes);
+    ConfigureStreamBuffer(&pages_out, &pages_buffer);
+    ConfigureStreamBuffer(&sparse_out, &sparse_buffer);
+    pages_out.open(manifest.dentry_pages_path, std::ios::binary | std::ios::trunc);
+    sparse_out.open(manifest.dentry_sparse_index_path, std::ios::binary | std::ios::trunc);
+    if (!pages_out || !sparse_out) {
+        if (error) {
+            *error = "failed to open masstree dentry template outputs";
+        }
+        return false;
+    }
+
+    std::vector<DentryRecordView> verify_samples;
+    verify_samples.reserve(verify_dentry_samples);
+    std::string source_payload;
+    while (ReadLengthPrefixedPayload(source_pages_in, &source_payload, error)) {
+        MasstreeDentryPage source_page;
+        if (!DecodeMasstreeDentryPage(source_payload, &source_page, error)) {
+            return false;
+        }
+        if (source_page.entries.empty()) {
+            continue;
+        }
+        std::vector<MasstreeDentryPageEntry> target_entries;
+        target_entries.reserve(source_page.entries.size());
+        for (const auto& source_entry : source_page.entries) {
+            MasstreeDentryPageEntry target_entry = source_entry;
+            target_entry.parent_inode += inode_id_offset;
+            target_entry.child_inode += inode_id_offset;
+            target_entries.push_back(std::move(target_entry));
+            ++(*dentry_imported);
+            if (verify_samples.size() < verify_dentry_samples) {
+                DentryRecordView sample;
+                sample.parent_inode = source_entry.parent_inode + inode_id_offset;
+                sample.name = source_entry.name;
+                sample.child_inode = source_entry.child_inode + inode_id_offset;
+                sample.type = source_entry.type;
+                verify_samples.push_back(std::move(sample));
+            }
+        }
+
+        std::string target_payload;
+        if (!EncodeMasstreeDentryPage(target_entries, &target_payload, error)) {
+            return false;
+        }
+        const uint64_t page_offset = static_cast<uint64_t>(pages_out.tellp());
+        if (!WriteLengthPrefixedRecord(&pages_out, target_payload)) {
+            if (error) {
+                *error = "failed to write masstree dentry template page";
+            }
+            return false;
+        }
+        MasstreeDentrySparseEntry sparse_entry;
+        sparse_entry.page_offset = page_offset;
+        sparse_entry.max_parent_inode = target_entries.back().parent_inode;
+        sparse_entry.max_name = target_entries.back().name;
+        std::string sparse_payload;
+        if (!EncodeMasstreeDentrySparseEntry(sparse_entry, &sparse_payload, error) ||
+            !WriteLengthPrefixedRecord(&sparse_out, sparse_payload) ||
+            !runtime->PutDentryPageBoundary(manifest.namespace_id,
+                                            sparse_entry.max_parent_inode,
+                                            sparse_entry.max_name,
+                                            sparse_entry.page_offset,
+                                            error)) {
+            return false;
+        }
+        ++(*dentry_page_count);
+    }
+    if (error && !error->empty()) {
+        return false;
+    }
+    pages_out.flush();
+    sparse_out.flush();
+    if (!pages_out.good() || !sparse_out.good()) {
+        if (error) {
+            *error = "failed to flush masstree dentry template outputs";
+        }
+        return false;
+    }
+
+    for (const auto& sample : verify_samples) {
+        MasstreeDentrySparseEntry sparse_entry;
+        if (!runtime->FindDentryPageBoundary(manifest.namespace_id,
+                                             sample.parent_inode,
+                                             sample.name,
+                                             &sparse_entry,
+                                             error)) {
+            if (error && error->empty()) {
+                *error = "masstree template dentry sparse verification failed";
+            }
+            return false;
+        }
+        MasstreeDentryPage page;
+        if (!MasstreePageReader::LoadDentryPage(manifest.dentry_pages_path,
+                                                sparse_entry.page_offset,
+                                                &page,
+                                                error)) {
+            return false;
+        }
+        MasstreeDentryPageEntry found;
+        if (!MasstreePageReader::FindDentryInPage(page,
+                                                  sample.parent_inode,
+                                                  sample.name,
+                                                  &found,
+                                                  error)) {
+            if (error && error->empty()) {
+                *error = "masstree template dentry page verification failed";
+            }
+            return false;
+        }
+        if (found.child_inode != sample.child_inode || found.type != sample.type) {
+            if (error) {
+                *error = "masstree template dentry page verification mismatch";
             }
             return false;
         }
@@ -529,6 +702,174 @@ bool BuildInodePages(std::ifstream* inode_in,
     return true;
 }
 
+bool BuildInodePagesFromTemplate(std::ifstream* source_pages_in,
+                                 const MasstreeNamespaceManifest& manifest,
+                                 MasstreeIndexRuntime* runtime,
+                                 const MasstreeOpticalProfile& optical_profile,
+                                 const MasstreeOpticalClusterCursor& start_cursor,
+                                 uint64_t inode_id_offset,
+                                 uint32_t verify_inode_samples,
+                                 uint64_t* inode_imported,
+                                 uint64_t* inode_page_count,
+                                 uint64_t* inode_pages_bytes,
+                                 uint64_t* verified_inode_samples,
+                                 uint64_t* file_count,
+                                 uint64_t* start_global_image_id,
+                                 uint64_t* end_global_image_id,
+                                 uint64_t* avg_file_size_bytes,
+                                 std::string* total_file_bytes,
+                                 MasstreeOpticalClusterCursor* end_cursor,
+                                 std::string* error) {
+    if (!source_pages_in || !runtime || !inode_imported || !inode_page_count || !inode_pages_bytes ||
+        !verified_inode_samples || !file_count || !start_global_image_id || !end_global_image_id ||
+        !avg_file_size_bytes || !total_file_bytes || !end_cursor) {
+        if (error) {
+            *error = "invalid masstree inode template import args";
+        }
+        return false;
+    }
+    std::ofstream pages_out;
+    std::ofstream sparse_out;
+    std::vector<char> pages_buffer(kMasstreeIoBufferBytes);
+    std::vector<char> sparse_buffer(kMasstreeIoBufferBytes);
+    ConfigureStreamBuffer(&pages_out, &pages_buffer);
+    ConfigureStreamBuffer(&sparse_out, &sparse_buffer);
+    pages_out.open(manifest.inode_pages_path, std::ios::binary | std::ios::trunc);
+    sparse_out.open(manifest.inode_sparse_index_path, std::ios::binary | std::ios::trunc);
+    if (!pages_out || !sparse_out) {
+        if (error) {
+            *error = "failed to open masstree inode template outputs";
+        }
+        return false;
+    }
+
+    MasstreeOpticalAllocator allocator(optical_profile, start_cursor);
+    MasstreeDecimalAccumulator total_file_bytes_accumulator;
+    std::vector<uint64_t> verify_samples;
+    verify_samples.reserve(verify_inode_samples);
+    std::string source_payload;
+    while (ReadLengthPrefixedPayload(source_pages_in, &source_payload, error)) {
+        MasstreeInodePage source_page;
+        if (!DecodeMasstreeInodePage(source_payload, &source_page, error)) {
+            return false;
+        }
+        if (source_page.entries.empty()) {
+            continue;
+        }
+        std::vector<MasstreeInodePageEntry> target_entries;
+        target_entries.reserve(source_page.entries.size());
+        for (const auto& source_entry : source_page.entries) {
+            MasstreeInodeRecord record;
+            if (!MasstreeInodeRecordCodec::Decode(source_entry.payload, &record, error)) {
+                return false;
+            }
+            const uint64_t adjusted_inode_id = source_entry.inode_id + inode_id_offset;
+            record.attr.set_inode_id(adjusted_inode_id);
+            if (record.attr.type() == zb::rpc::INODE_FILE) {
+                uint64_t global_image_id = 0;
+                if (!allocator.Allocate(record.attr.size(), &global_image_id, error)) {
+                    return false;
+                }
+                record.has_optical_image = true;
+                record.optical_image_global_id = global_image_id;
+                if (*file_count == 0) {
+                    *start_global_image_id = global_image_id;
+                }
+                *end_global_image_id = global_image_id;
+                ++(*file_count);
+                total_file_bytes_accumulator.Add(record.attr.size());
+            }
+            std::string encoded_payload;
+            if (!MasstreeInodeRecordCodec::Encode(record, &encoded_payload, error)) {
+                return false;
+            }
+            MasstreeInodePageEntry target_entry;
+            target_entry.inode_id = adjusted_inode_id;
+            target_entry.payload = std::move(encoded_payload);
+            target_entries.push_back(std::move(target_entry));
+            ++(*inode_imported);
+            if (verify_samples.size() < verify_inode_samples) {
+                verify_samples.push_back(adjusted_inode_id);
+            }
+        }
+
+        std::string target_payload;
+        if (!EncodeMasstreeInodePage(target_entries, &target_payload, error)) {
+            return false;
+        }
+        const uint64_t page_offset = static_cast<uint64_t>(pages_out.tellp());
+        if (!WriteLengthPrefixedRecord(&pages_out, target_payload)) {
+            if (error) {
+                *error = "failed to write masstree inode template page";
+            }
+            return false;
+        }
+        MasstreeInodeSparseEntry sparse_entry;
+        sparse_entry.page_offset = page_offset;
+        sparse_entry.max_inode_id = target_entries.back().inode_id;
+        std::string sparse_payload;
+        if (!EncodeMasstreeInodeSparseEntry(sparse_entry, &sparse_payload, error) ||
+            !WriteLengthPrefixedRecord(&sparse_out, sparse_payload) ||
+            !runtime->PutInodePageBoundary(manifest.namespace_id,
+                                           sparse_entry.max_inode_id,
+                                           sparse_entry.page_offset,
+                                           error)) {
+            return false;
+        }
+        *inode_pages_bytes += sizeof(uint32_t) + target_payload.size();
+        ++(*inode_page_count);
+    }
+    if (error && !error->empty()) {
+        return false;
+    }
+    pages_out.flush();
+    sparse_out.flush();
+    if (!pages_out.good() || !sparse_out.good()) {
+        if (error) {
+            *error = "failed to flush masstree inode template outputs";
+        }
+        return false;
+    }
+
+    for (uint64_t inode_id : verify_samples) {
+        MasstreeInodeSparseEntry sparse_entry;
+        if (!runtime->FindInodePageBoundary(manifest.namespace_id, inode_id, &sparse_entry, error)) {
+            if (error && error->empty()) {
+                *error = "masstree template inode sparse verification failed";
+            }
+            return false;
+        }
+        MasstreeInodePage page;
+        if (!MasstreePageReader::LoadInodePage(manifest.inode_pages_path,
+                                               sparse_entry.page_offset,
+                                               &page,
+                                               error)) {
+            return false;
+        }
+        MasstreeInodePageEntry found;
+        if (!MasstreePageReader::FindInodeInPage(page, inode_id, &found, error)) {
+            if (error && error->empty()) {
+                *error = "masstree template inode page verification failed";
+            }
+            return false;
+        }
+        MasstreeInodeRecord decoded;
+        if (!MasstreeInodeRecordCodec::Decode(found.payload, &decoded, error) ||
+            decoded.attr.inode_id() != inode_id) {
+            if (error && error->empty()) {
+                *error = "masstree template inode page verification mismatch";
+            }
+            return false;
+        }
+        ++(*verified_inode_samples);
+    }
+
+    *total_file_bytes = total_file_bytes_accumulator.ToString();
+    *avg_file_size_bytes = *file_count == 0 ? 0 : total_file_bytes_accumulator.DivideBy(*file_count);
+    *end_cursor = allocator.cursor();
+    return true;
+}
+
 bool WriteImportSummary(const std::string& summary_path,
                         const MasstreeNamespaceManifest& manifest,
                         const MasstreeBulkImporter::Result& result,
@@ -659,21 +1000,44 @@ bool MasstreeBulkImporter::Import(const Request& request,
 
     std::ifstream inode_in;
     std::ifstream dentry_in;
+    std::ifstream inode_pages_in;
+    std::ifstream dentry_pages_in;
     std::vector<char> inode_in_buffer(kMasstreeIoBufferBytes);
     std::vector<char> dentry_in_buffer(kMasstreeIoBufferBytes);
+    std::vector<char> inode_pages_buffer(kMasstreeIoBufferBytes);
+    std::vector<char> dentry_pages_buffer(kMasstreeIoBufferBytes);
     ConfigureStreamBuffer(&inode_in, &inode_in_buffer);
     ConfigureStreamBuffer(&dentry_in, &dentry_in_buffer);
+    ConfigureStreamBuffer(&inode_pages_in, &inode_pages_buffer);
+    ConfigureStreamBuffer(&dentry_pages_in, &dentry_pages_buffer);
     const std::string inode_records_path =
         request.source_inode_records_path.empty() ? manifest.inode_records_path : request.source_inode_records_path;
     const std::string dentry_records_path =
         request.source_dentry_records_path.empty() ? manifest.dentry_records_path : request.source_dentry_records_path;
-    inode_in.open(inode_records_path, std::ios::binary);
-    dentry_in.open(dentry_records_path, std::ios::binary);
-    if (!inode_in || !dentry_in) {
-        if (error) {
-            *error = "failed to open masstree importer inputs/outputs";
+    const std::string inode_pages_path =
+        request.source_inode_pages_path.empty() ? manifest.inode_pages_path : request.source_inode_pages_path;
+    const std::string dentry_pages_path =
+        request.source_dentry_pages_path.empty() ? manifest.dentry_pages_path : request.source_dentry_pages_path;
+    const bool use_template_pages =
+        !request.source_inode_pages_path.empty() && !request.source_dentry_pages_path.empty();
+    if (use_template_pages) {
+        inode_pages_in.open(inode_pages_path, std::ios::binary);
+        dentry_pages_in.open(dentry_pages_path, std::ios::binary);
+        if (!inode_pages_in || !dentry_pages_in) {
+            if (error) {
+                *error = "failed to open masstree template page inputs";
+            }
+            return false;
         }
-        return false;
+    } else {
+        inode_in.open(inode_records_path, std::ios::binary);
+        dentry_in.open(dentry_records_path, std::ios::binary);
+        if (!inode_in || !dentry_in) {
+            if (error) {
+                *error = "failed to open masstree importer inputs/outputs";
+            }
+            return false;
+        }
     }
 
     Result local_result;
@@ -696,37 +1060,71 @@ bool MasstreeBulkImporter::Import(const Request& request,
     if (manifest.dentry_sparse_index_path.empty()) {
         manifest.dentry_sparse_index_path = (staging_dir_path / "dentry_sparse.idx").string();
     }
-    if (!BuildInodePages(&inode_in,
-                         manifest,
-                         active_runtime,
-                         optical_profile,
-                         request.start_cursor,
-                         request.inode_id_offset,
-                         request.verify_inode_samples,
-                         &local_result.inode_imported,
-                         &local_result.inode_page_count,
-                         &local_result.inode_pages_bytes,
-                         &local_result.verified_inode_samples,
-                         &local_result.file_count,
-                         &local_result.start_global_image_id,
-                         &local_result.end_global_image_id,
-                         &local_result.avg_file_size_bytes,
-                         &local_result.total_file_bytes,
-                         &local_result.end_cursor,
-                         error)) {
-        return false;
-    }
+    if (use_template_pages) {
+        if (!BuildInodePagesFromTemplate(&inode_pages_in,
+                                         manifest,
+                                         active_runtime,
+                                         optical_profile,
+                                         request.start_cursor,
+                                         request.inode_id_offset,
+                                         request.verify_inode_samples,
+                                         &local_result.inode_imported,
+                                         &local_result.inode_page_count,
+                                         &local_result.inode_pages_bytes,
+                                         &local_result.verified_inode_samples,
+                                         &local_result.file_count,
+                                         &local_result.start_global_image_id,
+                                         &local_result.end_global_image_id,
+                                         &local_result.avg_file_size_bytes,
+                                         &local_result.total_file_bytes,
+                                         &local_result.end_cursor,
+                                         error)) {
+            return false;
+        }
+        if (!BuildDentryPagesFromTemplate(&dentry_pages_in,
+                                          manifest,
+                                          active_runtime,
+                                          request.inode_id_offset,
+                                          request.verify_dentry_samples,
+                                          &local_result.dentry_imported,
+                                          &local_result.dentry_page_count,
+                                          &local_result.verified_dentry_samples,
+                                          error)) {
+            return false;
+        }
+    } else {
+        if (!BuildInodePages(&inode_in,
+                             manifest,
+                             active_runtime,
+                             optical_profile,
+                             request.start_cursor,
+                             request.inode_id_offset,
+                             request.verify_inode_samples,
+                             &local_result.inode_imported,
+                             &local_result.inode_page_count,
+                             &local_result.inode_pages_bytes,
+                             &local_result.verified_inode_samples,
+                             &local_result.file_count,
+                             &local_result.start_global_image_id,
+                             &local_result.end_global_image_id,
+                             &local_result.avg_file_size_bytes,
+                             &local_result.total_file_bytes,
+                             &local_result.end_cursor,
+                             error)) {
+            return false;
+        }
 
-    if (!BuildDentryPages(&dentry_in,
-                          manifest,
-                          active_runtime,
-                          request.inode_id_offset,
-                          request.verify_dentry_samples,
-                          &local_result.dentry_imported,
-                          &local_result.dentry_page_count,
-                          &local_result.verified_dentry_samples,
-                          error)) {
-        return false;
+        if (!BuildDentryPages(&dentry_in,
+                              manifest,
+                              active_runtime,
+                              request.inode_id_offset,
+                              request.verify_dentry_samples,
+                              &local_result.dentry_imported,
+                              &local_result.dentry_page_count,
+                              &local_result.verified_dentry_samples,
+                              error)) {
+            return false;
+        }
     }
 
     if (local_result.inode_imported != manifest.inode_count) {

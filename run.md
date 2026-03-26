@@ -59,6 +59,7 @@ RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/start_demo_stack.sh status
 
 先铺 `100亿`：
 ```bash
+RUN_DIR=/mnt/md0/wjh/zb_run_dir MASSTREE_TEMPLATE_ID=template-100m-v1 bash scripts/import_masstree_demo.sh 2
 RUN_DIR=/mnt/md0/wjh/zb_run_dir bash scripts/import_masstree_demo.sh 100
 ```
 

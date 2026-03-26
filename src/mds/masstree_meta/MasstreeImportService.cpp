@@ -91,6 +91,23 @@ bool EnsureTemplateManifest(const MasstreeImportService::Request& request,
         if (!MasstreeNamespaceManifest::LoadFromFile(manifest_path, manifest, error)) {
             return false;
         }
+        if (manifest->inode_pages_path.empty() || !fs::exists(manifest->inode_pages_path) ||
+            manifest->dentry_pages_path.empty() || !fs::exists(manifest->dentry_pages_path)) {
+            MasstreeBulkImporter importer;
+            MasstreeBulkImporter::Request import_request;
+            import_request.manifest_path = manifest_path;
+            import_request.verify_inode_samples = request.verify_inode_samples;
+            import_request.verify_dentry_samples = request.verify_dentry_samples;
+            import_request.start_cursor = {};
+
+            MasstreeBulkImporter::Result import_result;
+            if (!importer.Import(import_request, nullptr, &import_result, error)) {
+                return false;
+            }
+            if (!MasstreeNamespaceManifest::LoadFromFile(manifest_path, manifest, error)) {
+                return false;
+            }
+        }
         return ValidateTemplateManifest(request, *manifest, error);
     }
 
@@ -121,6 +138,18 @@ bool EnsureTemplateManifest(const MasstreeImportService::Request& request,
     if (!generator.Generate(template_request, &template_result, error)) {
         return false;
     }
+    MasstreeBulkImporter importer;
+    MasstreeBulkImporter::Request import_request;
+    import_request.manifest_path = template_result.manifest_path;
+    import_request.verify_inode_samples = request.verify_inode_samples;
+    import_request.verify_dentry_samples = request.verify_dentry_samples;
+    import_request.start_cursor = {};
+
+    MasstreeBulkImporter::Result import_result;
+    if (!importer.Import(import_request, nullptr, &import_result, error)) {
+        return false;
+    }
+
     if (!MasstreeNamespaceManifest::LoadFromFile(template_result.manifest_path, manifest, error)) {
         return false;
     }
@@ -235,6 +264,7 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     std::string working_manifest_path;
     std::string source_inode_records_path;
     std::string source_dentry_records_path;
+    MasstreeNamespaceManifest template_manifest;
     uint64_t inode_id_offset = 0;
     uint64_t root_inode_id = 0;
     uint64_t inode_min = 0;
@@ -270,7 +300,6 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
         level1_dir_count_for_result = generate_result.level1_dir_count;
         leaf_dir_count_for_result = generate_result.leaf_dir_count;
     } else {
-        MasstreeNamespaceManifest template_manifest;
         if (!EnsureTemplateManifest(normalized, &template_manifest, error)) {
             return false;
         }
@@ -304,6 +333,10 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     MasstreeBulkImporter importer;
     MasstreeBulkImporter::Request import_request;
     import_request.manifest_path = working_manifest_path;
+    if (!normalized.template_id.empty()) {
+        import_request.source_inode_pages_path = template_manifest.inode_pages_path;
+        import_request.source_dentry_pages_path = template_manifest.dentry_pages_path;
+    }
     import_request.source_inode_records_path = source_inode_records_path;
     import_request.source_dentry_records_path = source_dentry_records_path;
     import_request.inode_id_offset = inode_id_offset;

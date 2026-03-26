@@ -13,6 +13,8 @@ class MasstreeBulkImporter {
 public:
     struct Request {
         std::string manifest_path;
+        std::string source_inode_pages_path;
+        std::string source_dentry_pages_path;
         std::string source_inode_records_path;
         std::string source_dentry_records_path;
         uint64_t inode_id_offset{0};
