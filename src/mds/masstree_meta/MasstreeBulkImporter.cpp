@@ -1488,6 +1488,7 @@ bool MasstreeBulkImporter::Import(const Request& request,
     const bool use_template_pages =
         !request.source_inode_pages_path.empty() && !request.source_dentry_pages_path.empty();
     std::vector<MasstreeBulkImporter::OpticalImageRun> template_optical_runs;
+    std::ifstream* template_dentry_sparse_in = nullptr;
     if (use_template_pages) {
         inode_pages_in.open(inode_pages_path, std::ios::binary);
         dentry_pages_in.open(dentry_pages_path, std::ios::binary);
@@ -1505,6 +1506,7 @@ bool MasstreeBulkImporter::Import(const Request& request,
                 }
                 return false;
             }
+            template_dentry_sparse_in = &dentry_sparse_in;
         }
         if (!optical_layout_path.empty()) {
             if (!LoadOpticalLayout(optical_layout_path, &template_optical_runs, error)) {
@@ -1566,7 +1568,7 @@ bool MasstreeBulkImporter::Import(const Request& request,
             return false;
         }
         if (!BuildDentryPagesFromTemplate(&dentry_pages_in,
-                                          dentry_sparse_in ? &dentry_sparse_in : nullptr,
+                                          template_dentry_sparse_in,
                                           manifest,
                                           active_runtime,
                                           request.inode_id_offset,
