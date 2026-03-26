@@ -193,6 +193,7 @@ bool WriteLengthPrefixedRecord(std::ofstream* output, const std::string& payload
 bool BuildDentryPages(std::ifstream* dentry_in,
                       const MasstreeNamespaceManifest& manifest,
                       MasstreeIndexRuntime* runtime,
+                      uint64_t inode_id_offset,
                       uint32_t verify_dentry_samples,
                       uint64_t* dentry_imported,
                       uint64_t* dentry_page_count,
@@ -263,9 +264,9 @@ bool BuildDentryPages(std::ifstream* dentry_in,
 
     while (ReadDentryRecord(dentry_in, &dentry_record, error)) {
         MasstreeDentryPageEntry page_entry;
-        page_entry.parent_inode = dentry_record.parent_inode;
+        page_entry.parent_inode = dentry_record.parent_inode + inode_id_offset;
         page_entry.name = dentry_record.name;
-        page_entry.child_inode = dentry_record.child_inode;
+        page_entry.child_inode = dentry_record.child_inode + inode_id_offset;
         page_entry.type = dentry_record.type;
         const size_t encoded_size = EncodedMasstreeDentryPageEntrySize(page_entry);
         const size_t total_with_entry = current_payload_bytes + encoded_size;
@@ -278,7 +279,10 @@ bool BuildDentryPages(std::ifstream* dentry_in,
         current_payload_bytes += encoded_size;
         ++(*dentry_imported);
         if (verify_samples.size() < verify_dentry_samples) {
-            verify_samples.push_back(dentry_record);
+            DentryRecordView sample = dentry_record;
+            sample.parent_inode += inode_id_offset;
+            sample.child_inode += inode_id_offset;
+            verify_samples.push_back(std::move(sample));
         }
     }
     if (error && !error->empty()) {
@@ -342,6 +346,7 @@ bool BuildInodePages(std::ifstream* inode_in,
                      MasstreeIndexRuntime* runtime,
                      const MasstreeOpticalProfile& optical_profile,
                      const MasstreeOpticalClusterCursor& start_cursor,
+                     uint64_t inode_id_offset,
                      uint32_t verify_inode_samples,
                      uint64_t* inode_imported,
                      uint64_t* inode_page_count,
@@ -428,6 +433,8 @@ bool BuildInodePages(std::ifstream* inode_in,
             }
             return false;
         }
+        const uint64_t adjusted_inode_id = inode_record.inode_id + inode_id_offset;
+        attr.set_inode_id(adjusted_inode_id);
 
         MasstreeInodeRecord blob_record;
         blob_record.attr = attr;
@@ -452,7 +459,7 @@ bool BuildInodePages(std::ifstream* inode_in,
         }
 
         MasstreeInodePageEntry page_entry;
-        page_entry.inode_id = inode_record.inode_id;
+        page_entry.inode_id = adjusted_inode_id;
         page_entry.payload = std::move(encoded_record_payload);
         const size_t encoded_size = EncodedMasstreeInodePageEntrySize(page_entry);
         const size_t total_with_entry = current_payload_bytes + encoded_size;
@@ -465,7 +472,7 @@ bool BuildInodePages(std::ifstream* inode_in,
         current_payload_bytes += encoded_size;
         ++(*inode_imported);
         if (verify_samples.size() < verify_inode_samples) {
-            verify_samples.push_back(inode_record.inode_id);
+            verify_samples.push_back(adjusted_inode_id);
         }
     }
     if (error && !error->empty()) {
@@ -656,8 +663,12 @@ bool MasstreeBulkImporter::Import(const Request& request,
     std::vector<char> dentry_in_buffer(kMasstreeIoBufferBytes);
     ConfigureStreamBuffer(&inode_in, &inode_in_buffer);
     ConfigureStreamBuffer(&dentry_in, &dentry_in_buffer);
-    inode_in.open(manifest.inode_records_path, std::ios::binary);
-    dentry_in.open(manifest.dentry_records_path, std::ios::binary);
+    const std::string inode_records_path =
+        request.source_inode_records_path.empty() ? manifest.inode_records_path : request.source_inode_records_path;
+    const std::string dentry_records_path =
+        request.source_dentry_records_path.empty() ? manifest.dentry_records_path : request.source_dentry_records_path;
+    inode_in.open(inode_records_path, std::ios::binary);
+    dentry_in.open(dentry_records_path, std::ios::binary);
     if (!inode_in || !dentry_in) {
         if (error) {
             *error = "failed to open masstree importer inputs/outputs";
@@ -669,11 +680,9 @@ bool MasstreeBulkImporter::Import(const Request& request,
     local_result.start_cursor = request.start_cursor;
     local_result.end_cursor = request.start_cursor;
     local_result.total_file_bytes = "0";
-    manifest.page_size_bytes = request.page_size_bytes >= 4096U
-                                   ? request.page_size_bytes
-                                   : (manifest.page_size_bytes == 0
-                                          ? kMasstreeDefaultPageSizeBytes
-                                          : manifest.page_size_bytes);
+    if (manifest.page_size_bytes == 0) {
+        manifest.page_size_bytes = kMasstreeDefaultPageSizeBytes;
+    }
     const std::filesystem::path staging_dir_path = std::filesystem::path(request.manifest_path).parent_path();
     if (manifest.inode_pages_path.empty()) {
         manifest.inode_pages_path = (staging_dir_path / "inode_pages.seg").string();
@@ -692,6 +701,7 @@ bool MasstreeBulkImporter::Import(const Request& request,
                          active_runtime,
                          optical_profile,
                          request.start_cursor,
+                         request.inode_id_offset,
                          request.verify_inode_samples,
                          &local_result.inode_imported,
                          &local_result.inode_page_count,
@@ -710,6 +720,7 @@ bool MasstreeBulkImporter::Import(const Request& request,
     if (!BuildDentryPages(&dentry_in,
                           manifest,
                           active_runtime,
+                          request.inode_id_offset,
                           request.verify_dentry_samples,
                           &local_result.dentry_imported,
                           &local_result.dentry_page_count,

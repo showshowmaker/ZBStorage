@@ -1247,12 +1247,9 @@ void MdsServiceImpl::ImportMasstreeNamespace(google::protobuf::RpcController* cn
     import_request.namespace_id = request->namespace_id();
     import_request.generation_id = request->generation_id();
     import_request.path_prefix = request->path_prefix();
+    import_request.template_id = request->template_id();
     import_request.inode_start = request->inode_start();
     import_request.file_count = request->file_count();
-    import_request.page_size_bytes =
-        request->page_size_bytes() > 0
-            ? request->page_size_bytes()
-            : std::max<uint32_t>(archive_import_page_size_bytes_, 1024U * 1024U);
     import_request.max_files_per_leaf_dir =
         request->max_files_per_leaf_dir() > 0 ? request->max_files_per_leaf_dir() : 2048U;
     import_request.max_subdirs_per_dir =

@@ -424,7 +424,7 @@ message ImportMasstreeNamespaceRequest {
   uint32 verify_inode_samples = 8;
   uint32 verify_dentry_samples = 9;
   bool publish_route = 10;
-  uint32 page_size_bytes = 11;
+  string template_id = 11;
 }
 
 message ImportMasstreeNamespaceReply {

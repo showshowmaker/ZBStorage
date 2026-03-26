@@ -459,8 +459,7 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
     manifest.dentry_pages_path = (staging_dir / "dentry_pages.seg").string();
     manifest.dentry_sparse_index_path = (staging_dir / "dentry_sparse.idx").string();
     manifest.verify_manifest_path = verify_manifest_path.string();
-    manifest.page_size_bytes =
-        request.page_size_bytes >= 4096U ? request.page_size_bytes : kMasstreeDefaultPageSizeBytes;
+    manifest.page_size_bytes = kMasstreeDefaultPageSizeBytes;
     manifest.root_inode_id = root_inode_id;
     manifest.inode_min = inode_min;
     manifest.inode_max = inode_max;

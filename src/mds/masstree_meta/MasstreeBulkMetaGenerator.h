@@ -14,7 +14,6 @@ public:
         std::string path_prefix;
         uint64_t inode_start{0};
         uint64_t file_count{100000000ULL};
-        uint32_t page_size_bytes{0};
         uint32_t max_files_per_leaf_dir{2048};
         uint32_t max_subdirs_per_dir{256};
     };

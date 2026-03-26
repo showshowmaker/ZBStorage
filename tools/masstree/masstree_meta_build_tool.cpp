@@ -13,7 +13,7 @@ void PrintUsage() {
         << "Usage:\n"
         << "  masstree_meta_build_tool --db_path=<path> --masstree_root=<dir>"
            " --namespace_id=<id> --generation_id=<id> --path_prefix=<prefix>"
-           " [--inode_start=<id>] [--file_count=<n>] [--max_files_per_leaf_dir=<n>]"
+           " [--template_id=<id>] [--inode_start=<id>] [--file_count=<n>] [--max_files_per_leaf_dir=<n>]"
            " [--max_subdirs_per_dir=<n>] [--verify_inode_samples=<n>]"
            " [--verify_dentry_samples=<n>] [--publish_route=0|1]\n";
 }
@@ -80,6 +80,7 @@ int main(int argc, char* argv[]) {
     const std::string namespace_id = GetArg(args, "namespace_id");
     const std::string generation_id = GetArg(args, "generation_id");
     const std::string path_prefix = GetArg(args, "path_prefix");
+    const std::string template_id = GetArg(args, "template_id");
     if (db_path.empty() || masstree_root.empty() || namespace_id.empty() ||
         generation_id.empty() || path_prefix.empty()) {
         PrintUsage();
@@ -100,6 +101,7 @@ int main(int argc, char* argv[]) {
     request.namespace_id = namespace_id;
     request.generation_id = generation_id;
     request.path_prefix = path_prefix;
+    request.template_id = template_id;
 
     const std::string inode_start = GetArg(args, "inode_start");
     const std::string file_count = GetArg(args, "file_count");
