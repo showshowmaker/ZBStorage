@@ -113,6 +113,8 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
             parsed.cluster_stats_path = value;
         } else if (key == "allocation_summary_path") {
             parsed.allocation_summary_path = value;
+        } else if (key == "optical_layout_path") {
+            parsed.optical_layout_path = value;
         } else if (key == "root_inode_id") {
             if (!ParseU64Field(value, &parsed.root_inode_id)) {
                 if (error) {
@@ -397,6 +399,7 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     out << "verify_manifest_path=" << verify_manifest_path << "\n";
     out << "cluster_stats_path=" << cluster_stats_path << "\n";
     out << "allocation_summary_path=" << allocation_summary_path << "\n";
+    out << "optical_layout_path=" << optical_layout_path << "\n";
     out << "root_inode_id=" << root_inode_id << "\n";
     out << "inode_min=" << inode_min << "\n";
     out << "inode_max=" << inode_max << "\n";

@@ -440,6 +440,7 @@ bool MasstreeGenerationPublisher::RewriteManifestPaths(const std::string& final_
     manifest->verify_manifest_path = RewritePathToFinalDir(final_path, manifest->verify_manifest_path);
     manifest->cluster_stats_path = RewritePathToFinalDir(final_path, manifest->cluster_stats_path);
     manifest->allocation_summary_path = RewritePathToFinalDir(final_path, manifest->allocation_summary_path);
+    manifest->optical_layout_path = RewritePathToFinalDir(final_path, manifest->optical_layout_path);
     if (error) {
         error->clear();
     }

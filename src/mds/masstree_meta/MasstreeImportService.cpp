@@ -92,7 +92,8 @@ bool EnsureTemplateManifest(const MasstreeImportService::Request& request,
             return false;
         }
         if (manifest->inode_pages_path.empty() || !fs::exists(manifest->inode_pages_path) ||
-            manifest->dentry_pages_path.empty() || !fs::exists(manifest->dentry_pages_path)) {
+            manifest->dentry_pages_path.empty() || !fs::exists(manifest->dentry_pages_path) ||
+            manifest->optical_layout_path.empty() || !fs::exists(manifest->optical_layout_path)) {
             MasstreeBulkImporter importer;
             MasstreeBulkImporter::Request import_request;
             import_request.manifest_path = manifest_path;
@@ -200,6 +201,7 @@ bool PrepareTemplateImportManifest(const MasstreeImportService::Request& request
     manifest->verify_manifest_path.clear();
     manifest->cluster_stats_path.clear();
     manifest->allocation_summary_path.clear();
+    manifest->optical_layout_path.clear();
     manifest->root_inode_id += *inode_id_offset;
     manifest->inode_min += *inode_id_offset;
     manifest->inode_max += *inode_id_offset;
@@ -336,6 +338,8 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     if (!normalized.template_id.empty()) {
         import_request.source_inode_pages_path = template_manifest.inode_pages_path;
         import_request.source_dentry_pages_path = template_manifest.dentry_pages_path;
+        import_request.source_dentry_sparse_path = template_manifest.dentry_sparse_index_path;
+        import_request.source_optical_layout_path = template_manifest.optical_layout_path;
     }
     import_request.source_inode_records_path = source_inode_records_path;
     import_request.source_dentry_records_path = source_dentry_records_path;

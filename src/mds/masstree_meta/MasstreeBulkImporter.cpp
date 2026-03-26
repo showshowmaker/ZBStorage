@@ -224,6 +224,341 @@ bool ReadLengthPrefixedPayload(std::ifstream* input, std::string* payload, std::
     return true;
 }
 
+void PatchLe64(std::string* data, size_t offset, uint64_t value) {
+    if (!data || offset + sizeof(uint64_t) > data->size()) {
+        return;
+    }
+    for (size_t i = 0; i < sizeof(uint64_t); ++i) {
+        (*data)[offset + i] = static_cast<char>((value >> (i * 8U)) & 0xFFU);
+    }
+}
+
+bool RebaseEncodedDentryPagePayload(const std::string& payload,
+                                    uint64_t inode_id_offset,
+                                    uint32_t verify_dentry_samples,
+                                    std::string* rebased_payload,
+                                    uint64_t* entry_count,
+                                    uint64_t* max_parent_inode,
+                                    std::string* max_name,
+                                    std::vector<DentryRecordView>* verify_samples,
+                                    std::string* error) {
+    if (!rebased_payload || !entry_count || !max_parent_inode || !max_name) {
+        if (error) {
+            *error = "invalid masstree dentry page rebase args";
+        }
+        return false;
+    }
+    if (payload.size() < sizeof(uint32_t)) {
+        if (error) {
+            *error = "invalid masstree dentry page payload";
+        }
+        return false;
+    }
+    *rebased_payload = payload;
+    *entry_count = 0;
+    *max_parent_inode = 0;
+    max_name->clear();
+
+    size_t cursor = 0;
+    const uint32_t count = DecodeLe32(payload.data());
+    cursor += sizeof(uint32_t);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (cursor + sizeof(uint64_t) + sizeof(uint16_t) > payload.size()) {
+            if (error) {
+                *error = "corrupted masstree dentry page header";
+            }
+            return false;
+        }
+        const size_t parent_offset = cursor;
+        const uint64_t parent_inode = DecodeLe64(payload.data() + cursor) + inode_id_offset;
+        PatchLe64(rebased_payload, parent_offset, parent_inode);
+        cursor += sizeof(uint64_t);
+
+        const uint16_t name_len = DecodeLe16(payload.data() + cursor);
+        cursor += sizeof(uint16_t);
+        if (cursor + name_len + sizeof(uint64_t) + sizeof(uint8_t) > payload.size()) {
+            if (error) {
+                *error = "corrupted masstree dentry page entry";
+            }
+            return false;
+        }
+
+        const std::string name = payload.substr(cursor, name_len);
+        cursor += name_len;
+
+        const size_t child_offset = cursor;
+        const uint64_t child_inode = DecodeLe64(payload.data() + cursor) + inode_id_offset;
+        PatchLe64(rebased_payload, child_offset, child_inode);
+        cursor += sizeof(uint64_t);
+
+        const auto type = static_cast<zb::rpc::InodeType>(static_cast<unsigned char>(payload[cursor]));
+        cursor += sizeof(uint8_t);
+
+        ++(*entry_count);
+        *max_parent_inode = parent_inode;
+        *max_name = name;
+        if (verify_samples && verify_samples->size() < verify_dentry_samples) {
+            DentryRecordView sample;
+            sample.parent_inode = parent_inode;
+            sample.name = name;
+            sample.child_inode = child_inode;
+            sample.type = type;
+            verify_samples->push_back(std::move(sample));
+        }
+    }
+    if (cursor != payload.size()) {
+        if (error) {
+            *error = "unexpected trailing bytes in masstree dentry page";
+        }
+        return false;
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool TranslateDentrySparseFromTemplate(std::ifstream* source_sparse_in,
+                                       const MasstreeNamespaceManifest& manifest,
+                                       MasstreeIndexRuntime* runtime,
+                                       uint64_t inode_id_offset,
+                                       std::ofstream* sparse_out,
+                                       uint64_t* dentry_page_count,
+                                       std::string* error) {
+    if (!source_sparse_in || !runtime || !sparse_out || !dentry_page_count) {
+        if (error) {
+            *error = "invalid masstree dentry sparse translate args";
+        }
+        return false;
+    }
+    std::string sparse_payload;
+    while (ReadLengthPrefixedPayload(source_sparse_in, &sparse_payload, error)) {
+        MasstreeDentrySparseEntry entry;
+        if (!DecodeMasstreeDentrySparseEntry(sparse_payload, &entry, error)) {
+            return false;
+        }
+        entry.max_parent_inode += inode_id_offset;
+        std::string rebased_payload;
+        if (!EncodeMasstreeDentrySparseEntry(entry, &rebased_payload, error) ||
+            !WriteLengthPrefixedRecord(sparse_out, rebased_payload) ||
+            !runtime->PutDentryPageBoundary(manifest.namespace_id,
+                                            entry.max_parent_inode,
+                                            entry.max_name,
+                                            entry.page_offset,
+                                            error)) {
+            return false;
+        }
+        ++(*dentry_page_count);
+    }
+    if (error && !error->empty()) {
+        return false;
+    }
+    return true;
+}
+
+bool NormalizeOpticalCursor(const MasstreeOpticalProfile& profile,
+                            MasstreeOpticalClusterCursor* cursor,
+                            std::string* error) {
+    if (!cursor) {
+        if (error) {
+            *error = "optical cursor is null";
+        }
+        return false;
+    }
+    while (cursor->node_index < profile.optical_node_count) {
+        if (cursor->disk_index >= profile.disks_per_node) {
+            cursor->disk_index = 0;
+            cursor->image_index_in_disk = 0;
+            cursor->image_used_bytes = 0;
+            ++cursor->node_index;
+            continue;
+        }
+        const uint32_t images_per_disk = profile.ImagesPerDisk(cursor->disk_index);
+        if (cursor->image_index_in_disk >= images_per_disk) {
+            cursor->image_index_in_disk = 0;
+            cursor->image_used_bytes = 0;
+            ++cursor->disk_index;
+            continue;
+        }
+        if (cursor->image_used_bytes >= profile.image_capacity_bytes) {
+            cursor->image_used_bytes = 0;
+            ++cursor->image_index_in_disk;
+            continue;
+        }
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+    if (error) {
+        *error = "masstree optical cluster capacity is exhausted";
+    }
+    return false;
+}
+
+bool AdvanceOpticalCursorToNextImage(const MasstreeOpticalProfile& profile,
+                                     MasstreeOpticalClusterCursor* cursor,
+                                     std::string* error) {
+    if (!cursor) {
+        if (error) {
+            *error = "optical cursor is null";
+        }
+        return false;
+    }
+    cursor->image_used_bytes = 0;
+    ++cursor->image_index_in_disk;
+    return NormalizeOpticalCursor(profile, cursor, error);
+}
+
+bool ParseOpticalLayoutRun(const std::string& value,
+                           MasstreeBulkImporter::OpticalImageRun* run,
+                           std::string* error) {
+    if (!run) {
+        if (error) {
+            *error = "optical layout run output is null";
+        }
+        return false;
+    }
+    const size_t first = value.find(',');
+    const size_t second = first == std::string::npos ? std::string::npos : value.find(',', first + 1U);
+    if (first == std::string::npos || second == std::string::npos) {
+        if (error) {
+            *error = "invalid masstree optical layout run";
+        }
+        return false;
+    }
+    try {
+        run->global_image_id = static_cast<uint64_t>(std::stoull(value.substr(0, first)));
+        run->file_count = static_cast<uint32_t>(std::stoul(value.substr(first + 1U, second - first - 1U)));
+        run->end_image_used_bytes = static_cast<uint64_t>(std::stoull(value.substr(second + 1U)));
+    } catch (...) {
+        if (error) {
+            *error = "invalid masstree optical layout run values";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool LoadOpticalLayout(const std::string& path,
+                       std::vector<MasstreeBulkImporter::OpticalImageRun>* runs,
+                       std::string* error) {
+    if (!runs) {
+        if (error) {
+            *error = "optical layout output is null";
+        }
+        return false;
+    }
+    std::ifstream input(path);
+    if (!input) {
+        if (error) {
+            *error = "failed to open masstree optical layout: " + path;
+        }
+        return false;
+    }
+    runs->clear();
+    std::string line;
+    bool header_checked = false;
+    while (std::getline(input, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        if (!header_checked) {
+            header_checked = true;
+            if (line != "masstree_optical_layout_v1") {
+                if (error) {
+                    *error = "invalid masstree optical layout header: " + path;
+                }
+                return false;
+            }
+            continue;
+        }
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = line.substr(0, eq);
+        const std::string value = line.substr(eq + 1U);
+        if (key.rfind("run[", 0) == 0) {
+            MasstreeBulkImporter::OpticalImageRun run;
+            if (!ParseOpticalLayoutRun(value, &run, error)) {
+                return false;
+            }
+            runs->push_back(std::move(run));
+        }
+    }
+    if (!header_checked) {
+        if (error) {
+            *error = "empty masstree optical layout: " + path;
+        }
+        return false;
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool BuildTargetOpticalRuns(const MasstreeOpticalProfile& profile,
+                            const MasstreeOpticalClusterCursor& start_cursor,
+                            const std::vector<MasstreeBulkImporter::OpticalImageRun>& template_runs,
+                            std::vector<MasstreeBulkImporter::OpticalImageRun>* target_runs,
+                            uint64_t* start_global_image_id,
+                            uint64_t* end_global_image_id,
+                            MasstreeOpticalClusterCursor* end_cursor,
+                            std::string* error) {
+    if (!target_runs || !start_global_image_id || !end_global_image_id || !end_cursor) {
+        if (error) {
+            *error = "invalid target optical run args";
+        }
+        return false;
+    }
+    target_runs->clear();
+    *start_global_image_id = 0;
+    *end_global_image_id = 0;
+    MasstreeOpticalClusterCursor cursor = start_cursor;
+    if (template_runs.empty()) {
+        if (!NormalizeOpticalCursor(profile, &cursor, error)) {
+            return false;
+        }
+        *end_cursor = cursor;
+        return true;
+    }
+    if (!NormalizeOpticalCursor(profile, &cursor, error)) {
+        return false;
+    }
+    target_runs->reserve(template_runs.size());
+    for (size_t i = 0; i < template_runs.size(); ++i) {
+        const auto& template_run = template_runs[i];
+        MasstreeBulkImporter::OpticalImageRun target_run;
+        target_run.global_image_id = profile.GlobalImageId(cursor);
+        target_run.file_count = template_run.file_count;
+        target_run.end_image_used_bytes = template_run.end_image_used_bytes;
+        if (target_run.end_image_used_bytes == 0 || target_run.end_image_used_bytes > profile.image_capacity_bytes) {
+            if (error) {
+                *error = "invalid template optical layout image_used_bytes";
+            }
+            return false;
+        }
+        if (i == 0) {
+            *start_global_image_id = target_run.global_image_id;
+        }
+        *end_global_image_id = target_run.global_image_id;
+        target_runs->push_back(std::move(target_run));
+        cursor.image_used_bytes = template_run.end_image_used_bytes;
+        if (i + 1U < template_runs.size()) {
+            if (!AdvanceOpticalCursorToNextImage(profile, &cursor, error)) {
+                return false;
+            }
+        }
+    }
+    *end_cursor = cursor;
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
 bool BuildDentryPages(std::ifstream* dentry_in,
                       const MasstreeNamespaceManifest& manifest,
                       MasstreeIndexRuntime* runtime,
@@ -376,6 +711,7 @@ bool BuildDentryPages(std::ifstream* dentry_in,
 }
 
 bool BuildDentryPagesFromTemplate(std::ifstream* source_pages_in,
+                                  std::ifstream* source_sparse_in,
                                   const MasstreeNamespaceManifest& manifest,
                                   MasstreeIndexRuntime* runtime,
                                   uint64_t inode_id_offset,
@@ -407,37 +743,28 @@ bool BuildDentryPagesFromTemplate(std::ifstream* source_pages_in,
 
     std::vector<DentryRecordView> verify_samples;
     verify_samples.reserve(verify_dentry_samples);
+    uint64_t pages_written = 0;
     std::string source_payload;
     while (ReadLengthPrefixedPayload(source_pages_in, &source_payload, error)) {
-        MasstreeDentryPage source_page;
-        if (!DecodeMasstreeDentryPage(source_payload, &source_page, error)) {
+        std::string target_payload;
+        uint64_t page_entry_count = 0;
+        uint64_t max_parent_inode = 0;
+        std::string max_name;
+        if (!RebaseEncodedDentryPagePayload(source_payload,
+                                            inode_id_offset,
+                                            verify_dentry_samples,
+                                            &target_payload,
+                                            &page_entry_count,
+                                            &max_parent_inode,
+                                            &max_name,
+                                            &verify_samples,
+                                            error)) {
             return false;
         }
-        if (source_page.entries.empty()) {
+        if (page_entry_count == 0) {
             continue;
         }
-        std::vector<MasstreeDentryPageEntry> target_entries;
-        target_entries.reserve(source_page.entries.size());
-        for (const auto& source_entry : source_page.entries) {
-            MasstreeDentryPageEntry target_entry = source_entry;
-            target_entry.parent_inode += inode_id_offset;
-            target_entry.child_inode += inode_id_offset;
-            target_entries.push_back(std::move(target_entry));
-            ++(*dentry_imported);
-            if (verify_samples.size() < verify_dentry_samples) {
-                DentryRecordView sample;
-                sample.parent_inode = source_entry.parent_inode + inode_id_offset;
-                sample.name = source_entry.name;
-                sample.child_inode = source_entry.child_inode + inode_id_offset;
-                sample.type = source_entry.type;
-                verify_samples.push_back(std::move(sample));
-            }
-        }
-
-        std::string target_payload;
-        if (!EncodeMasstreeDentryPage(target_entries, &target_payload, error)) {
-            return false;
-        }
+        *dentry_imported += page_entry_count;
         const uint64_t page_offset = static_cast<uint64_t>(pages_out.tellp());
         if (!WriteLengthPrefixedRecord(&pages_out, target_payload)) {
             if (error) {
@@ -445,23 +772,36 @@ bool BuildDentryPagesFromTemplate(std::ifstream* source_pages_in,
             }
             return false;
         }
-        MasstreeDentrySparseEntry sparse_entry;
-        sparse_entry.page_offset = page_offset;
-        sparse_entry.max_parent_inode = target_entries.back().parent_inode;
-        sparse_entry.max_name = target_entries.back().name;
-        std::string sparse_payload;
-        if (!EncodeMasstreeDentrySparseEntry(sparse_entry, &sparse_payload, error) ||
-            !WriteLengthPrefixedRecord(&sparse_out, sparse_payload) ||
-            !runtime->PutDentryPageBoundary(manifest.namespace_id,
-                                            sparse_entry.max_parent_inode,
-                                            sparse_entry.max_name,
-                                            sparse_entry.page_offset,
-                                            error)) {
-            return false;
+        if (!source_sparse_in) {
+            MasstreeDentrySparseEntry sparse_entry;
+            sparse_entry.page_offset = page_offset;
+            sparse_entry.max_parent_inode = max_parent_inode;
+            sparse_entry.max_name = max_name;
+            std::string sparse_payload;
+            if (!EncodeMasstreeDentrySparseEntry(sparse_entry, &sparse_payload, error) ||
+                !WriteLengthPrefixedRecord(&sparse_out, sparse_payload) ||
+                !runtime->PutDentryPageBoundary(manifest.namespace_id,
+                                                sparse_entry.max_parent_inode,
+                                                sparse_entry.max_name,
+                                                sparse_entry.page_offset,
+                                                error)) {
+                return false;
+            }
+            ++(*dentry_page_count);
         }
-        ++(*dentry_page_count);
+        ++pages_written;
     }
     if (error && !error->empty()) {
+        return false;
+    }
+    if (source_sparse_in &&
+        !TranslateDentrySparseFromTemplate(source_sparse_in,
+                                          manifest,
+                                          runtime,
+                                          inode_id_offset,
+                                          &sparse_out,
+                                          dentry_page_count,
+                                          error)) {
         return false;
     }
     pages_out.flush();
@@ -469,6 +809,12 @@ bool BuildDentryPagesFromTemplate(std::ifstream* source_pages_in,
     if (!pages_out.good() || !sparse_out.good()) {
         if (error) {
             *error = "failed to flush masstree dentry template outputs";
+        }
+        return false;
+    }
+    if (*dentry_page_count != pages_written) {
+        if (error) {
+            *error = "masstree template dentry sparse/page count mismatch";
         }
         return false;
     }
@@ -531,6 +877,7 @@ bool BuildInodePages(std::ifstream* inode_in,
                      uint64_t* avg_file_size_bytes,
                      std::string* total_file_bytes,
                      MasstreeOpticalClusterCursor* end_cursor,
+                     std::vector<MasstreeBulkImporter::OpticalImageRun>* optical_image_runs,
                      std::string* error) {
     if (!inode_in || !runtime || !inode_imported || !inode_page_count || !inode_pages_bytes ||
         !verified_inode_samples || !file_count || !start_global_image_id || !end_global_image_id ||
@@ -622,6 +969,19 @@ bool BuildInodePages(std::ifstream* inode_in,
                 *start_global_image_id = global_image_id;
             }
             *end_global_image_id = global_image_id;
+            if (optical_image_runs) {
+                if (optical_image_runs->empty() || optical_image_runs->back().global_image_id != global_image_id) {
+                    MasstreeBulkImporter::OpticalImageRun run;
+                    run.global_image_id = global_image_id;
+                    run.file_count = 1;
+                    run.end_image_used_bytes = allocator.cursor().image_used_bytes;
+                    optical_image_runs->push_back(std::move(run));
+                } else {
+                    auto& run = optical_image_runs->back();
+                    ++run.file_count;
+                    run.end_image_used_bytes = allocator.cursor().image_used_bytes;
+                }
+            }
             ++(*file_count);
             total_file_bytes_accumulator.Add(attr.size());
         }
@@ -707,6 +1067,7 @@ bool BuildInodePagesFromTemplate(std::ifstream* source_pages_in,
                                  MasstreeIndexRuntime* runtime,
                                  const MasstreeOpticalProfile& optical_profile,
                                  const MasstreeOpticalClusterCursor& start_cursor,
+                                 const std::vector<MasstreeBulkImporter::OpticalImageRun>* template_optical_runs,
                                  uint64_t inode_id_offset,
                                  uint32_t verify_inode_samples,
                                  uint64_t* inode_imported,
@@ -719,6 +1080,7 @@ bool BuildInodePagesFromTemplate(std::ifstream* source_pages_in,
                                  uint64_t* avg_file_size_bytes,
                                  std::string* total_file_bytes,
                                  MasstreeOpticalClusterCursor* end_cursor,
+                                 std::vector<MasstreeBulkImporter::OpticalImageRun>* optical_image_runs,
                                  std::string* error) {
     if (!source_pages_in || !runtime || !inode_imported || !inode_page_count || !inode_pages_bytes ||
         !verified_inode_samples || !file_count || !start_global_image_id || !end_global_image_id ||
@@ -743,10 +1105,28 @@ bool BuildInodePagesFromTemplate(std::ifstream* source_pages_in,
         return false;
     }
 
-    MasstreeOpticalAllocator allocator(optical_profile, start_cursor);
-    MasstreeDecimalAccumulator total_file_bytes_accumulator;
     std::vector<uint64_t> verify_samples;
     verify_samples.reserve(verify_inode_samples);
+    std::vector<MasstreeBulkImporter::OpticalImageRun> rebased_optical_runs;
+    size_t optical_run_index = 0;
+    uint32_t files_remaining_in_run = 0;
+    if (template_optical_runs && !template_optical_runs->empty()) {
+        if (!BuildTargetOpticalRuns(optical_profile,
+                                    start_cursor,
+                                    *template_optical_runs,
+                                    &rebased_optical_runs,
+                                    start_global_image_id,
+                                    end_global_image_id,
+                                    end_cursor,
+                                    error)) {
+            return false;
+        }
+        if (optical_image_runs) {
+            *optical_image_runs = rebased_optical_runs;
+        }
+        files_remaining_in_run = rebased_optical_runs.front().file_count;
+    }
+    MasstreeOpticalAllocator allocator(optical_profile, start_cursor);
     std::string source_payload;
     while (ReadLengthPrefixedPayload(source_pages_in, &source_payload, error)) {
         MasstreeInodePage source_page;
@@ -759,28 +1139,67 @@ bool BuildInodePagesFromTemplate(std::ifstream* source_pages_in,
         std::vector<MasstreeInodePageEntry> target_entries;
         target_entries.reserve(source_page.entries.size());
         for (const auto& source_entry : source_page.entries) {
-            MasstreeInodeRecord record;
-            if (!MasstreeInodeRecordCodec::Decode(source_entry.payload, &record, error)) {
+            bool has_optical_image = false;
+            if (!MasstreeInodeRecordCodec::HasOpticalImage(source_entry.payload, &has_optical_image, error)) {
                 return false;
             }
             const uint64_t adjusted_inode_id = source_entry.inode_id + inode_id_offset;
-            record.attr.set_inode_id(adjusted_inode_id);
-            if (record.attr.type() == zb::rpc::INODE_FILE) {
-                uint64_t global_image_id = 0;
-                if (!allocator.Allocate(record.attr.size(), &global_image_id, error)) {
-                    return false;
+            uint64_t global_image_id = 0;
+            if (has_optical_image) {
+                if (!rebased_optical_runs.empty()) {
+                    if (optical_run_index >= rebased_optical_runs.size()) {
+                        if (error) {
+                            *error = "template optical layout underflow";
+                        }
+                        return false;
+                    }
+                    global_image_id = rebased_optical_runs[optical_run_index].global_image_id;
+                    if (files_remaining_in_run == 0) {
+                        if (error) {
+                            *error = "template optical layout file_count mismatch";
+                        }
+                        return false;
+                    }
+                    --files_remaining_in_run;
+                    if (files_remaining_in_run == 0 && optical_run_index + 1U < rebased_optical_runs.size()) {
+                        ++optical_run_index;
+                        files_remaining_in_run = rebased_optical_runs[optical_run_index].file_count;
+                    }
+                } else {
+                    MasstreeInodeRecord record;
+                    if (!MasstreeInodeRecordCodec::Decode(source_entry.payload, &record, error) ||
+                        !allocator.Allocate(record.attr.size(), &global_image_id, error)) {
+                        return false;
+                    }
                 }
-                record.has_optical_image = true;
-                record.optical_image_global_id = global_image_id;
-                if (*file_count == 0) {
-                    *start_global_image_id = global_image_id;
+                if (rebased_optical_runs.empty()) {
+                    if (*file_count == 0) {
+                        *start_global_image_id = global_image_id;
+                    }
+                    *end_global_image_id = global_image_id;
+                    if (optical_image_runs) {
+                        if (optical_image_runs->empty() || optical_image_runs->back().global_image_id != global_image_id) {
+                            MasstreeBulkImporter::OpticalImageRun run;
+                            run.global_image_id = global_image_id;
+                            run.file_count = 1;
+                            run.end_image_used_bytes = allocator.cursor().image_used_bytes;
+                            optical_image_runs->push_back(std::move(run));
+                        } else {
+                            auto& run = optical_image_runs->back();
+                            ++run.file_count;
+                            run.end_image_used_bytes = allocator.cursor().image_used_bytes;
+                        }
+                    }
                 }
-                *end_global_image_id = global_image_id;
                 ++(*file_count);
-                total_file_bytes_accumulator.Add(record.attr.size());
             }
             std::string encoded_payload;
-            if (!MasstreeInodeRecordCodec::Encode(record, &encoded_payload, error)) {
+            if (!MasstreeInodeRecordCodec::RebaseEncoded(source_entry.payload,
+                                                         adjusted_inode_id,
+                                                         has_optical_image,
+                                                         global_image_id,
+                                                         &encoded_payload,
+                                                         error)) {
                 return false;
             }
             MasstreeInodePageEntry target_entry;
@@ -864,9 +1283,22 @@ bool BuildInodePagesFromTemplate(std::ifstream* source_pages_in,
         ++(*verified_inode_samples);
     }
 
-    *total_file_bytes = total_file_bytes_accumulator.ToString();
-    *avg_file_size_bytes = *file_count == 0 ? 0 : total_file_bytes_accumulator.DivideBy(*file_count);
-    *end_cursor = allocator.cursor();
+    *total_file_bytes = manifest.total_file_bytes;
+    *avg_file_size_bytes = manifest.avg_file_size_bytes;
+    if (rebased_optical_runs.empty()) {
+        *end_cursor = allocator.cursor();
+    } else if (optical_run_index + 1U != rebased_optical_runs.size() || files_remaining_in_run != 0) {
+        if (error) {
+            *error = "template optical layout did not match imported file count";
+        }
+        return false;
+    }
+    if (*file_count != manifest.file_count) {
+        if (error) {
+            *error = "template inode import file_count mismatch";
+        }
+        return false;
+    }
     return true;
 }
 
@@ -966,6 +1398,34 @@ bool WriteAllocationSummary(const std::string& path,
     return true;
 }
 
+bool WriteOpticalLayout(const std::string& path,
+                        const MasstreeBulkImporter::Result& result,
+                        std::string* error) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) {
+        if (error) {
+            *error = "failed to create masstree optical layout: " + path;
+        }
+        return false;
+    }
+    out << "masstree_optical_layout_v1\n";
+    out << "file_count=" << result.file_count << "\n";
+    out << "run_count=" << result.optical_image_runs.size() << "\n";
+    for (size_t i = 0; i < result.optical_image_runs.size(); ++i) {
+        const auto& run = result.optical_image_runs[i];
+        out << "run[" << i << "]=" << run.global_image_id << "," << run.file_count << ","
+            << run.end_image_used_bytes << "\n";
+    }
+    out.flush();
+    if (!out.good()) {
+        if (error) {
+            *error = "failed to write masstree optical layout: " + path;
+        }
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 bool MasstreeBulkImporter::Import(const Request& request,
@@ -1002,14 +1462,17 @@ bool MasstreeBulkImporter::Import(const Request& request,
     std::ifstream dentry_in;
     std::ifstream inode_pages_in;
     std::ifstream dentry_pages_in;
+    std::ifstream dentry_sparse_in;
     std::vector<char> inode_in_buffer(kMasstreeIoBufferBytes);
     std::vector<char> dentry_in_buffer(kMasstreeIoBufferBytes);
     std::vector<char> inode_pages_buffer(kMasstreeIoBufferBytes);
     std::vector<char> dentry_pages_buffer(kMasstreeIoBufferBytes);
+    std::vector<char> dentry_sparse_buffer(kMasstreeIoBufferBytes);
     ConfigureStreamBuffer(&inode_in, &inode_in_buffer);
     ConfigureStreamBuffer(&dentry_in, &dentry_in_buffer);
     ConfigureStreamBuffer(&inode_pages_in, &inode_pages_buffer);
     ConfigureStreamBuffer(&dentry_pages_in, &dentry_pages_buffer);
+    ConfigureStreamBuffer(&dentry_sparse_in, &dentry_sparse_buffer);
     const std::string inode_records_path =
         request.source_inode_records_path.empty() ? manifest.inode_records_path : request.source_inode_records_path;
     const std::string dentry_records_path =
@@ -1018,8 +1481,13 @@ bool MasstreeBulkImporter::Import(const Request& request,
         request.source_inode_pages_path.empty() ? manifest.inode_pages_path : request.source_inode_pages_path;
     const std::string dentry_pages_path =
         request.source_dentry_pages_path.empty() ? manifest.dentry_pages_path : request.source_dentry_pages_path;
+    const std::string dentry_sparse_path =
+        request.source_dentry_sparse_path.empty() ? manifest.dentry_sparse_index_path : request.source_dentry_sparse_path;
+    const std::string optical_layout_path =
+        request.source_optical_layout_path.empty() ? manifest.optical_layout_path : request.source_optical_layout_path;
     const bool use_template_pages =
         !request.source_inode_pages_path.empty() && !request.source_dentry_pages_path.empty();
+    std::vector<MasstreeBulkImporter::OpticalImageRun> template_optical_runs;
     if (use_template_pages) {
         inode_pages_in.open(inode_pages_path, std::ios::binary);
         dentry_pages_in.open(dentry_pages_path, std::ios::binary);
@@ -1028,6 +1496,20 @@ bool MasstreeBulkImporter::Import(const Request& request,
                 *error = "failed to open masstree template page inputs";
             }
             return false;
+        }
+        if (!dentry_sparse_path.empty()) {
+            dentry_sparse_in.open(dentry_sparse_path, std::ios::binary);
+            if (!dentry_sparse_in) {
+                if (error) {
+                    *error = "failed to open masstree template dentry sparse input";
+                }
+                return false;
+            }
+        }
+        if (!optical_layout_path.empty()) {
+            if (!LoadOpticalLayout(optical_layout_path, &template_optical_runs, error)) {
+                return false;
+            }
         }
     } else {
         inode_in.open(inode_records_path, std::ios::binary);
@@ -1066,6 +1548,7 @@ bool MasstreeBulkImporter::Import(const Request& request,
                                          active_runtime,
                                          optical_profile,
                                          request.start_cursor,
+                                         template_optical_runs.empty() ? nullptr : &template_optical_runs,
                                          request.inode_id_offset,
                                          request.verify_inode_samples,
                                          &local_result.inode_imported,
@@ -1078,10 +1561,12 @@ bool MasstreeBulkImporter::Import(const Request& request,
                                          &local_result.avg_file_size_bytes,
                                          &local_result.total_file_bytes,
                                          &local_result.end_cursor,
+                                         &local_result.optical_image_runs,
                                          error)) {
             return false;
         }
         if (!BuildDentryPagesFromTemplate(&dentry_pages_in,
+                                          dentry_sparse_in ? &dentry_sparse_in : nullptr,
                                           manifest,
                                           active_runtime,
                                           request.inode_id_offset,
@@ -1110,6 +1595,7 @@ bool MasstreeBulkImporter::Import(const Request& request,
                              &local_result.avg_file_size_bytes,
                              &local_result.total_file_bytes,
                              &local_result.end_cursor,
+                             &local_result.optical_image_runs,
                              error)) {
             return false;
         }
@@ -1149,9 +1635,11 @@ bool MasstreeBulkImporter::Import(const Request& request,
     const std::string summary_path = (staging_dir_path / "import_summary.txt").string();
     const std::string cluster_stats_path = (staging_dir_path / "cluster_stats.txt").string();
     const std::string allocation_summary_path = (staging_dir_path / "allocation_summary.txt").string();
+    const std::string optical_layout_path = (staging_dir_path / "optical_layout.txt").string();
 
     manifest.cluster_stats_path = cluster_stats_path;
     manifest.allocation_summary_path = allocation_summary_path;
+    manifest.optical_layout_path = optical_layout_path;
     manifest.min_file_size_bytes = optical_profile.min_file_size_bytes;
     manifest.max_file_size_bytes = optical_profile.max_file_size_bytes;
     manifest.avg_file_size_bytes = local_result.avg_file_size_bytes;
@@ -1173,7 +1661,8 @@ bool MasstreeBulkImporter::Import(const Request& request,
     if (!manifest.SaveToFile(request.manifest_path, error) ||
         !WriteImportSummary(summary_path, manifest, local_result, error) ||
         !WriteClusterStats(cluster_stats_path, manifest, local_result, optical_profile, error) ||
-        !WriteAllocationSummary(allocation_summary_path, local_result, error)) {
+        !WriteAllocationSummary(allocation_summary_path, local_result, error) ||
+        !WriteOpticalLayout(optical_layout_path, local_result, error)) {
         return false;
     }
 

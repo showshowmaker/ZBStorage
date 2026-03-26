@@ -20,6 +20,7 @@ struct MasstreeNamespaceManifest {
     std::string verify_manifest_path;
     std::string cluster_stats_path;
     std::string allocation_summary_path;
+    std::string optical_layout_path;
     uint64_t page_size_bytes{0};
     uint64_t root_inode_id{0};
     uint64_t inode_min{0};
