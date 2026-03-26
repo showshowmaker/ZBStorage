@@ -41,6 +41,7 @@ DEFINE_string(masstree_namespace_id, "demo-ns", "Masstree demo namespace id");
 DEFINE_string(masstree_generation_id, "", "Masstree demo generation id; auto-generated if empty");
 DEFINE_string(masstree_path_prefix, "", "Masstree demo path prefix; defaults to /masstree_demo/<namespace>");
 DEFINE_uint64(masstree_file_count, 100000000, "Masstree demo file count");
+DEFINE_uint32(masstree_page_size_bytes, 4U * 1024U * 1024U, "Masstree import page size in bytes");
 DEFINE_uint32(masstree_max_files_per_leaf_dir, 2048, "Masstree max files per leaf dir");
 DEFINE_uint32(masstree_max_subdirs_per_dir, 256, "Masstree max subdirs per dir");
 DEFINE_uint32(masstree_verify_inode_samples, 32, "Masstree import inode verify sample count");
@@ -1200,6 +1201,11 @@ private:
                     return false;
                 }
                 FLAGS_masstree_file_count = parsed_u64;
+            } else if (key == "page_size_bytes" || key == "masstree_page_size_bytes") {
+                if (!ParseUint32Value(key, value, &parsed_u32, error)) {
+                    return false;
+                }
+                FLAGS_masstree_page_size_bytes = parsed_u32;
             } else if (key == "max_files_per_leaf_dir" || key == "masstree_max_files_per_leaf_dir") {
                 if (!ParseUint32Value(key, value, &parsed_u32, error)) {
                     return false;
@@ -1744,6 +1750,7 @@ private:
         request.set_generation_id(generation_id);
         request.set_path_prefix(path_prefix);
         request.set_file_count(FLAGS_masstree_file_count);
+        request.set_page_size_bytes(FLAGS_masstree_page_size_bytes);
         request.set_max_files_per_leaf_dir(FLAGS_masstree_max_files_per_leaf_dir);
         request.set_max_subdirs_per_dir(FLAGS_masstree_max_subdirs_per_dir);
         request.set_verify_inode_samples(FLAGS_masstree_verify_inode_samples);
@@ -1761,6 +1768,7 @@ private:
         std::cout << "namespace_id=" << namespace_id << '\n';
         std::cout << "generation_id=" << generation_id << '\n';
         std::cout << "path_prefix=" << path_prefix << '\n';
+        std::cout << "page_size_bytes=" << FLAGS_masstree_page_size_bytes << '\n';
         std::cout << "job_id=" << reply.job_id() << '\n';
 
         const auto poll_started_at = std::chrono::steady_clock::now();

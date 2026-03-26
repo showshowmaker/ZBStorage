@@ -8,6 +8,9 @@ SCHEDULER_ADDR="${SCHEDULER_ADDR:-127.0.0.1:9100}"
 MOUNT_POINT="${MOUNT_POINT:-${ROOT_DIR}/.demo_run/mnt}"
 NAMESPACE_PREFIX="${NAMESPACE_PREFIX:-demo-ns}"
 FILES_PER_NAMESPACE=100000000
+PAGE_SIZE_BYTES="${MASSTREE_PAGE_SIZE_BYTES:-4194304}"
+VERIFY_INODE_SAMPLES="${MASSTREE_VERIFY_INODE_SAMPLES:-32}"
+VERIFY_DENTRY_SAMPLES="${MASSTREE_VERIFY_DENTRY_SAMPLES:-32}"
 
 NAMESPACE_COUNT="${1:-}"
 
@@ -36,5 +39,8 @@ for ((i=1; i<=NAMESPACE_COUNT; ++i)); do
     --mount_point="${MOUNT_POINT}" \
     --scenario=masstree_import \
     --masstree_namespace_id="${NAMESPACE_ID}" \
-    --masstree_file_count="${FILES_PER_NAMESPACE}"
+    --masstree_file_count="${FILES_PER_NAMESPACE}" \
+    --masstree_page_size_bytes="${PAGE_SIZE_BYTES}" \
+    --masstree_verify_inode_samples="${VERIFY_INODE_SAMPLES}" \
+    --masstree_verify_dentry_samples="${VERIFY_DENTRY_SAMPLES}"
 done

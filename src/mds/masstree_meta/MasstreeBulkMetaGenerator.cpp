@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 #include "MasstreeDecimalUtils.h"
 #include "MasstreeManifest.h"
@@ -94,6 +95,16 @@ uint64_t CeilDiv(uint64_t lhs, uint64_t rhs) {
 uint64_t NowSeconds() {
     using namespace std::chrono;
     return static_cast<uint64_t>(duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
+}
+
+constexpr size_t kMasstreeIoBufferBytes = 8U * 1024U * 1024U;
+
+template <typename Stream>
+void ConfigureStreamBuffer(Stream* stream, std::vector<char>* buffer) {
+    if (!stream || !buffer || buffer->empty()) {
+        return;
+    }
+    stream->rdbuf()->pubsetbuf(buffer->data(), static_cast<std::streamsize>(buffer->size()));
 }
 
 bool WriteExact(std::ofstream* out, const std::string& data) {
@@ -320,8 +331,14 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
     const fs::path manifest_path = staging_dir / "manifest.txt";
     const fs::path verify_manifest_path = staging_dir / "verify_manifest.txt";
 
-    std::ofstream inode_out(inode_records_path, std::ios::binary | std::ios::trunc);
-    std::ofstream dentry_out(dentry_records_path, std::ios::binary | std::ios::trunc);
+    std::ofstream inode_out;
+    std::ofstream dentry_out;
+    std::vector<char> inode_buffer(kMasstreeIoBufferBytes);
+    std::vector<char> dentry_buffer(kMasstreeIoBufferBytes);
+    ConfigureStreamBuffer(&inode_out, &inode_buffer);
+    ConfigureStreamBuffer(&dentry_out, &dentry_buffer);
+    inode_out.open(inode_records_path, std::ios::binary | std::ios::trunc);
+    dentry_out.open(dentry_records_path, std::ios::binary | std::ios::trunc);
     if (!inode_out || !dentry_out) {
         if (error) {
             *error = "failed to open masstree bulk meta generator record outputs";
@@ -442,7 +459,8 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
     manifest.dentry_pages_path = (staging_dir / "dentry_pages.seg").string();
     manifest.dentry_sparse_index_path = (staging_dir / "dentry_sparse.idx").string();
     manifest.verify_manifest_path = verify_manifest_path.string();
-    manifest.page_size_bytes = kMasstreeDefaultPageSizeBytes;
+    manifest.page_size_bytes =
+        request.page_size_bytes >= 4096U ? request.page_size_bytes : kMasstreeDefaultPageSizeBytes;
     manifest.root_inode_id = root_inode_id;
     manifest.inode_min = inode_min;
     manifest.inode_max = inode_max;

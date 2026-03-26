@@ -31,6 +31,16 @@ struct DentryRecordView {
     zb::rpc::InodeType type{zb::rpc::INODE_FILE};
 };
 
+constexpr size_t kMasstreeIoBufferBytes = 8U * 1024U * 1024U;
+
+template <typename Stream>
+void ConfigureStreamBuffer(Stream* stream, std::vector<char>* buffer) {
+    if (!stream || !buffer || buffer->empty()) {
+        return;
+    }
+    stream->rdbuf()->pubsetbuf(buffer->data(), static_cast<std::streamsize>(buffer->size()));
+}
+
 uint16_t DecodeLe16(const char* data) {
     return static_cast<uint16_t>(static_cast<unsigned char>(data[0])) |
            (static_cast<uint16_t>(static_cast<unsigned char>(data[1])) << 8U);
@@ -194,8 +204,14 @@ bool BuildDentryPages(std::ifstream* dentry_in,
         }
         return false;
     }
-    std::ofstream pages_out(manifest.dentry_pages_path, std::ios::binary | std::ios::trunc);
-    std::ofstream sparse_out(manifest.dentry_sparse_index_path, std::ios::binary | std::ios::trunc);
+    std::ofstream pages_out;
+    std::ofstream sparse_out;
+    std::vector<char> pages_buffer(kMasstreeIoBufferBytes);
+    std::vector<char> sparse_buffer(kMasstreeIoBufferBytes);
+    ConfigureStreamBuffer(&pages_out, &pages_buffer);
+    ConfigureStreamBuffer(&sparse_out, &sparse_buffer);
+    pages_out.open(manifest.dentry_pages_path, std::ios::binary | std::ios::trunc);
+    sparse_out.open(manifest.dentry_sparse_index_path, std::ios::binary | std::ios::trunc);
     if (!pages_out || !sparse_out) {
         if (error) {
             *error = "failed to open masstree dentry sparse outputs";
@@ -346,8 +362,14 @@ bool BuildInodePages(std::ifstream* inode_in,
         }
         return false;
     }
-    std::ofstream pages_out(manifest.inode_pages_path, std::ios::binary | std::ios::trunc);
-    std::ofstream sparse_out(manifest.inode_sparse_index_path, std::ios::binary | std::ios::trunc);
+    std::ofstream pages_out;
+    std::ofstream sparse_out;
+    std::vector<char> pages_buffer(kMasstreeIoBufferBytes);
+    std::vector<char> sparse_buffer(kMasstreeIoBufferBytes);
+    ConfigureStreamBuffer(&pages_out, &pages_buffer);
+    ConfigureStreamBuffer(&sparse_out, &sparse_buffer);
+    pages_out.open(manifest.inode_pages_path, std::ios::binary | std::ios::trunc);
+    sparse_out.open(manifest.inode_sparse_index_path, std::ios::binary | std::ios::trunc);
     if (!pages_out || !sparse_out) {
         if (error) {
             *error = "failed to open masstree inode sparse outputs";
@@ -628,8 +650,14 @@ bool MasstreeBulkImporter::Import(const Request& request,
         return false;
     }
 
-    std::ifstream inode_in(manifest.inode_records_path, std::ios::binary);
-    std::ifstream dentry_in(manifest.dentry_records_path, std::ios::binary);
+    std::ifstream inode_in;
+    std::ifstream dentry_in;
+    std::vector<char> inode_in_buffer(kMasstreeIoBufferBytes);
+    std::vector<char> dentry_in_buffer(kMasstreeIoBufferBytes);
+    ConfigureStreamBuffer(&inode_in, &inode_in_buffer);
+    ConfigureStreamBuffer(&dentry_in, &dentry_in_buffer);
+    inode_in.open(manifest.inode_records_path, std::ios::binary);
+    dentry_in.open(manifest.dentry_records_path, std::ios::binary);
     if (!inode_in || !dentry_in) {
         if (error) {
             *error = "failed to open masstree importer inputs/outputs";
@@ -641,9 +669,11 @@ bool MasstreeBulkImporter::Import(const Request& request,
     local_result.start_cursor = request.start_cursor;
     local_result.end_cursor = request.start_cursor;
     local_result.total_file_bytes = "0";
-    if (manifest.page_size_bytes == 0) {
-        manifest.page_size_bytes = kMasstreeDefaultPageSizeBytes;
-    }
+    manifest.page_size_bytes = request.page_size_bytes >= 4096U
+                                   ? request.page_size_bytes
+                                   : (manifest.page_size_bytes == 0
+                                          ? kMasstreeDefaultPageSizeBytes
+                                          : manifest.page_size_bytes);
     const std::filesystem::path staging_dir_path = std::filesystem::path(request.manifest_path).parent_path();
     if (manifest.inode_pages_path.empty()) {
         manifest.inode_pages_path = (staging_dir_path / "inode_pages.seg").string();

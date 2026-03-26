@@ -13,6 +13,7 @@ class MasstreeBulkImporter {
 public:
     struct Request {
         std::string manifest_path;
+        uint32_t page_size_bytes{0};
         uint32_t verify_inode_samples{16};
         uint32_t verify_dentry_samples{16};
         MasstreeOpticalClusterCursor start_cursor;

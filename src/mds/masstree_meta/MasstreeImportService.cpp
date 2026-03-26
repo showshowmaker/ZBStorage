@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <filesystem>
 
+#include "MasstreePageLayout.h"
 #include "../storage/MetaCodec.h"
 #include "../storage/MetaSchema.h"
 
@@ -72,6 +73,15 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     if (!NormalizePathPrefix(request.path_prefix, &normalized.path_prefix, error)) {
         return false;
     }
+    if (normalized.page_size_bytes == 0) {
+        normalized.page_size_bytes = kMasstreeDefaultPageSizeBytes;
+    }
+    if (normalized.page_size_bytes < 4096U) {
+        if (error) {
+            *error = "masstree page_size_bytes must be >= 4096";
+        }
+        return false;
+    }
 
     const uint64_t leaf_dir_count =
         (normalized.file_count + normalized.max_files_per_leaf_dir - 1ULL) / normalized.max_files_per_leaf_dir;
@@ -105,6 +115,7 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     generate_request.path_prefix = normalized.path_prefix;
     generate_request.inode_start = normalized.inode_start;
     generate_request.file_count = normalized.file_count;
+    generate_request.page_size_bytes = normalized.page_size_bytes;
     generate_request.max_files_per_leaf_dir = normalized.max_files_per_leaf_dir;
     generate_request.max_subdirs_per_dir = normalized.max_subdirs_per_dir;
 
@@ -122,6 +133,7 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     MasstreeBulkImporter importer;
     MasstreeBulkImporter::Request import_request;
     import_request.manifest_path = generate_result.manifest_path;
+    import_request.page_size_bytes = normalized.page_size_bytes;
     import_request.verify_inode_samples = normalized.verify_inode_samples;
     import_request.verify_dentry_samples = normalized.verify_dentry_samples;
     import_request.start_cursor = cluster_before.cursor;
