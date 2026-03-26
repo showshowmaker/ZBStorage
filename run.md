@@ -23,7 +23,12 @@ sudo apt install -y \
 用现成脚本即可。[build_all.sh](C:/Users/w1j2h/Desktop/AllZB/ZBPro/ZBStorage/scripts/build_all.sh)
 
 ```bash
-bash scripts/build_all.sh build
+# bash scripts/build_all.sh build
+# bash scripts/build_all.sh build > /tmp/zb_build_stdout.log 2> /tmp/zb_build_stderr.log
+# tail -n 200 /tmp/zb_build_stderr.log
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G "Unix Makefiles"
+cmake --build build -j"$(nproc)"
+
 ```
 
 编译成功后，确认这些文件存在：

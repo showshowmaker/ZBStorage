@@ -1637,11 +1637,11 @@ bool MasstreeBulkImporter::Import(const Request& request,
     const std::string summary_path = (staging_dir_path / "import_summary.txt").string();
     const std::string cluster_stats_path = (staging_dir_path / "cluster_stats.txt").string();
     const std::string allocation_summary_path = (staging_dir_path / "allocation_summary.txt").string();
-    const std::string optical_layout_path = (staging_dir_path / "optical_layout.txt").string();
+    const std::string output_optical_layout_path = (staging_dir_path / "optical_layout.txt").string();
 
     manifest.cluster_stats_path = cluster_stats_path;
     manifest.allocation_summary_path = allocation_summary_path;
-    manifest.optical_layout_path = optical_layout_path;
+    manifest.optical_layout_path = output_optical_layout_path;
     manifest.min_file_size_bytes = optical_profile.min_file_size_bytes;
     manifest.max_file_size_bytes = optical_profile.max_file_size_bytes;
     manifest.avg_file_size_bytes = local_result.avg_file_size_bytes;
@@ -1664,7 +1664,7 @@ bool MasstreeBulkImporter::Import(const Request& request,
         !WriteImportSummary(summary_path, manifest, local_result, error) ||
         !WriteClusterStats(cluster_stats_path, manifest, local_result, optical_profile, error) ||
         !WriteAllocationSummary(allocation_summary_path, local_result, error) ||
-        !WriteOpticalLayout(optical_layout_path, local_result, error)) {
+        !WriteOpticalLayout(output_optical_layout_path, local_result, error)) {
         return false;
     }
 
