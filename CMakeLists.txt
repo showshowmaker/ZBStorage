@@ -214,6 +214,10 @@ if(BRPC_DYNAMIC_LIB)
 endif()
 
 add_executable(system_demo_tool
+    tools/demo/demo_logger.cpp
+    tools/demo/demo_menu.cpp
+    tools/demo/demo_params.cpp
+    tools/demo/demo_result.cpp
     tools/demo/system_demo_tool.cpp
 )
 set_target_properties(system_demo_tool PROPERTIES

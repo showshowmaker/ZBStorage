@@ -59,7 +59,10 @@ bool MasstreeStatsStore::LoadClusterStats(MasstreeClusterStatsRecord* record, st
     record->free_capacity_bytes = record->total_capacity_bytes;
     record->total_file_count = 0;
     record->total_file_bytes = "0";
+    record->total_metadata_bytes = "0";
     record->avg_file_size_bytes = 0;
+    record->min_file_size_bytes = profile.min_file_size_bytes;
+    record->max_file_size_bytes = profile.max_file_size_bytes;
     record->cursor = MasstreeOpticalClusterCursor();
     if (error) {
         error->clear();
@@ -230,14 +233,63 @@ MasstreeClusterStatsRecord MasstreeStatsStore::BuildUpdatedClusterStats(
     const MasstreeClusterStatsRecord& current,
     uint64_t delta_file_count,
     const std::string& delta_file_bytes,
+    uint64_t delta_metadata_bytes,
     const MasstreeOpticalClusterCursor& end_cursor) const {
     MasstreeClusterStatsRecord updated = current;
     updated.used_capacity_bytes = AddDecimalStrings(current.used_capacity_bytes, delta_file_bytes);
     updated.free_capacity_bytes = SubtractDecimalStrings(current.total_capacity_bytes, updated.used_capacity_bytes);
     updated.total_file_count = current.total_file_count + delta_file_count;
     updated.total_file_bytes = AddDecimalStrings(current.total_file_bytes, delta_file_bytes);
+    updated.total_metadata_bytes =
+        AddDecimalStrings(current.total_metadata_bytes, std::to_string(delta_metadata_bytes));
     updated.avg_file_size_bytes = updated.total_file_count == 0 ? 0 :
                                   DivideDecimalStringByU64(updated.total_file_bytes, updated.total_file_count);
+    updated.cursor = end_cursor;
+    return updated;
+}
+
+MasstreeClusterStatsRecord MasstreeStatsStore::BuildReplacedClusterStats(
+    const MasstreeClusterStatsRecord& current,
+    const MasstreeNamespaceStatsRecord* previous_namespace_stats,
+    const MasstreeNamespaceStatsRecord& next_namespace_stats,
+    const MasstreeOpticalClusterCursor& end_cursor) const {
+    const uint64_t previous_file_count = previous_namespace_stats ? previous_namespace_stats->file_count : 0;
+    const std::string previous_file_bytes = previous_namespace_stats
+                                                ? NormalizeDecimalString(previous_namespace_stats->total_file_bytes)
+                                                : std::string("0");
+    const std::string previous_metadata_bytes = previous_namespace_stats
+                                                    ? NormalizeDecimalString(previous_namespace_stats->total_metadata_bytes)
+                                                    : std::string("0");
+    const std::string next_file_bytes = NormalizeDecimalString(next_namespace_stats.total_file_bytes);
+    const std::string next_metadata_bytes = NormalizeDecimalString(next_namespace_stats.total_metadata_bytes);
+
+    MasstreeClusterStatsRecord updated = current;
+    updated.total_file_count = current.total_file_count >= previous_file_count
+                                   ? (current.total_file_count - previous_file_count + next_namespace_stats.file_count)
+                                   : next_namespace_stats.file_count;
+
+    const std::string base_used_capacity =
+        CompareDecimalStrings(current.used_capacity_bytes, previous_file_bytes) >= 0
+            ? SubtractDecimalStrings(current.used_capacity_bytes, previous_file_bytes)
+            : std::string("0");
+    updated.used_capacity_bytes = AddDecimalStrings(base_used_capacity, next_file_bytes);
+
+    const std::string base_total_file_bytes =
+        CompareDecimalStrings(current.total_file_bytes, previous_file_bytes) >= 0
+            ? SubtractDecimalStrings(current.total_file_bytes, previous_file_bytes)
+            : std::string("0");
+    updated.total_file_bytes = AddDecimalStrings(base_total_file_bytes, next_file_bytes);
+
+    const std::string base_total_metadata_bytes =
+        CompareDecimalStrings(current.total_metadata_bytes, previous_metadata_bytes) >= 0
+            ? SubtractDecimalStrings(current.total_metadata_bytes, previous_metadata_bytes)
+            : std::string("0");
+    updated.total_metadata_bytes = AddDecimalStrings(base_total_metadata_bytes, next_metadata_bytes);
+
+    updated.free_capacity_bytes = SubtractDecimalStrings(current.total_capacity_bytes, updated.used_capacity_bytes);
+    updated.avg_file_size_bytes = updated.total_file_count == 0
+                                      ? 0
+                                      : DivideDecimalStringByU64(updated.total_file_bytes, updated.total_file_count);
     updated.cursor = end_cursor;
     return updated;
 }
@@ -253,6 +305,9 @@ bool MasstreeStatsStore::DecodeClusterStats(const std::string& payload,
     }
 
     MasstreeClusterStatsRecord decoded;
+    const MasstreeOpticalProfile profile = MasstreeOpticalProfile::Fixed();
+    decoded.min_file_size_bytes = profile.min_file_size_bytes;
+    decoded.max_file_size_bytes = profile.max_file_size_bytes;
     std::istringstream input(payload);
     std::string line;
     bool header_checked = false;
@@ -295,8 +350,14 @@ bool MasstreeStatsStore::DecodeClusterStats(const std::string& payload,
             ParseU64Field(value, &decoded.total_file_count);
         } else if (key == "total_file_bytes") {
             decoded.total_file_bytes = NormalizeDecimalString(value);
+        } else if (key == "total_metadata_bytes") {
+            decoded.total_metadata_bytes = NormalizeDecimalString(value);
         } else if (key == "avg_file_size_bytes") {
             ParseU64Field(value, &decoded.avg_file_size_bytes);
+        } else if (key == "min_file_size_bytes") {
+            ParseU64Field(value, &decoded.min_file_size_bytes);
+        } else if (key == "max_file_size_bytes") {
+            ParseU64Field(value, &decoded.max_file_size_bytes);
         } else if (key == "cursor") {
             CursorFromString(value, &decoded.cursor);
         }
@@ -359,6 +420,8 @@ bool MasstreeStatsStore::DecodeNamespaceStats(const std::string& payload,
             ParseU64Field(value, &decoded.file_count);
         } else if (key == "total_file_bytes") {
             decoded.total_file_bytes = NormalizeDecimalString(value);
+        } else if (key == "total_metadata_bytes") {
+            decoded.total_metadata_bytes = NormalizeDecimalString(value);
         } else if (key == "avg_file_size_bytes") {
             ParseU64Field(value, &decoded.avg_file_size_bytes);
         } else if (key == "start_global_image_id") {
@@ -396,7 +459,10 @@ std::string MasstreeStatsStore::EncodeClusterStats(const MasstreeClusterStatsRec
     out << "free_capacity_bytes=" << NormalizeDecimalString(record.free_capacity_bytes) << "\n";
     out << "total_file_count=" << record.total_file_count << "\n";
     out << "total_file_bytes=" << NormalizeDecimalString(record.total_file_bytes) << "\n";
+    out << "total_metadata_bytes=" << NormalizeDecimalString(record.total_metadata_bytes) << "\n";
     out << "avg_file_size_bytes=" << record.avg_file_size_bytes << "\n";
+    out << "min_file_size_bytes=" << record.min_file_size_bytes << "\n";
+    out << "max_file_size_bytes=" << record.max_file_size_bytes << "\n";
     out << "cursor=" << CursorToString(record.cursor) << "\n";
     return out.str();
 }
@@ -408,6 +474,7 @@ std::string MasstreeStatsStore::EncodeNamespaceStats(const MasstreeNamespaceStat
     out << "generation_id=" << record.generation_id << "\n";
     out << "file_count=" << record.file_count << "\n";
     out << "total_file_bytes=" << NormalizeDecimalString(record.total_file_bytes) << "\n";
+    out << "total_metadata_bytes=" << NormalizeDecimalString(record.total_metadata_bytes) << "\n";
     out << "avg_file_size_bytes=" << record.avg_file_size_bytes << "\n";
     out << "start_global_image_id=" << record.start_global_image_id << "\n";
     out << "end_global_image_id=" << record.end_global_image_id << "\n";

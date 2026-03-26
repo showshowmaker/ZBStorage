@@ -13,7 +13,7 @@ public:
         std::string generation_id;
         std::string path_prefix;
         uint64_t inode_start{0};
-        uint64_t file_count{100000000000ULL};
+        uint64_t file_count{100000000ULL};
         uint32_t max_files_per_leaf_dir{2048};
         uint32_t max_subdirs_per_dir{256};
     };

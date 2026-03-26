@@ -233,8 +233,10 @@ private:
     bool PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
                                 uint64_t* inode_id,
                                 zb::rpc::InodeAttr* attr,
+                                std::string* file_name,
                                 std::string* error) const;
     void RunMasstreeImportWorker();
+    void TrimMasstreeImportJobsLocked();
     std::shared_ptr<MasstreeImportJob> EnqueueMasstreeImportJob(const MasstreeImportService::Request& request);
     std::shared_ptr<MasstreeImportJob> FindMasstreeImportJob(const std::string& job_id) const;
     static void FillMasstreeImportJobInfo(const MasstreeImportJob& job, zb::rpc::MasstreeImportJobInfo* info);
@@ -264,6 +266,7 @@ private:
     mutable std::mutex masstree_import_job_mu_;
     std::condition_variable masstree_import_job_cv_;
     std::deque<std::shared_ptr<MasstreeImportJob>> masstree_import_job_queue_;
+    std::deque<std::string> masstree_import_job_history_;
     std::unordered_map<std::string, std::shared_ptr<MasstreeImportJob>> masstree_import_jobs_;
     std::thread masstree_import_worker_;
     uint64_t masstree_import_next_job_id_{1};

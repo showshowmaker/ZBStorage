@@ -21,7 +21,7 @@ public:
         std::string generation_id;
         std::string path_prefix;
         uint64_t inode_start{0};
-        uint64_t file_count{100000000000ULL};
+        uint64_t file_count{100000000ULL};
         uint32_t max_files_per_leaf_dir{2048};
         uint32_t max_subdirs_per_dir{256};
         uint32_t verify_inode_samples{16};
@@ -37,6 +37,8 @@ public:
         uint64_t inode_max{0};
         uint64_t inode_count{0};
         uint64_t dentry_count{0};
+        uint64_t level1_dir_count{0};
+        uint64_t leaf_dir_count{0};
         uint64_t inode_pages_bytes{0};
         uint64_t avg_file_size_bytes{0};
         std::string total_file_bytes;

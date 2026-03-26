@@ -8,6 +8,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -18,6 +19,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include "demo_menu.h"
+#include "demo_logger.h"
+#include "demo_params.h"
+#include "demo_result.h"
+#include "mds/masstree_meta/MasstreeDecimalUtils.h"
 #include "mds.pb.h"
 #include "scheduler.pb.h"
 
@@ -28,16 +34,63 @@ DEFINE_string(scheduler, "127.0.0.1:9100", "Scheduler endpoint");
 DEFINE_string(mount_point, "/mnt/zbstorage", "Mounted FUSE path");
 DEFINE_string(real_dir, "real", "Top-level mounted directory for real-node files");
 DEFINE_string(virtual_dir, "virtual", "Top-level mounted directory for virtual-node files");
-DEFINE_string(scenario, "interactive", "Scenario: interactive|health|posix|masstree|masstree_import|masstree_query|all");
+DEFINE_string(scenario,
+              "interactive",
+              "Scenario: interactive|health|stats|posix|masstree|masstree_import|masstree_query|all");
 DEFINE_string(masstree_namespace_id, "demo-ns", "Masstree demo namespace id");
 DEFINE_string(masstree_generation_id, "", "Masstree demo generation id; auto-generated if empty");
 DEFINE_string(masstree_path_prefix, "", "Masstree demo path prefix; defaults to /masstree_demo/<namespace>");
-DEFINE_uint64(masstree_file_count, 10000, "Masstree demo file count");
+DEFINE_uint64(masstree_file_count, 100000000, "Masstree demo file count");
 DEFINE_uint32(masstree_max_files_per_leaf_dir, 2048, "Masstree max files per leaf dir");
 DEFINE_uint32(masstree_max_subdirs_per_dir, 256, "Masstree max subdirs per dir");
 DEFINE_uint32(masstree_verify_inode_samples, 32, "Masstree import inode verify sample count");
 DEFINE_uint32(masstree_verify_dentry_samples, 32, "Masstree import dentry verify sample count");
 DEFINE_uint32(masstree_job_poll_interval_ms, 1000, "Masstree import job poll interval in ms");
+DEFINE_uint32(masstree_query_samples, 1, "Masstree query sample count");
+DEFINE_uint64(posix_file_size_mb, 100, "POSIX tier demo file size in MiB");
+DEFINE_uint32(posix_chunk_size_kb, 1024, "POSIX tier demo chunk size in KiB");
+DEFINE_uint32(posix_repeat, 1, "POSIX tier demo repeat count");
+DEFINE_bool(posix_keep_file, true, "Keep generated POSIX tier demo files");
+DEFINE_bool(posix_verify_hash, true, "Verify read-back hash for POSIX tier demos");
+DEFINE_bool(posix_sync_on_close, false, "Flush file contents before closing POSIX tier demo files");
+DEFINE_uint64(tc_p1_expected_real_node_count, 0, "TC-P1 expected real node count; 0 disables this check");
+DEFINE_uint64(tc_p1_expected_virtual_node_count, 0, "TC-P1 expected virtual logical node count; 0 disables this check");
+DEFINE_uint64(tc_p1_expected_online_node_count, 0, "TC-P1 expected online logical node count; 0 disables this check");
+DEFINE_uint64(tc_p1_expected_online_disks_per_node,
+              0,
+              "TC-P1 expected online disks per logical node; 0 disables this check");
+DEFINE_uint64(tc_p1_expected_online_disk_capacity_bytes,
+              0,
+              "TC-P1 expected per-disk online capacity in bytes; 0 disables this check");
+DEFINE_uint64(tc_p1_expected_optical_node_count, 10000, "TC-P1 expected optical node count; 0 disables this check");
+DEFINE_uint64(tc_p1_expected_optical_device_count,
+              100000000,
+              "TC-P1 expected optical device count; 0 disables this check");
+DEFINE_string(tc_p1_expected_cold_total_capacity_bytes,
+              "",
+              "TC-P1 expected cold total capacity in decimal bytes; empty disables this check");
+DEFINE_string(tc_p1_expected_cold_used_capacity_bytes,
+              "",
+              "TC-P1 expected cold used capacity in decimal bytes; empty disables this check");
+DEFINE_string(tc_p1_expected_cold_free_capacity_bytes,
+              "",
+              "TC-P1 expected cold free capacity in decimal bytes; empty disables this check");
+DEFINE_uint64(tc_p1_expected_total_file_count, 0, "TC-P1 expected total file count; 0 disables this check");
+DEFINE_string(tc_p1_expected_total_file_bytes,
+              "",
+              "TC-P1 expected total file bytes in decimal form; empty disables this check");
+DEFINE_string(tc_p1_expected_total_metadata_bytes,
+              "",
+              "TC-P1 expected total metadata bytes in decimal form; empty disables this check");
+DEFINE_uint64(tc_p1_expected_min_file_size_bytes,
+              500000000ULL,
+              "TC-P1 expected minimum generated file size; 0 disables this check");
+DEFINE_uint64(tc_p1_expected_max_file_size_bytes,
+              1500000000ULL,
+              "TC-P1 expected maximum generated file size; 0 disables this check");
+DEFINE_string(log_file, "logs/system_demo.log", "Demo execution log file path");
+DEFINE_bool(enable_log_file, true, "Write demo command output to a log file");
+DEFINE_bool(log_append, true, "Append demo execution logs instead of overwriting the file");
 DEFINE_int32(timeout_ms, 5000, "RPC timeout in ms");
 DEFINE_int32(max_retry, 0, "RPC max retry");
 
@@ -178,6 +231,227 @@ void PrintSection(const std::string& title) {
     std::cout << "\n==== " << title << " ====\n";
 }
 
+std::string FormatDecimalBytes(const std::string& bytes) {
+    return zb::mds::NormalizeDecimalString(bytes);
+}
+
+struct TierStats {
+    uint64_t physical_node_count{0};
+    uint64_t logical_node_count{0};
+    uint64_t disk_count{0};
+    uint64_t total_capacity_bytes{0};
+    uint64_t used_capacity_bytes{0};
+    uint64_t free_capacity_bytes{0};
+};
+
+struct CheckResult {
+    std::string name;
+    bool ok{false};
+    std::string detail;
+};
+
+struct TierIoOptions {
+    std::string dir_name;
+    std::string expected_tier;
+    uint64_t file_size_bytes{100ULL * 1024ULL * 1024ULL};
+    uint32_t chunk_size_bytes{1024U * 1024U};
+    uint32_t repeat{1};
+    bool keep_file{true};
+    bool verify_hash{true};
+    bool sync_on_close{false};
+};
+
+struct FileInspectionResult {
+    uint64_t inode_id{0};
+    uint64_t size_bytes{0};
+    std::string node_id;
+    std::string disk_id;
+    std::string actual_tier{"unknown"};
+};
+
+struct TierIoIterationResult {
+    std::string logical_path;
+    std::string mounted_path;
+    uint64_t expected_size_bytes{0};
+    uint64_t bytes_written{0};
+    uint64_t bytes_read{0};
+    uint64_t write_elapsed_us{0};
+    uint64_t read_elapsed_us{0};
+    uint64_t write_hash{0};
+    uint64_t read_hash{0};
+    FileInspectionResult inspection;
+};
+
+void PrintByteMetric(const std::string& key, uint64_t value) {
+    std::cout << key << "=" << value << " (" << FormatBytes(value) << ")\n";
+}
+
+void PrintDecimalMetric(const std::string& key, const std::string& value) {
+    std::cout << key << "=" << FormatDecimalBytes(value) << '\n';
+}
+
+void AddCheck(std::vector<CheckResult>* checks,
+              const std::string& name,
+              bool ok,
+              const std::string& detail) {
+    if (!checks) {
+        return;
+    }
+    checks->push_back(CheckResult{name, ok, detail});
+}
+
+bool ParseUint64Value(const std::string& name,
+                      const std::string& value,
+                      uint64_t* out,
+                      std::string* error) {
+    if (!out) {
+        if (error) {
+            *error = "null output for " + name;
+        }
+        return false;
+    }
+    try {
+        *out = static_cast<uint64_t>(std::stoull(value));
+        if (error) {
+            error->clear();
+        }
+        return true;
+    } catch (...) {
+        if (error) {
+            *error = "invalid uint64 for " + name + ": " + value;
+        }
+        return false;
+    }
+}
+
+bool ParseUint32Value(const std::string& name,
+                      const std::string& value,
+                      uint32_t* out,
+                      std::string* error) {
+    uint64_t parsed = 0;
+    if (!ParseUint64Value(name, value, &parsed, error)) {
+        return false;
+    }
+    if (parsed > std::numeric_limits<uint32_t>::max()) {
+        if (error) {
+            *error = "value too large for uint32 " + name + ": " + value;
+        }
+        return false;
+    }
+    if (out) {
+        *out = static_cast<uint32_t>(parsed);
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+std::string ToLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+bool ParseBoolValue(const std::string& name,
+                    const std::string& value,
+                    bool* out,
+                    std::string* error) {
+    if (!out) {
+        if (error) {
+            *error = "null output for " + name;
+        }
+        return false;
+    }
+    const std::string normalized = ToLowerCopy(value);
+    if (normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on") {
+        *out = true;
+    } else if (normalized == "0" || normalized == "false" || normalized == "no" || normalized == "off") {
+        *out = false;
+    } else {
+        if (error) {
+            *error = "invalid bool for " + name + ": " + value;
+        }
+        return false;
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+uint64_t Fnv1a64Append(uint64_t hash, const char* data, size_t size) {
+    constexpr uint64_t kFnvPrime = 1099511628211ULL;
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<unsigned char>(data[i]);
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
+std::string FormatHex64(uint64_t value) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << std::setw(16) << std::setfill('0') << std::nouppercase << value;
+    return oss.str();
+}
+
+std::string FormatDouble(double value, int precision = 2) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(precision) << value;
+    return oss.str();
+}
+
+const char* InodeTypeToString(zb::rpc::InodeType type) {
+    switch (type) {
+    case zb::rpc::INODE_FILE:
+        return "file";
+    case zb::rpc::INODE_DIR:
+        return "dir";
+    default:
+        return "unknown";
+    }
+}
+
+const char* ArchiveStateToString(zb::rpc::InodeArchiveState state) {
+    switch (state) {
+    case zb::rpc::INODE_ARCHIVE_PENDING:
+        return "pending";
+    case zb::rpc::INODE_ARCHIVE_ARCHIVING:
+        return "archiving";
+    case zb::rpc::INODE_ARCHIVE_ARCHIVED:
+        return "archived";
+    default:
+        return "unknown";
+    }
+}
+
+double ThroughputMiBS(uint64_t bytes, uint64_t elapsed_us) {
+    if (elapsed_us == 0) {
+        return 0.0;
+    }
+    const double seconds = static_cast<double>(elapsed_us) / 1000000.0;
+    return static_cast<double>(bytes) / (1024.0 * 1024.0) / seconds;
+}
+
+std::string FormatSignedDecimalDelta(const std::string& after, const std::string& before) {
+    const int cmp = zb::mds::CompareDecimalStrings(after, before);
+    if (cmp == 0) {
+        return "0";
+    }
+    if (cmp > 0) {
+        return zb::mds::SubtractDecimalStrings(after, before);
+    }
+    return "-" + zb::mds::SubtractDecimalStrings(before, after);
+}
+
+std::string FormatSignedUint64Delta(uint64_t after, uint64_t before) {
+    if (after >= before) {
+        return std::to_string(after - before);
+    }
+    return "-" + std::to_string(before - after);
+}
+
 class MdsClient {
 public:
     bool Init(const std::string& endpoint) {
@@ -299,6 +573,23 @@ public:
         return !cntl.Failed() && reply.status().code() == zb::rpc::MDS_OK;
     }
 
+    bool GetMasstreeNamespaceStats(const std::string& namespace_id,
+                                   zb::rpc::GetMasstreeNamespaceStatsReply* reply_out) {
+        zb::rpc::GetMasstreeNamespaceStatsRequest request;
+        request.set_namespace_id(namespace_id);
+        zb::rpc::GetMasstreeNamespaceStatsReply reply;
+        brpc::Controller cntl;
+        stub_.GetMasstreeNamespaceStats(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            reply.mutable_status()->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+            reply.mutable_status()->set_message(cntl.ErrorText());
+        }
+        if (reply_out) {
+            *reply_out = reply;
+        }
+        return !cntl.Failed();
+    }
+
     bool GetMasstreeImportJob(const std::string& job_id,
                               zb::rpc::GetMasstreeImportJobReply* reply_out) {
         zb::rpc::GetMasstreeImportJobRequest request;
@@ -382,6 +673,7 @@ public:
             std::cerr << "Failed to connect to scheduler " << FLAGS_scheduler << '\n';
             return false;
         }
+        InitializeMenuActions();
         return RefreshClusterView();
     }
 
@@ -391,23 +683,47 @@ public:
             return RunInteractive();
         }
         if (scenario == "health") {
-            return RunHealthCheck() ? 0 : 1;
+            return RunScenarioCommand("health", "环境健康检查", "环境健康检查通过", "环境健康检查失败",
+                                      [&]() { return RunHealthCheck(); });
+        }
+        if (scenario == "stats") {
+            return RunScenarioCommand("stats", "TC-P1 全局统计", "TC-P1 统计校验通过", "TC-P1 统计校验失败",
+                                      [&]() { return RunStatsScenario(); });
         }
         if (scenario == "posix") {
-            return RunPosixSuite() ? 0 : 1;
+            return RunScenarioCommand("posix", "POSIX 在线层测试", "POSIX 在线层测试通过", "POSIX 在线层测试失败",
+                                      [&]() { return RunPosixSuite(); });
         }
         if (scenario == "masstree") {
-            return RunMasstreeSuite() ? 0 : 1;
+            return RunScenarioCommand("masstree",
+                                      "Masstree 测试集",
+                                      "Masstree 测试集通过",
+                                      "Masstree 测试集失败",
+                                      [&]() { return RunMasstreeSuite(); });
         }
         if (scenario == "masstree_import") {
-            return RunMasstreeImportDemo() ? 0 : 1;
+            return RunScenarioCommand("masstree_import",
+                                      "TC-P4 Masstree 导入",
+                                      "Masstree 导入完成",
+                                      "Masstree 导入失败",
+                                      [&]() { return RunMasstreeImportDemo(); });
         }
         if (scenario == "masstree_query") {
-            return RunMasstreeQueryDemo() ? 0 : 1;
+            return RunScenarioCommand("masstree_query",
+                                      "TC-P5 Masstree 查询",
+                                      "Masstree 查询完成",
+                                      "Masstree 查询失败",
+                                      [&]() { return RunMasstreeQueryDemo(); });
         }
         if (scenario == "all") {
-            const bool ok = RunHealthCheck() && RunPosixSuite() && RunMasstreeSuite();
-            return ok ? 0 : 1;
+            return RunScenarioCommand("all",
+                                      "完整测试集",
+                                      "完整测试集通过",
+                                      "完整测试集失败",
+                                      [&]() {
+                                          return RunHealthCheck() && RunStatsScenario() && RunPosixSuite() &&
+                                                 RunMasstreeSuite();
+                                      });
         }
         std::cerr << "Unknown --scenario=" << scenario << '\n';
         return 1;
@@ -459,39 +775,678 @@ private:
         return real_ok && virtual_ok;
     }
 
+    bool RunStatsScenario() {
+        PrintSection("TC-P1 Cluster Stats");
+        if (!RefreshClusterView()) {
+            return false;
+        }
+
+        TierStats real_stats;
+        TierStats virtual_stats;
+        for (const auto& node : nodes_) {
+            TierStats* target = nullptr;
+            uint64_t fanout = 1;
+            if (node.node_type() == zb::rpc::NODE_REAL) {
+                target = &real_stats;
+            } else if (node.node_type() == zb::rpc::NODE_VIRTUAL_POOL) {
+                target = &virtual_stats;
+                fanout = std::max<uint64_t>(1, node.virtual_node_count());
+            } else {
+                continue;
+            }
+            target->physical_node_count += 1;
+            target->logical_node_count += fanout;
+            target->disk_count += static_cast<uint64_t>(node.disks_size()) * fanout;
+
+            uint64_t node_total = 0;
+            uint64_t node_free = 0;
+            for (const auto& disk : node.disks()) {
+                node_total += disk.capacity_bytes();
+                node_free += disk.free_bytes();
+            }
+            target->total_capacity_bytes += node_total * fanout;
+            target->free_capacity_bytes += node_free * fanout;
+        }
+        real_stats.used_capacity_bytes = real_stats.total_capacity_bytes > real_stats.free_capacity_bytes
+                                             ? (real_stats.total_capacity_bytes - real_stats.free_capacity_bytes)
+                                             : 0;
+        virtual_stats.used_capacity_bytes = virtual_stats.total_capacity_bytes > virtual_stats.free_capacity_bytes
+                                                ? (virtual_stats.total_capacity_bytes - virtual_stats.free_capacity_bytes)
+                                                : 0;
+
+        zb::rpc::GetMasstreeClusterStatsReply masstree_stats;
+        if (!mds_.GetMasstreeClusterStats(&masstree_stats)) {
+            std::cerr << "GetMasstreeClusterStats failed: " << masstree_stats.status().message() << '\n';
+            return false;
+        }
+
+        const uint64_t online_logical_node_count = real_stats.logical_node_count + virtual_stats.logical_node_count;
+        std::cout << "scheduler_generation=" << cluster_generation_ << '\n';
+        std::cout << "scheduler_physical_node_count=" << nodes_.size() << '\n';
+        std::cout << "real_physical_node_count=" << real_stats.physical_node_count << '\n';
+        std::cout << "real_logical_node_count=" << real_stats.logical_node_count << '\n';
+        std::cout << "real_disk_count=" << real_stats.disk_count << '\n';
+        PrintByteMetric("real_total_capacity_bytes", real_stats.total_capacity_bytes);
+        PrintByteMetric("real_used_capacity_bytes", real_stats.used_capacity_bytes);
+        PrintByteMetric("real_free_capacity_bytes", real_stats.free_capacity_bytes);
+
+        std::cout << "virtual_pool_count=" << virtual_stats.physical_node_count << '\n';
+        std::cout << "virtual_logical_node_count=" << virtual_stats.logical_node_count << '\n';
+        std::cout << "virtual_disk_count=" << virtual_stats.disk_count << '\n';
+        PrintByteMetric("virtual_total_capacity_bytes", virtual_stats.total_capacity_bytes);
+        PrintByteMetric("virtual_used_capacity_bytes", virtual_stats.used_capacity_bytes);
+        PrintByteMetric("virtual_free_capacity_bytes", virtual_stats.free_capacity_bytes);
+
+        std::cout << "online_logical_node_count=" << online_logical_node_count << '\n';
+        std::cout << "optical_node_count=" << masstree_stats.optical_node_count() << '\n';
+        std::cout << "optical_device_count=" << masstree_stats.optical_device_count() << '\n';
+        PrintDecimalMetric("cold_total_capacity_bytes", masstree_stats.total_capacity_bytes());
+        PrintDecimalMetric("cold_used_capacity_bytes", masstree_stats.used_capacity_bytes());
+        PrintDecimalMetric("cold_free_capacity_bytes", masstree_stats.free_capacity_bytes());
+        std::cout << "total_file_count=" << masstree_stats.total_file_count() << '\n';
+        PrintDecimalMetric("total_file_bytes", masstree_stats.total_file_bytes());
+        std::cout << "avg_file_size_bytes=" << masstree_stats.avg_file_size_bytes()
+                  << " (" << FormatBytes(masstree_stats.avg_file_size_bytes()) << ")\n";
+        PrintDecimalMetric("total_metadata_bytes", masstree_stats.total_metadata_bytes());
+        std::cout << "min_file_size_bytes=" << masstree_stats.min_file_size_bytes()
+                  << " (" << FormatBytes(masstree_stats.min_file_size_bytes()) << ")\n";
+        std::cout << "max_file_size_bytes=" << masstree_stats.max_file_size_bytes()
+                  << " (" << FormatBytes(masstree_stats.max_file_size_bytes()) << ")\n";
+
+        std::vector<CheckResult> checks;
+        AddCheck(&checks,
+                 "online.logical_node_count",
+                 online_logical_node_count == real_stats.logical_node_count + virtual_stats.logical_node_count,
+                 "real + virtual = online");
+        AddCheck(&checks,
+                 "real.capacity_balance",
+                 real_stats.used_capacity_bytes + real_stats.free_capacity_bytes == real_stats.total_capacity_bytes,
+                 "used + free = total");
+        AddCheck(&checks,
+                 "virtual.capacity_balance",
+                 virtual_stats.used_capacity_bytes + virtual_stats.free_capacity_bytes == virtual_stats.total_capacity_bytes,
+                 "used + free = total");
+        AddCheck(&checks,
+                 "cold.capacity_balance",
+                 zb::mds::CompareDecimalStrings(
+                     zb::mds::AddDecimalStrings(masstree_stats.used_capacity_bytes(),
+                                                masstree_stats.free_capacity_bytes()),
+                     masstree_stats.total_capacity_bytes()) == 0,
+                 "used + free = total");
+
+        const uint64_t computed_avg = masstree_stats.total_file_count() == 0
+                                          ? 0
+                                          : zb::mds::DivideDecimalStringByU64(masstree_stats.total_file_bytes(),
+                                                                              masstree_stats.total_file_count());
+        AddCheck(&checks,
+                 "cold.avg_file_size",
+                 computed_avg == masstree_stats.avg_file_size_bytes(),
+                 "avg matches total_file_bytes / total_file_count");
+        AddCheck(&checks,
+                 "cold.file_size_range",
+                 masstree_stats.min_file_size_bytes() <= masstree_stats.max_file_size_bytes() &&
+                     (masstree_stats.total_file_count() == 0 ||
+                      (masstree_stats.avg_file_size_bytes() >= masstree_stats.min_file_size_bytes() &&
+                       masstree_stats.avg_file_size_bytes() <= masstree_stats.max_file_size_bytes())),
+                 "avg stays within configured file size range");
+        if (FLAGS_tc_p1_expected_real_node_count > 0) {
+            AddCheck(&checks,
+                     "expected.real_node_count",
+                     real_stats.logical_node_count == FLAGS_tc_p1_expected_real_node_count,
+                     "actual=" + std::to_string(real_stats.logical_node_count) +
+                         " expected=" + std::to_string(FLAGS_tc_p1_expected_real_node_count));
+        }
+        if (FLAGS_tc_p1_expected_virtual_node_count > 0) {
+            AddCheck(&checks,
+                     "expected.virtual_node_count",
+                     virtual_stats.logical_node_count == FLAGS_tc_p1_expected_virtual_node_count,
+                     "actual=" + std::to_string(virtual_stats.logical_node_count) +
+                         " expected=" + std::to_string(FLAGS_tc_p1_expected_virtual_node_count));
+        }
+        if (FLAGS_tc_p1_expected_online_node_count > 0) {
+            AddCheck(&checks,
+                     "expected.online_node_count",
+                     online_logical_node_count == FLAGS_tc_p1_expected_online_node_count,
+                     "actual=" + std::to_string(online_logical_node_count) +
+                         " expected=" + std::to_string(FLAGS_tc_p1_expected_online_node_count));
+        }
+        if (FLAGS_tc_p1_expected_online_disks_per_node > 0) {
+            const uint64_t expected_real_disks = real_stats.logical_node_count * FLAGS_tc_p1_expected_online_disks_per_node;
+            const uint64_t expected_virtual_disks =
+                virtual_stats.logical_node_count * FLAGS_tc_p1_expected_online_disks_per_node;
+            AddCheck(&checks,
+                     "expected.real_disk_count",
+                     real_stats.disk_count == expected_real_disks,
+                     "actual=" + std::to_string(real_stats.disk_count) +
+                         " expected=" + std::to_string(expected_real_disks));
+            AddCheck(&checks,
+                     "expected.virtual_disk_count",
+                     virtual_stats.disk_count == expected_virtual_disks,
+                     "actual=" + std::to_string(virtual_stats.disk_count) +
+                         " expected=" + std::to_string(expected_virtual_disks));
+        }
+        if (FLAGS_tc_p1_expected_online_disk_capacity_bytes > 0 &&
+            FLAGS_tc_p1_expected_online_disks_per_node > 0) {
+            const uint64_t expected_real_capacity =
+                real_stats.logical_node_count * FLAGS_tc_p1_expected_online_disks_per_node *
+                FLAGS_tc_p1_expected_online_disk_capacity_bytes;
+            const uint64_t expected_virtual_capacity =
+                virtual_stats.logical_node_count * FLAGS_tc_p1_expected_online_disks_per_node *
+                FLAGS_tc_p1_expected_online_disk_capacity_bytes;
+            AddCheck(&checks,
+                     "expected.real_total_capacity",
+                     real_stats.total_capacity_bytes == expected_real_capacity,
+                     "actual=" + std::to_string(real_stats.total_capacity_bytes) +
+                         " expected=" + std::to_string(expected_real_capacity));
+            AddCheck(&checks,
+                     "expected.virtual_total_capacity",
+                     virtual_stats.total_capacity_bytes == expected_virtual_capacity,
+                     "actual=" + std::to_string(virtual_stats.total_capacity_bytes) +
+                         " expected=" + std::to_string(expected_virtual_capacity));
+        }
+        if (FLAGS_tc_p1_expected_optical_node_count > 0) {
+            AddCheck(&checks,
+                     "expected.optical_node_count",
+                     masstree_stats.optical_node_count() == FLAGS_tc_p1_expected_optical_node_count,
+                     "actual=" + std::to_string(masstree_stats.optical_node_count()) +
+                         " expected=" + std::to_string(FLAGS_tc_p1_expected_optical_node_count));
+        }
+        if (FLAGS_tc_p1_expected_optical_device_count > 0) {
+            AddCheck(&checks,
+                     "expected.optical_device_count",
+                     masstree_stats.optical_device_count() == FLAGS_tc_p1_expected_optical_device_count,
+                     "actual=" + std::to_string(masstree_stats.optical_device_count()) +
+                         " expected=" + std::to_string(FLAGS_tc_p1_expected_optical_device_count));
+        }
+        if (!FLAGS_tc_p1_expected_cold_total_capacity_bytes.empty()) {
+            AddCheck(&checks,
+                     "expected.cold_total_capacity",
+                     zb::mds::CompareDecimalStrings(masstree_stats.total_capacity_bytes(),
+                                                    FLAGS_tc_p1_expected_cold_total_capacity_bytes) == 0,
+                     "actual=" + FormatDecimalBytes(masstree_stats.total_capacity_bytes()) +
+                         " expected=" + FormatDecimalBytes(FLAGS_tc_p1_expected_cold_total_capacity_bytes));
+        }
+        if (!FLAGS_tc_p1_expected_cold_used_capacity_bytes.empty()) {
+            AddCheck(&checks,
+                     "expected.cold_used_capacity",
+                     zb::mds::CompareDecimalStrings(masstree_stats.used_capacity_bytes(),
+                                                    FLAGS_tc_p1_expected_cold_used_capacity_bytes) == 0,
+                     "actual=" + FormatDecimalBytes(masstree_stats.used_capacity_bytes()) +
+                         " expected=" + FormatDecimalBytes(FLAGS_tc_p1_expected_cold_used_capacity_bytes));
+        }
+        if (!FLAGS_tc_p1_expected_cold_free_capacity_bytes.empty()) {
+            AddCheck(&checks,
+                     "expected.cold_free_capacity",
+                     zb::mds::CompareDecimalStrings(masstree_stats.free_capacity_bytes(),
+                                                    FLAGS_tc_p1_expected_cold_free_capacity_bytes) == 0,
+                     "actual=" + FormatDecimalBytes(masstree_stats.free_capacity_bytes()) +
+                         " expected=" + FormatDecimalBytes(FLAGS_tc_p1_expected_cold_free_capacity_bytes));
+        }
+        if (FLAGS_tc_p1_expected_total_file_count > 0) {
+            AddCheck(&checks,
+                     "expected.total_file_count",
+                     masstree_stats.total_file_count() == FLAGS_tc_p1_expected_total_file_count,
+                     "actual=" + std::to_string(masstree_stats.total_file_count()) +
+                         " expected=" + std::to_string(FLAGS_tc_p1_expected_total_file_count));
+        }
+        if (!FLAGS_tc_p1_expected_total_file_bytes.empty()) {
+            AddCheck(&checks,
+                     "expected.total_file_bytes",
+                     zb::mds::CompareDecimalStrings(masstree_stats.total_file_bytes(),
+                                                    FLAGS_tc_p1_expected_total_file_bytes) == 0,
+                     "actual=" + FormatDecimalBytes(masstree_stats.total_file_bytes()) +
+                         " expected=" + FormatDecimalBytes(FLAGS_tc_p1_expected_total_file_bytes));
+        }
+        if (!FLAGS_tc_p1_expected_total_metadata_bytes.empty()) {
+            AddCheck(&checks,
+                     "expected.total_metadata_bytes",
+                     zb::mds::CompareDecimalStrings(masstree_stats.total_metadata_bytes(),
+                                                    FLAGS_tc_p1_expected_total_metadata_bytes) == 0,
+                     "actual=" + FormatDecimalBytes(masstree_stats.total_metadata_bytes()) +
+                         " expected=" + FormatDecimalBytes(FLAGS_tc_p1_expected_total_metadata_bytes));
+        }
+        if (FLAGS_tc_p1_expected_min_file_size_bytes > 0) {
+            AddCheck(&checks,
+                     "expected.min_file_size",
+                     masstree_stats.min_file_size_bytes() == FLAGS_tc_p1_expected_min_file_size_bytes,
+                     "actual=" + std::to_string(masstree_stats.min_file_size_bytes()) +
+                         " expected=" + std::to_string(FLAGS_tc_p1_expected_min_file_size_bytes));
+        }
+        if (FLAGS_tc_p1_expected_max_file_size_bytes > 0) {
+            AddCheck(&checks,
+                     "expected.max_file_size",
+                     masstree_stats.max_file_size_bytes() == FLAGS_tc_p1_expected_max_file_size_bytes,
+                     "actual=" + std::to_string(masstree_stats.max_file_size_bytes()) +
+                         " expected=" + std::to_string(FLAGS_tc_p1_expected_max_file_size_bytes));
+        }
+
+        bool ok = true;
+        for (const auto& check : checks) {
+            std::cout << "check." << check.name << "=" << (check.ok ? "PASS" : "FAIL")
+                      << " detail=\"" << check.detail << "\"\n";
+            ok = ok && check.ok;
+        }
+        return ok;
+    }
+
     bool RunMasstreeSuite() {
         return RunMasstreeImportDemo() && RunMasstreeQueryDemo();
     }
 
-    int RunInteractive() {
-        for (;;) {
-            PrintMenu();
-            const std::string choice = PromptLine("choice");
-            if (choice == "q" || choice == "quit") {
-                return 0;
+    void InitializeMenuActions() {
+        if (!actions_.empty()) {
+            return;
+        }
+        actions_.push_back({"1", "环境健康检查", "检查 MDS、Scheduler 与 tier 根目录", "1", {"health"}});
+        actions_.push_back({"2", "TC-P1 全局统计", "执行节点、容量、文件和元数据统计", "2 [key=value ...]", {"stats", "p1"}});
+        actions_.push_back({"3", "TC-P2 真实节点读写", "向真实节点路径写入并回读测试文件", "3 [dir=<real_dir>]", {"real", "p2"}});
+        actions_.push_back({"4", "TC-P3 虚拟节点读写", "向虚拟节点路径写入并回读测试文件", "4 [dir=<virtual_dir>]", {"virtual", "p3"}});
+        actions_.push_back({"5",
+                            "TC-P4 Masstree 导入",
+                            "执行 Masstree namespace 批量导入",
+                            "5 namespace=<id> generation=<id> file_count=<n> [key=value ...]",
+                            {"import", "p4"}});
+        actions_.push_back({"6",
+                            "TC-P5 Masstree 查询",
+                            "执行随机元数据查询并输出统计",
+                            "6 namespace=<id> [n=<count>] [path_prefix=<path>]",
+                            {"query", "p5"}});
+        actions_.push_back({"7", "执行完整测试集", "按顺序执行健康检查、P1、P2、P3、P4、P5", "7", {"all"}});
+        actions_.push_back({"8", "查看上次结果", "重新展示最近一次测试结果", "8", {"last"}});
+        actions_.push_back({"9", "帮助", "显示菜单和参数示例", "9", {"help", "h"}});
+        actions_.push_back({"0", "退出", "退出测试控制台", "0", {"quit", "exit", "q"}});
+    }
+
+    zb::demo::DemoRunResult BuildInfoResult(const std::string& title,
+                                            bool ok,
+                                            const std::string& summary,
+                                            const std::string& usage,
+                                            const std::string& raw_stdout = std::string(),
+                                            const std::string& raw_stderr = std::string()) const {
+        return zb::demo::BuildResultFromOutput(title,
+                                               std::string(),
+                                               usage,
+                                               ok,
+                                               summary,
+                                               summary,
+                                               raw_stdout,
+                                               raw_stderr);
+    }
+
+    zb::demo::DemoRunResult ExecuteCapturedAction(const zb::demo::MenuActionSpec& action,
+                                                  const std::string& command,
+                                                  const std::string& success_summary,
+                                                  const std::string& failure_summary,
+                                                  const std::function<bool()>& fn) {
+        zb::demo::ScopedStreamCapture capture;
+        const bool ok = fn();
+        return zb::demo::BuildResultFromOutput(action.title,
+                                               command,
+                                               action.usage,
+                                               ok,
+                                               success_summary,
+                                               failure_summary,
+                                               capture.Stdout(),
+                                               capture.Stderr());
+    }
+
+    void MaybeAppendLog(const zb::demo::DemoRunResult& result) const {
+        if (!FLAGS_enable_log_file || result.title.empty()) {
+            return;
+        }
+        std::string error;
+        if (!zb::demo::AppendRunLog(FLAGS_log_file, FLAGS_log_append, result, &error)) {
+            std::cerr << "log_write_error=" << error << '\n';
+        }
+    }
+
+    int RunScenarioCommand(const std::string& command,
+                           const std::string& title,
+                           const std::string& success_summary,
+                           const std::string& failure_summary,
+                           const std::function<bool()>& fn) {
+        bool ok = false;
+        std::string stdout_text;
+        std::string stderr_text;
+        {
+            zb::demo::ScopedStreamCapture capture;
+            ok = fn();
+            stdout_text = capture.Stdout();
+            stderr_text = capture.Stderr();
+        }
+        zb::demo::DemoRunResult result = zb::demo::BuildResultFromOutput(title,
+                                                                         command,
+                                                                         command,
+                                                                         ok,
+                                                                         success_summary,
+                                                                         failure_summary,
+                                                                         stdout_text,
+                                                                         stderr_text);
+        if (!result.raw_stdout.empty()) {
+            std::cout << result.raw_stdout;
+            if (result.raw_stdout.back() != '\n') {
+                std::cout << '\n';
             }
-            bool ok = false;
-            if (choice == "1") {
-                ok = RunHealthCheck();
-            } else if (choice == "2") {
-                ok = RunTierFileDemo(FLAGS_real_dir, "real", &last_real_logical_path_);
-            } else if (choice == "3") {
-                ok = RunTierFileDemo(FLAGS_virtual_dir, "virtual", &last_virtual_logical_path_);
-            } else if (choice == "4") {
-                ok = InspectKnownFile(last_real_logical_path_, "last real");
-            } else if (choice == "5") {
-                ok = InspectKnownFile(last_virtual_logical_path_, "last virtual");
-            } else if (choice == "6") {
-                ok = RunMasstreeImportDemo();
-            } else if (choice == "7") {
-                ok = RunMasstreeQueryDemo();
-            } else if (choice == "8") {
-                ok = RunHealthCheck() && RunPosixSuite() && RunMasstreeSuite();
+        }
+        if (!result.raw_stderr.empty()) {
+            std::cerr << result.raw_stderr;
+            if (result.raw_stderr.back() != '\n') {
+                std::cerr << '\n';
+            }
+        }
+        MaybeAppendLog(result);
+        return result.ok ? 0 : 1;
+    }
+
+    std::string BuildHelpText() const {
+        std::ostringstream out;
+        out << "功能列表:\n";
+        for (const auto& action : actions_) {
+            out << "  " << action.id << "  " << action.title;
+            if (!action.description.empty()) {
+                out << " - " << action.description;
+            }
+            out << "\n     用法: " << action.usage << '\n';
+        }
+        out << "\n示例:\n";
+        out << "  2 tc_p1_expected_real_node_count=1 tc_p1_expected_virtual_node_count=99\n";
+        out << "  5 namespace=demo-ns generation=gen-report-001 file_count=100000000\n";
+        out << "  6 namespace=demo-ns n=1000\n";
+        out << "  6 namespace=demo-ns n=1000 log_file=logs/p5_run.log\n";
+        return out.str();
+    }
+
+    bool ApplyCommandArgs(const zb::demo::ParsedCommand& command, std::string* error) {
+        for (const auto& item : command.args) {
+            const std::string& key = item.first;
+            const std::string& value = item.second;
+            uint64_t parsed_u64 = 0;
+            uint32_t parsed_u32 = 0;
+
+            if (key == "mds") {
+                FLAGS_mds = value;
+            } else if (key == "scheduler") {
+                FLAGS_scheduler = value;
+            } else if (key == "log_file") {
+                FLAGS_log_file = value;
+            } else if (key == "enable_log_file") {
+                bool parsed_bool = false;
+                if (!ParseBoolValue(key, value, &parsed_bool, error)) {
+                    return false;
+                }
+                FLAGS_enable_log_file = parsed_bool;
+            } else if (key == "log_append") {
+                bool parsed_bool = false;
+                if (!ParseBoolValue(key, value, &parsed_bool, error)) {
+                    return false;
+                }
+                FLAGS_log_append = parsed_bool;
+            } else if (key == "mount" || key == "mount_point") {
+                FLAGS_mount_point = value;
+            } else if (key == "dir") {
+                continue;
+            } else if (key == "real_dir" || key == "real_root") {
+                FLAGS_real_dir = value;
+            } else if (key == "virtual_dir" || key == "virtual_root") {
+                FLAGS_virtual_dir = value;
+            } else if (key == "namespace" || key == "masstree_namespace_id") {
+                FLAGS_masstree_namespace_id = value;
+            } else if (key == "generation" || key == "masstree_generation_id") {
+                FLAGS_masstree_generation_id = value;
+            } else if (key == "path_prefix" || key == "masstree_path_prefix") {
+                FLAGS_masstree_path_prefix = value;
+            } else if (key == "file_count" || key == "masstree_file_count") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_masstree_file_count = parsed_u64;
+            } else if (key == "max_files_per_leaf_dir" || key == "masstree_max_files_per_leaf_dir") {
+                if (!ParseUint32Value(key, value, &parsed_u32, error)) {
+                    return false;
+                }
+                FLAGS_masstree_max_files_per_leaf_dir = parsed_u32;
+            } else if (key == "max_subdirs_per_dir" || key == "masstree_max_subdirs_per_dir") {
+                if (!ParseUint32Value(key, value, &parsed_u32, error)) {
+                    return false;
+                }
+                FLAGS_masstree_max_subdirs_per_dir = parsed_u32;
+            } else if (key == "verify_inode_samples" || key == "masstree_verify_inode_samples") {
+                if (!ParseUint32Value(key, value, &parsed_u32, error)) {
+                    return false;
+                }
+                FLAGS_masstree_verify_inode_samples = parsed_u32;
+            } else if (key == "verify_dentry_samples" || key == "masstree_verify_dentry_samples") {
+                if (!ParseUint32Value(key, value, &parsed_u32, error)) {
+                    return false;
+                }
+                FLAGS_masstree_verify_dentry_samples = parsed_u32;
+            } else if (key == "job_poll_interval_ms" || key == "masstree_job_poll_interval_ms") {
+                if (!ParseUint32Value(key, value, &parsed_u32, error)) {
+                    return false;
+                }
+                FLAGS_masstree_job_poll_interval_ms = parsed_u32;
+            } else if (key == "n" || key == "samples" || key == "masstree_query_samples") {
+                if (!ParseUint32Value(key, value, &parsed_u32, error)) {
+                    return false;
+                }
+                FLAGS_masstree_query_samples = parsed_u32;
+            } else if (key == "file_size_mb" || key == "posix_file_size_mb") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_posix_file_size_mb = parsed_u64;
+            } else if (key == "chunk_size_kb" || key == "posix_chunk_size_kb") {
+                if (!ParseUint32Value(key, value, &parsed_u32, error)) {
+                    return false;
+                }
+                FLAGS_posix_chunk_size_kb = parsed_u32;
+            } else if (key == "repeat" || key == "posix_repeat") {
+                if (!ParseUint32Value(key, value, &parsed_u32, error)) {
+                    return false;
+                }
+                FLAGS_posix_repeat = parsed_u32;
+            } else if (key == "keep_file" || key == "posix_keep_file") {
+                bool parsed_bool = false;
+                if (!ParseBoolValue(key, value, &parsed_bool, error)) {
+                    return false;
+                }
+                FLAGS_posix_keep_file = parsed_bool;
+            } else if (key == "verify_hash" || key == "posix_verify_hash") {
+                bool parsed_bool = false;
+                if (!ParseBoolValue(key, value, &parsed_bool, error)) {
+                    return false;
+                }
+                FLAGS_posix_verify_hash = parsed_bool;
+            } else if (key == "sync_on_close" || key == "posix_sync_on_close") {
+                bool parsed_bool = false;
+                if (!ParseBoolValue(key, value, &parsed_bool, error)) {
+                    return false;
+                }
+                FLAGS_posix_sync_on_close = parsed_bool;
+            } else if (key == "tc_p1_expected_real_node_count") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_real_node_count = parsed_u64;
+            } else if (key == "tc_p1_expected_virtual_node_count") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_virtual_node_count = parsed_u64;
+            } else if (key == "tc_p1_expected_online_node_count") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_online_node_count = parsed_u64;
+            } else if (key == "tc_p1_expected_online_disks_per_node") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_online_disks_per_node = parsed_u64;
+            } else if (key == "tc_p1_expected_online_disk_capacity_bytes") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_online_disk_capacity_bytes = parsed_u64;
+            } else if (key == "tc_p1_expected_optical_node_count") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_optical_node_count = parsed_u64;
+            } else if (key == "tc_p1_expected_optical_device_count") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_optical_device_count = parsed_u64;
+            } else if (key == "tc_p1_expected_cold_total_capacity_bytes") {
+                FLAGS_tc_p1_expected_cold_total_capacity_bytes = value;
+            } else if (key == "tc_p1_expected_cold_used_capacity_bytes") {
+                FLAGS_tc_p1_expected_cold_used_capacity_bytes = value;
+            } else if (key == "tc_p1_expected_cold_free_capacity_bytes") {
+                FLAGS_tc_p1_expected_cold_free_capacity_bytes = value;
+            } else if (key == "tc_p1_expected_total_file_count") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_total_file_count = parsed_u64;
+            } else if (key == "tc_p1_expected_total_file_bytes") {
+                FLAGS_tc_p1_expected_total_file_bytes = value;
+            } else if (key == "tc_p1_expected_total_metadata_bytes") {
+                FLAGS_tc_p1_expected_total_metadata_bytes = value;
+            } else if (key == "tc_p1_expected_min_file_size_bytes") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_min_file_size_bytes = parsed_u64;
+            } else if (key == "tc_p1_expected_max_file_size_bytes") {
+                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
+                    return false;
+                }
+                FLAGS_tc_p1_expected_max_file_size_bytes = parsed_u64;
             } else {
-                std::cout << "unknown choice\n";
+                if (error) {
+                    *error = "unknown parameter: " + key;
+                }
+                return false;
+            }
+        }
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    zb::demo::DemoRunResult ExecuteInteractiveCommand(const zb::demo::ParsedCommand& command, bool* should_exit) {
+        if (should_exit) {
+            *should_exit = false;
+        }
+        const zb::demo::MenuActionSpec* action = zb::demo::FindAction(actions_, command.action);
+        if (!action) {
+            return BuildInfoResult("未知命令", false, "不支持的序号或命令: " + command.action, "9");
+        }
+        if (action->id == "0") {
+            if (should_exit) {
+                *should_exit = true;
+            }
+            return {};
+        }
+        if (action->id == "9") {
+            return BuildInfoResult("帮助", true, "可用功能与输入格式如下", action->usage, BuildHelpText());
+        }
+        if (action->id == "8") {
+            if (!last_result_.has_value()) {
+                return BuildInfoResult("上次结果", false, "当前没有可展示的历史结果", action->usage);
+            }
+            zb::demo::DemoRunResult replay = *last_result_;
+            replay.title = "上次结果 - " + replay.title;
+            replay.summary = "重新展示最近一次执行结果";
+            return replay;
+        }
+
+        std::string apply_error;
+        if (!ApplyCommandArgs(command, &apply_error)) {
+            return BuildInfoResult(action->title, false, apply_error, action->usage);
+        }
+
+        if (action->id == "1") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "环境健康检查通过",
+                                         "环境健康检查失败",
+                                         [&]() { return RunHealthCheck(); });
+        }
+        if (action->id == "2") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "TC-P1 统计校验通过",
+                                         "TC-P1 统计校验失败",
+                                         [&]() { return RunStatsScenario(); });
+        }
+        if (action->id == "3") {
+            const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_real_dir;
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "真实节点读写测试通过",
+                                         "真实节点读写测试失败",
+                                         [&]() { return RunTierFileDemo(dir, "real", &last_real_logical_path_); });
+        }
+        if (action->id == "4") {
+            const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_virtual_dir;
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "虚拟节点读写测试通过",
+                                         "虚拟节点读写测试失败",
+                                         [&]() { return RunTierFileDemo(dir, "virtual", &last_virtual_logical_path_); });
+        }
+        if (action->id == "5") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "Masstree 导入完成",
+                                         "Masstree 导入失败",
+                                         [&]() { return RunMasstreeImportDemo(); });
+        }
+        if (action->id == "6") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "Masstree 查询完成",
+                                         "Masstree 查询失败",
+                                         [&]() { return RunMasstreeQueryDemo(); });
+        }
+        if (action->id == "7") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "完整测试集执行通过",
+                                         "完整测试集中存在失败项",
+                                         [&]() {
+                                             return RunHealthCheck() && RunStatsScenario() && RunPosixSuite() &&
+                                                    RunMasstreeSuite();
+                                         });
+        }
+        return BuildInfoResult(action->title, false, "未实现的动作分发", action->usage);
+    }
+
+    int RunInteractive() {
+        std::cout << "进入交互模式后，可输入序号和参数执行测试项。\n";
+        for (;;) {
+            zb::demo::RenderMenu("ZB Storage Demo Console", actions_);
+            const std::string input = PromptLine("input");
+            const zb::demo::ParsedCommand command = zb::demo::ParseCommandLine(input);
+            if (!command.ok) {
+                zb::demo::RenderResult(BuildInfoResult("输入错误", false, command.error, "9"));
                 continue;
             }
-            std::cout << (ok ? "result=OK\n" : "result=FAILED\n");
+            bool should_exit = false;
+            zb::demo::DemoRunResult result = ExecuteInteractiveCommand(command, &should_exit);
+            if (should_exit) {
+                return 0;
+            }
+            if (!result.title.empty()) {
+                zb::demo::RenderResult(result);
+                MaybeAppendLog(result);
+                if (command.action != "8" && command.action != "9") {
+                    last_result_ = result;
+                }
+            }
         }
     }
 
@@ -512,40 +1467,188 @@ private:
     bool RunTierFileDemo(const std::string& dir_name,
                          const std::string& expected_tier,
                          std::string* saved_logical_path) {
-        const std::string token = TimestampToken();
-        const std::string logical_dir = BuildTierLogicalPath(dir_name) + "/demo";
-        const std::string logical_path = logical_dir + "/demo_" + token + ".txt";
+        TierIoOptions options;
+        options.dir_name = dir_name;
+        options.expected_tier = expected_tier;
+        options.file_size_bytes = FLAGS_posix_file_size_mb * 1024ULL * 1024ULL;
+        options.chunk_size_bytes = std::max<uint32_t>(1U, FLAGS_posix_chunk_size_kb) * 1024U;
+        options.repeat = std::max<uint32_t>(1U, FLAGS_posix_repeat);
+        options.keep_file = FLAGS_posix_keep_file;
+        options.verify_hash = FLAGS_posix_verify_hash;
+        options.sync_on_close = FLAGS_posix_sync_on_close;
+        return RunTierIoScenario(options, saved_logical_path);
+    }
+
+    bool RunTierIoScenario(const TierIoOptions& options, std::string* saved_logical_path) {
+        PrintSection("POSIX " + options.expected_tier + " Demo");
+        std::cout << "target_dir=" << BuildTierLogicalPath(options.dir_name) + "/demo" << '\n';
+        std::cout << "repeat=" << options.repeat << '\n';
+        std::cout << "expected_file_size_bytes=" << options.file_size_bytes
+                  << " (" << FormatBytes(options.file_size_bytes) << ")\n";
+        std::cout << "chunk_size_bytes=" << options.chunk_size_bytes
+                  << " (" << FormatBytes(options.chunk_size_bytes) << ")\n";
+        std::cout << "verify_hash=" << (options.verify_hash ? "true" : "false") << '\n';
+        std::cout << "keep_file=" << (options.keep_file ? "true" : "false") << '\n';
+        std::cout << "sync_on_close=" << (options.sync_on_close ? "true" : "false") << '\n';
+
+        uint64_t total_written = 0;
+        uint64_t total_read = 0;
+        uint64_t total_write_us = 0;
+        uint64_t total_read_us = 0;
+        TierIoIterationResult last_result;
+
+        for (uint32_t attempt = 0; attempt < options.repeat; ++attempt) {
+            TierIoIterationResult iteration;
+            if (!RunSingleTierIoIteration(options, attempt, &iteration)) {
+                return false;
+            }
+            last_result = iteration;
+            total_written += iteration.bytes_written;
+            total_read += iteration.bytes_read;
+            total_write_us += iteration.write_elapsed_us;
+            total_read_us += iteration.read_elapsed_us;
+        }
+
+        const double write_throughput_mib_s = ThroughputMiBS(total_written, total_write_us);
+        const double read_throughput_mib_s = ThroughputMiBS(total_read, total_read_us);
+
+        std::cout << "logical_path=" << last_result.logical_path << '\n';
+        std::cout << "mounted_path=" << last_result.mounted_path << '\n';
+        std::cout << "bytes_written=" << last_result.bytes_written << '\n';
+        std::cout << "bytes_read=" << last_result.bytes_read << '\n';
+        std::cout << "write_hash=" << FormatHex64(last_result.write_hash) << '\n';
+        std::cout << "read_hash=" << FormatHex64(last_result.read_hash) << '\n';
+        std::cout << "write_elapsed_ms=" << FormatDouble(static_cast<double>(last_result.write_elapsed_us) / 1000.0)
+                  << '\n';
+        std::cout << "read_elapsed_ms=" << FormatDouble(static_cast<double>(last_result.read_elapsed_us) / 1000.0)
+                  << '\n';
+        std::cout << "write_throughput_mib_s="
+                  << FormatDouble(ThroughputMiBS(last_result.bytes_written, last_result.write_elapsed_us)) << '\n';
+        std::cout << "read_throughput_mib_s="
+                  << FormatDouble(ThroughputMiBS(last_result.bytes_read, last_result.read_elapsed_us)) << '\n';
+        std::cout << "total_bytes_written=" << total_written << '\n';
+        std::cout << "total_bytes_read=" << total_read << '\n';
+        std::cout << "avg_write_elapsed_ms="
+                  << FormatDouble(static_cast<double>(total_write_us) / 1000.0 / options.repeat) << '\n';
+        std::cout << "avg_read_elapsed_ms="
+                  << FormatDouble(static_cast<double>(total_read_us) / 1000.0 / options.repeat) << '\n';
+        std::cout << "avg_write_throughput_mib_s=" << FormatDouble(write_throughput_mib_s) << '\n';
+        std::cout << "avg_read_throughput_mib_s=" << FormatDouble(read_throughput_mib_s) << '\n';
+        std::cout << "inode_id=" << last_result.inspection.inode_id << '\n';
+        std::cout << "attr_size_bytes=" << last_result.inspection.size_bytes << '\n';
+        std::cout << "node_id=" << last_result.inspection.node_id << '\n';
+        std::cout << "disk_id=" << last_result.inspection.disk_id << '\n';
+        std::cout << "resolved_node_type=" << last_result.inspection.actual_tier << '\n';
+
+        std::vector<CheckResult> checks;
+        AddCheck(&checks,
+                 "file_size_written",
+                 last_result.bytes_written == options.file_size_bytes,
+                 "actual=" + std::to_string(last_result.bytes_written) +
+                     " expected=" + std::to_string(options.file_size_bytes));
+        AddCheck(&checks,
+                 "file_size_read",
+                 last_result.bytes_read == options.file_size_bytes,
+                 "actual=" + std::to_string(last_result.bytes_read) +
+                     " expected=" + std::to_string(options.file_size_bytes));
+        AddCheck(&checks,
+                 "file_hash_match",
+                 !options.verify_hash || last_result.read_hash == last_result.write_hash,
+                 options.verify_hash ? ("write=" + FormatHex64(last_result.write_hash) +
+                                        " read=" + FormatHex64(last_result.read_hash))
+                                     : "hash verification disabled");
+        AddCheck(&checks,
+                 "attr_size_match",
+                 last_result.inspection.size_bytes == options.file_size_bytes,
+                 "actual=" + std::to_string(last_result.inspection.size_bytes) +
+                     " expected=" + std::to_string(options.file_size_bytes));
+        AddCheck(&checks,
+                 "location_tier",
+                 last_result.inspection.actual_tier == options.expected_tier,
+                 "actual=" + last_result.inspection.actual_tier + " expected=" + options.expected_tier);
+
+        bool ok = true;
+        for (const auto& check : checks) {
+            std::cout << "check." << check.name << "=" << (check.ok ? "PASS" : "FAIL")
+                      << " detail=\"" << check.detail << "\"\n";
+            ok = ok && check.ok;
+        }
+        if (saved_logical_path) {
+            *saved_logical_path = options.keep_file ? last_result.logical_path : std::string();
+        }
+        return ok;
+    }
+
+    bool RunSingleTierIoIteration(const TierIoOptions& options,
+                                  uint32_t attempt,
+                                  TierIoIterationResult* result) {
+        if (!result) {
+            std::cerr << "missing tier io result output\n";
+            return false;
+        }
+        const std::string token = TimestampToken() + (options.repeat > 1 ? ("_" + std::to_string(attempt + 1)) : "");
+        const std::string logical_dir = BuildTierLogicalPath(options.dir_name) + "/demo";
+        const std::string logical_path = logical_dir + "/" + options.expected_tier + "_" +
+                                         std::to_string(options.file_size_bytes / (1024ULL * 1024ULL)) +
+                                         "MB_" + token + ".bin";
         const std::string mounted_dir = JoinMountedPath(FLAGS_mount_point, logical_dir);
         const std::string mounted_path = JoinMountedPath(FLAGS_mount_point, logical_path);
-        const std::string content = "demo tier=" + expected_tier + " token=" + token + "\n";
 
-        PrintSection("POSIX " + expected_tier + " Demo");
         std::error_code ec;
         fs::create_directories(mounted_dir, ec);
         if (ec) {
             std::cerr << "create_directories failed for " << mounted_dir << ": " << ec.message() << '\n';
             return false;
         }
-        if (!WriteTextFile(mounted_path, content)) {
+
+        uint64_t write_hash = 14695981039346656037ULL;
+        uint64_t bytes_written = 0;
+        uint64_t write_elapsed_us = 0;
+        if (!WritePatternFile(mounted_path,
+                              options.expected_tier,
+                              options.chunk_size_bytes,
+                              options.file_size_bytes,
+                              options.sync_on_close,
+                              &bytes_written,
+                              &write_hash,
+                              &write_elapsed_us)) {
             return false;
         }
-        std::string read_back;
-        if (!ReadTextFile(mounted_path, &read_back)) {
+
+        uint64_t read_hash = 14695981039346656037ULL;
+        uint64_t bytes_read = 0;
+        uint64_t read_elapsed_us = 0;
+        if (!ReadPatternFile(mounted_path,
+                             options.chunk_size_bytes,
+                             options.verify_hash,
+                             &bytes_read,
+                             &read_hash,
+                             &read_elapsed_us)) {
             return false;
         }
-        std::cout << "logical_path=" << logical_path << '\n';
-        std::cout << "mounted_path=" << mounted_path << '\n';
-        std::cout << "bytes_written=" << content.size() << '\n';
-        std::cout << "bytes_read=" << read_back.size() << '\n';
-        if (read_back != content) {
-            std::cerr << "POSIX content mismatch\n";
+
+        FileInspectionResult inspection;
+        if (!InspectFile(logical_path, options.expected_tier, &inspection)) {
             return false;
         }
-        if (!InspectFile(logical_path, expected_tier)) {
-            return false;
-        }
-        if (saved_logical_path) {
-            *saved_logical_path = logical_path;
+
+        result->logical_path = logical_path;
+        result->mounted_path = mounted_path;
+        result->expected_size_bytes = options.file_size_bytes;
+        result->bytes_written = bytes_written;
+        result->bytes_read = bytes_read;
+        result->write_elapsed_us = write_elapsed_us;
+        result->read_elapsed_us = read_elapsed_us;
+        result->write_hash = write_hash;
+        result->read_hash = read_hash;
+        result->inspection = inspection;
+
+        if (!options.keep_file) {
+            fs::remove(fs::path(mounted_path), ec);
+            if (ec) {
+                std::cerr << "remove failed for " << mounted_path << ": " << ec.message() << '\n';
+                return false;
+            }
         }
         return true;
     }
@@ -556,10 +1659,12 @@ private:
             return false;
         }
         PrintSection("Inspect " + label + " File");
-        return InspectFile(logical_path, "");
+        return InspectFile(logical_path, "", nullptr);
     }
 
-    bool InspectFile(const std::string& logical_path, const std::string& expected_tier) {
+    bool InspectFile(const std::string& logical_path,
+                     const std::string& expected_tier,
+                     FileInspectionResult* out) {
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup(logical_path, &attr, &status)) {
@@ -587,6 +1692,13 @@ private:
         std::cout << "node_id=" << node_id << '\n';
         std::cout << "disk_id=" << disk_id << '\n';
         std::cout << "resolved_node_type=" << actual_tier << '\n';
+        if (out) {
+            out->inode_id = attr.inode_id();
+            out->size_bytes = attr.size();
+            out->node_id = node_id;
+            out->disk_id = disk_id;
+            out->actual_tier = actual_tier;
+        }
         if (!expected_tier.empty() && actual_tier != expected_tier) {
             std::cerr << "expected tier " << expected_tier << " but got " << actual_tier << '\n';
             return false;
@@ -605,6 +1717,27 @@ private:
         const std::string path_prefix = FLAGS_masstree_path_prefix.empty()
                                             ? "/masstree_demo/" + namespace_id
                                             : NormalizeLogicalPath(FLAGS_masstree_path_prefix);
+
+        zb::rpc::GetMasstreeClusterStatsReply cluster_before;
+        if (!mds_.GetMasstreeClusterStats(&cluster_before)) {
+            std::cerr << "GetMasstreeClusterStats(before) failed: " << cluster_before.status().message() << '\n';
+            return false;
+        }
+
+        bool had_previous_namespace = false;
+        zb::rpc::GetMasstreeNamespaceStatsReply previous_namespace_stats;
+        if (!mds_.GetMasstreeNamespaceStats(namespace_id, &previous_namespace_stats)) {
+            std::cerr << "GetMasstreeNamespaceStats(before) failed: "
+                      << previous_namespace_stats.status().message() << '\n';
+            return false;
+        }
+        if (previous_namespace_stats.status().code() == zb::rpc::MDS_OK) {
+            had_previous_namespace = true;
+        } else if (previous_namespace_stats.status().code() != zb::rpc::MDS_NOT_FOUND) {
+            std::cerr << "GetMasstreeNamespaceStats(before) failed: "
+                      << previous_namespace_stats.status().message() << '\n';
+            return false;
+        }
 
         zb::rpc::ImportMasstreeNamespaceRequest request;
         request.set_namespace_id(namespace_id);
@@ -659,13 +1792,152 @@ private:
                 last_printed_elapsed_bucket = elapsed_bucket;
             }
             if (job.state() == zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED) {
+                zb::rpc::GetMasstreeClusterStatsReply cluster_after;
+                if (!mds_.GetMasstreeClusterStats(&cluster_after)) {
+                    std::cerr << "GetMasstreeClusterStats(after) failed: " << cluster_after.status().message() << '\n';
+                    return false;
+                }
+
+                const uint64_t previous_namespace_file_count =
+                    had_previous_namespace ? previous_namespace_stats.file_count() : 0;
+                const std::string previous_namespace_total_file_bytes =
+                    had_previous_namespace ? previous_namespace_stats.total_file_bytes() : std::string("0");
+                const std::string previous_namespace_total_metadata_bytes =
+                    had_previous_namespace ? previous_namespace_stats.total_metadata_bytes() : std::string("0");
+                const std::string replaced_total_file_bytes_base =
+                    zb::mds::CompareDecimalStrings(cluster_before.total_file_bytes(),
+                                                   previous_namespace_total_file_bytes) >= 0
+                        ? zb::mds::SubtractDecimalStrings(cluster_before.total_file_bytes(),
+                                                          previous_namespace_total_file_bytes)
+                        : std::string("0");
+                const std::string replaced_total_metadata_bytes_base =
+                    zb::mds::CompareDecimalStrings(cluster_before.total_metadata_bytes(),
+                                                   previous_namespace_total_metadata_bytes) >= 0
+                        ? zb::mds::SubtractDecimalStrings(cluster_before.total_metadata_bytes(),
+                                                          previous_namespace_total_metadata_bytes)
+                        : std::string("0");
+                const std::string replaced_used_capacity_base =
+                    zb::mds::CompareDecimalStrings(cluster_before.used_capacity_bytes(),
+                                                   previous_namespace_total_file_bytes) >= 0
+                        ? zb::mds::SubtractDecimalStrings(cluster_before.used_capacity_bytes(),
+                                                          previous_namespace_total_file_bytes)
+                        : std::string("0");
+                const uint64_t expected_total_file_count =
+                    cluster_before.total_file_count() >= previous_namespace_file_count
+                        ? (cluster_before.total_file_count() - previous_namespace_file_count + job.file_count())
+                        : job.file_count();
+                const std::string expected_total_file_bytes =
+                    zb::mds::AddDecimalStrings(replaced_total_file_bytes_base, job.total_file_bytes());
+                const std::string expected_total_metadata_bytes =
+                    zb::mds::AddDecimalStrings(replaced_total_metadata_bytes_base,
+                                               std::to_string(job.inode_pages_bytes()));
+                const std::string expected_used_capacity_bytes =
+                    zb::mds::AddDecimalStrings(replaced_used_capacity_base, job.total_file_bytes());
+                const std::string expected_free_capacity_bytes =
+                    zb::mds::SubtractDecimalStrings(cluster_after.total_capacity_bytes(),
+                                                    expected_used_capacity_bytes);
+
                 std::cout << "manifest_path=" << job.manifest_path() << '\n';
                 std::cout << "root_inode_id=" << job.root_inode_id() << '\n';
                 std::cout << "inode_count=" << job.inode_count() << '\n';
                 std::cout << "dentry_count=" << job.dentry_count() << '\n';
+                std::cout << "level1_dir_count=" << job.level1_dir_count() << '\n';
+                std::cout << "leaf_dir_count=" << job.leaf_dir_count() << '\n';
+                std::cout << "file_count=" << job.file_count() << '\n';
+                PrintDecimalMetric("import_total_file_bytes", job.total_file_bytes());
+                std::cout << "import_avg_file_size_bytes=" << job.avg_file_size_bytes() << '\n';
                 std::cout << "inode_range=[" << job.inode_min() << ", " << job.inode_max() << "]\n";
                 std::cout << "inode_pages_bytes=" << job.inode_pages_bytes() << '\n';
-                return true;
+                std::cout << "previous_namespace_present=" << (had_previous_namespace ? "true" : "false") << '\n';
+                if (had_previous_namespace) {
+                    std::cout << "previous_namespace_generation_id=" << previous_namespace_stats.generation_id() << '\n';
+                    std::cout << "previous_namespace_file_count=" << previous_namespace_stats.file_count() << '\n';
+                    PrintDecimalMetric("previous_namespace_total_file_bytes",
+                                       previous_namespace_stats.total_file_bytes());
+                    PrintDecimalMetric("previous_namespace_total_metadata_bytes",
+                                       previous_namespace_stats.total_metadata_bytes());
+                }
+                std::cout << "before_total_file_count=" << cluster_before.total_file_count() << '\n';
+                PrintDecimalMetric("before_total_file_bytes", cluster_before.total_file_bytes());
+                PrintDecimalMetric("before_total_metadata_bytes", cluster_before.total_metadata_bytes());
+                PrintDecimalMetric("before_used_capacity_bytes", cluster_before.used_capacity_bytes());
+                PrintDecimalMetric("before_free_capacity_bytes", cluster_before.free_capacity_bytes());
+                std::cout << "after_total_file_count=" << cluster_after.total_file_count() << '\n';
+                PrintDecimalMetric("after_total_file_bytes", cluster_after.total_file_bytes());
+                PrintDecimalMetric("after_total_metadata_bytes", cluster_after.total_metadata_bytes());
+                PrintDecimalMetric("after_used_capacity_bytes", cluster_after.used_capacity_bytes());
+                PrintDecimalMetric("after_free_capacity_bytes", cluster_after.free_capacity_bytes());
+                std::cout << "delta_total_file_count="
+                          << FormatSignedUint64Delta(cluster_after.total_file_count(),
+                                                    cluster_before.total_file_count()) << '\n';
+                std::cout << "delta_total_file_bytes="
+                          << FormatSignedDecimalDelta(cluster_after.total_file_bytes(),
+                                                      cluster_before.total_file_bytes()) << '\n';
+                std::cout << "delta_total_metadata_bytes="
+                          << FormatSignedDecimalDelta(cluster_after.total_metadata_bytes(),
+                                                      cluster_before.total_metadata_bytes()) << '\n';
+                std::cout << "delta_used_capacity_bytes="
+                          << FormatSignedDecimalDelta(cluster_after.used_capacity_bytes(),
+                                                      cluster_before.used_capacity_bytes()) << '\n';
+                std::cout << "delta_free_capacity_bytes="
+                          << FormatSignedDecimalDelta(cluster_after.free_capacity_bytes(),
+                                                      cluster_before.free_capacity_bytes()) << '\n';
+
+                std::vector<CheckResult> checks;
+                AddCheck(&checks,
+                         "import.job_file_count",
+                         job.file_count() == request.file_count(),
+                         "actual=" + std::to_string(job.file_count()) +
+                             " expected=" + std::to_string(request.file_count()));
+                AddCheck(&checks,
+                         "import.namespace_id",
+                         job.namespace_id() == namespace_id,
+                         "actual=" + job.namespace_id() + " expected=" + namespace_id);
+                AddCheck(&checks,
+                         "import.generation_id",
+                         job.generation_id() == generation_id,
+                         "actual=" + job.generation_id() + " expected=" + generation_id);
+                AddCheck(&checks,
+                         "import.path_prefix",
+                         job.path_prefix() == path_prefix,
+                         "actual=" + job.path_prefix() + " expected=" + path_prefix);
+                AddCheck(&checks,
+                         "stats.total_file_count_after",
+                         cluster_after.total_file_count() == expected_total_file_count,
+                         "actual=" + std::to_string(cluster_after.total_file_count()) +
+                             " expected=" + std::to_string(expected_total_file_count));
+                AddCheck(&checks,
+                         "stats.total_file_bytes_after",
+                         zb::mds::CompareDecimalStrings(cluster_after.total_file_bytes(),
+                                                        expected_total_file_bytes) == 0,
+                         "actual=" + FormatDecimalBytes(cluster_after.total_file_bytes()) +
+                             " expected=" + FormatDecimalBytes(expected_total_file_bytes));
+                AddCheck(&checks,
+                         "stats.total_metadata_bytes_after",
+                         zb::mds::CompareDecimalStrings(cluster_after.total_metadata_bytes(),
+                                                        expected_total_metadata_bytes) == 0,
+                         "actual=" + FormatDecimalBytes(cluster_after.total_metadata_bytes()) +
+                             " expected=" + FormatDecimalBytes(expected_total_metadata_bytes));
+                AddCheck(&checks,
+                         "stats.used_capacity_after",
+                         zb::mds::CompareDecimalStrings(cluster_after.used_capacity_bytes(),
+                                                        expected_used_capacity_bytes) == 0,
+                         "actual=" + FormatDecimalBytes(cluster_after.used_capacity_bytes()) +
+                             " expected=" + FormatDecimalBytes(expected_used_capacity_bytes));
+                AddCheck(&checks,
+                         "stats.free_capacity_after",
+                         zb::mds::CompareDecimalStrings(cluster_after.free_capacity_bytes(),
+                                                        expected_free_capacity_bytes) == 0,
+                         "actual=" + FormatDecimalBytes(cluster_after.free_capacity_bytes()) +
+                             " expected=" + FormatDecimalBytes(expected_free_capacity_bytes));
+
+                bool ok = true;
+                for (const auto& check : checks) {
+                    std::cout << "check." << check.name << "=" << (check.ok ? "PASS" : "FAIL")
+                              << " detail=\"" << check.detail << "\"\n";
+                    ok = ok && check.ok;
+                }
+                return ok;
             }
             if (job.state() == zb::rpc::MASSTREE_IMPORT_JOB_FAILED) {
                 std::cerr << "Masstree import job failed: " << job.error_message() << '\n';
@@ -690,57 +1962,243 @@ private:
         zb::rpc::GetRandomMasstreeFileAttrRequest attr_request;
         attr_request.set_namespace_id(last_masstree_namespace_id_);
         attr_request.set_path_prefix(last_masstree_path_prefix_);
-        zb::rpc::GetRandomMasstreeFileAttrReply attr_reply;
-        if (!mds_.GetRandomMasstreeFileAttr(attr_request, &attr_reply)) {
-            std::cerr << "GetRandomMasstreeFileAttr failed: " << attr_reply.status().message() << '\n';
-            return false;
+        const uint32_t sample_count = std::max<uint32_t>(1, FLAGS_masstree_query_samples);
+        struct QuerySample {
+            uint32_t index{0};
+            bool ok{false};
+            uint64_t latency_us{0};
+            zb::rpc::GetRandomMasstreeFileAttrReply reply;
+            std::string error_message;
+        };
+        std::vector<QuerySample> samples;
+        samples.reserve(sample_count);
+        uint32_t success_count = 0;
+        uint32_t failure_count = 0;
+        uint64_t total_latency_us = 0;
+        uint64_t min_latency_us = std::numeric_limits<uint64_t>::max();
+        uint64_t max_latency_us = 0;
+
+        for (uint32_t i = 0; i < sample_count; ++i) {
+            const auto started_at = std::chrono::steady_clock::now();
+            QuerySample sample;
+            sample.index = i + 1;
+            sample.ok = mds_.GetRandomMasstreeFileAttr(attr_request, &sample.reply);
+            sample.latency_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at)
+                    .count());
+            if (!sample.ok) {
+                sample.error_message = sample.reply.status().message();
+            }
+            total_latency_us += sample.latency_us;
+            min_latency_us = std::min<uint64_t>(min_latency_us, sample.latency_us);
+            max_latency_us = std::max<uint64_t>(max_latency_us, sample.latency_us);
+            if (sample.ok) {
+                ++success_count;
+            } else {
+                ++failure_count;
+            }
+            samples.push_back(std::move(sample));
         }
-        std::cout << "namespace_id=" << attr_reply.namespace_id() << '\n';
-        std::cout << "path_prefix=" << attr_reply.path_prefix() << '\n';
-        std::cout << "generation_id=" << attr_reply.generation_id() << '\n';
-        std::cout << "inode_id=" << attr_reply.inode_id() << '\n';
-        std::cout << "random_attr_size=" << attr_reply.attr().size()
-                  << " (" << FormatBytes(attr_reply.attr().size()) << ")\n";
+
+        std::string resolved_namespace_id = attr_request.namespace_id();
+        std::string resolved_path_prefix = attr_request.path_prefix();
+        std::string resolved_generation_id;
+        for (const auto& sample : samples) {
+            if (!sample.ok) {
+                continue;
+            }
+            if (resolved_namespace_id.empty()) {
+                resolved_namespace_id = sample.reply.namespace_id();
+            }
+            if (resolved_path_prefix.empty()) {
+                resolved_path_prefix = sample.reply.path_prefix();
+            }
+            resolved_generation_id = sample.reply.generation_id();
+            break;
+        }
+
+        std::cout << "namespace_id=" << resolved_namespace_id << '\n';
+        std::cout << "path_prefix=" << resolved_path_prefix << '\n';
+        std::cout << "generation_id=" << resolved_generation_id << '\n';
+        std::cout << "query_samples=" << sample_count << '\n';
+        std::cout << "query_success_count=" << success_count << '\n';
+        std::cout << "query_failure_count=" << failure_count << '\n';
+        std::cout << "query_success_rate="
+                  << FormatDouble(sample_count == 0 ? 0.0
+                                                    : static_cast<double>(success_count) / static_cast<double>(sample_count),
+                                  4)
+                  << '\n';
+        std::cout << "total_query_latency_us=" << total_latency_us << '\n';
+        std::cout << "avg_query_latency_us=" << (sample_count == 0 ? 0 : (total_latency_us / sample_count)) << '\n';
+        std::cout << "min_query_latency_us=" << (sample_count == 0 ? 0 : min_latency_us) << '\n';
+        std::cout << "max_query_latency_us=" << max_latency_us << '\n';
+        std::cout << "check.query.has_successful_sample=" << (success_count > 0 ? "PASS" : "FAIL")
+                  << " detail=\"success_count=" << success_count << "\"\n";
+
+        for (const auto& sample : samples) {
+            const std::string prefix = "query[" + std::to_string(sample.index) + "]";
+            std::cout << prefix << ".ok=" << (sample.ok ? "true" : "false") << '\n';
+            std::cout << prefix << ".latency_us=" << sample.latency_us << '\n';
+            std::cout << prefix << ".status_code=" << static_cast<int>(sample.reply.status().code()) << '\n';
+            std::cout << prefix << ".status_message="
+                      << (sample.ok ? "OK" : sample.error_message) << '\n';
+            if (!sample.ok) {
+                continue;
+            }
+            const auto& attr = sample.reply.attr();
+            std::cout << prefix << ".namespace_id=" << sample.reply.namespace_id() << '\n';
+            std::cout << prefix << ".path_prefix=" << sample.reply.path_prefix() << '\n';
+            std::cout << prefix << ".generation_id=" << sample.reply.generation_id() << '\n';
+            std::cout << prefix << ".inode_id=" << sample.reply.inode_id() << '\n';
+            std::cout << prefix << ".file_name=" << sample.reply.file_name() << '\n';
+            std::cout << prefix << ".type=" << InodeTypeToString(attr.type()) << '\n';
+            std::cout << prefix << ".mode=" << attr.mode() << '\n';
+            std::cout << prefix << ".uid=" << attr.uid() << '\n';
+            std::cout << prefix << ".gid=" << attr.gid() << '\n';
+            std::cout << prefix << ".size_bytes=" << attr.size() << '\n';
+            std::cout << prefix << ".size_human=" << FormatBytes(attr.size()) << '\n';
+            std::cout << prefix << ".atime=" << attr.atime() << '\n';
+            std::cout << prefix << ".mtime=" << attr.mtime() << '\n';
+            std::cout << prefix << ".ctime=" << attr.ctime() << '\n';
+            std::cout << prefix << ".nlink=" << attr.nlink() << '\n';
+            std::cout << prefix << ".object_unit_size=" << attr.object_unit_size() << '\n';
+            std::cout << prefix << ".replica=" << attr.replica() << '\n';
+            std::cout << prefix << ".version=" << attr.version() << '\n';
+            std::cout << prefix << ".file_archive_state="
+                      << ArchiveStateToString(attr.file_archive_state()) << '\n';
+        }
 
         zb::rpc::GetMasstreeClusterStatsReply stats_reply;
         if (!mds_.GetMasstreeClusterStats(&stats_reply)) {
             std::cerr << "GetMasstreeClusterStats failed: " << stats_reply.status().message() << '\n';
             return false;
         }
+        std::cout << "disk_node_count=" << stats_reply.disk_node_count() << '\n';
         std::cout << "optical_node_count=" << stats_reply.optical_node_count() << '\n';
+        std::cout << "disk_device_count=" << stats_reply.disk_device_count() << '\n';
         std::cout << "optical_device_count=" << stats_reply.optical_device_count() << '\n';
+        std::cout << "total_capacity_bytes=" << stats_reply.total_capacity_bytes() << '\n';
         std::cout << "total_file_count=" << stats_reply.total_file_count() << '\n';
         std::cout << "total_file_bytes=" << stats_reply.total_file_bytes() << '\n';
         std::cout << "avg_file_size_bytes=" << stats_reply.avg_file_size_bytes() << '\n';
         std::cout << "used_capacity_bytes=" << stats_reply.used_capacity_bytes() << '\n';
-        return true;
+        std::cout << "free_capacity_bytes=" << stats_reply.free_capacity_bytes() << '\n';
+        std::cout << "total_metadata_bytes=" << stats_reply.total_metadata_bytes() << '\n';
+        std::cout << "min_file_size_bytes=" << stats_reply.min_file_size_bytes() << '\n';
+        std::cout << "max_file_size_bytes=" << stats_reply.max_file_size_bytes() << '\n';
+        return failure_count == 0;
     }
 
-    static bool WriteTextFile(const std::string& path, const std::string& content) {
+    static void FillPatternChunk(std::vector<char>* buffer,
+                                 size_t size,
+                                 uint64_t absolute_offset,
+                                 const std::string& label) {
+        if (!buffer) {
+            return;
+        }
+        buffer->resize(size);
+        const uint64_t label_hash = std::hash<std::string>{}(label);
+        for (size_t i = 0; i < size; ++i) {
+            const uint64_t value = absolute_offset + i + label_hash;
+            (*buffer)[i] = static_cast<char>('A' + (value % 26ULL));
+        }
+    }
+
+    static bool WritePatternFile(const std::string& path,
+                                 const std::string& label,
+                                 uint32_t chunk_size_bytes,
+                                 uint64_t total_size_bytes,
+                                 bool sync_on_close,
+                                 uint64_t* bytes_written,
+                                 uint64_t* hash_out,
+                                 uint64_t* elapsed_us) {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out.is_open()) {
             std::cerr << "failed to open for write: " << path << '\n';
             return false;
         }
-        out.write(content.data(), static_cast<std::streamsize>(content.size()));
+        uint64_t hash = 14695981039346656037ULL;
+        uint64_t written = 0;
+        std::vector<char> buffer;
+        const auto started_at = std::chrono::steady_clock::now();
+        while (written < total_size_bytes) {
+            const size_t current_size = static_cast<size_t>(
+                std::min<uint64_t>(chunk_size_bytes, total_size_bytes - written));
+            FillPatternChunk(&buffer, current_size, written, label);
+            out.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            if (!out) {
+                std::cerr << "write failed: " << path << '\n';
+                return false;
+            }
+            hash = Fnv1a64Append(hash, buffer.data(), buffer.size());
+            written += static_cast<uint64_t>(buffer.size());
+        }
+        if (sync_on_close) {
+            out.flush();
+            if (!out) {
+                std::cerr << "flush failed: " << path << '\n';
+                return false;
+            }
+        }
         out.close();
         if (!out) {
-            std::cerr << "write failed: " << path << '\n';
+            std::cerr << "close after write failed: " << path << '\n';
             return false;
+        }
+        const auto finished_at = std::chrono::steady_clock::now();
+        if (bytes_written) {
+            *bytes_written = written;
+        }
+        if (hash_out) {
+            *hash_out = hash;
+        }
+        if (elapsed_us) {
+            *elapsed_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(finished_at - started_at).count());
         }
         return true;
     }
 
-    static bool ReadTextFile(const std::string& path, std::string* out) {
+    static bool ReadPatternFile(const std::string& path,
+                                uint32_t chunk_size_bytes,
+                                bool verify_hash,
+                                uint64_t* bytes_read,
+                                uint64_t* hash_out,
+                                uint64_t* elapsed_us) {
         std::ifstream in(path, std::ios::binary);
         if (!in.is_open()) {
             std::cerr << "failed to open for read: " << path << '\n';
             return false;
         }
-        std::ostringstream buffer;
-        buffer << in.rdbuf();
-        if (out) {
-            *out = buffer.str();
+        uint64_t hash = 14695981039346656037ULL;
+        uint64_t read_total = 0;
+        std::vector<char> buffer(std::max<uint32_t>(1U, chunk_size_bytes));
+        const auto started_at = std::chrono::steady_clock::now();
+        while (in) {
+            in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize count = in.gcount();
+            if (count <= 0) {
+                break;
+            }
+            if (verify_hash) {
+                hash = Fnv1a64Append(hash, buffer.data(), static_cast<size_t>(count));
+            }
+            read_total += static_cast<uint64_t>(count);
+        }
+        if (in.bad()) {
+            std::cerr << "read failed: " << path << '\n';
+            return false;
+        }
+        const auto finished_at = std::chrono::steady_clock::now();
+        if (bytes_read) {
+            *bytes_read = read_total;
+        }
+        if (hash_out) {
+            *hash_out = verify_hash ? hash : 0;
+        }
+        if (elapsed_us) {
+            *elapsed_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(finished_at - started_at).count());
         }
         return true;
     }
@@ -756,21 +2214,9 @@ private:
         return line;
     }
 
-    void PrintMenu() const {
-        std::cout << "\n==== System Demo Menu ====\n";
-        std::cout << "1) Check health\n";
-        std::cout << "2) Run real POSIX demo\n";
-        std::cout << "3) Run virtual POSIX demo\n";
-        std::cout << "4) Inspect last real file via RPC\n";
-        std::cout << "5) Inspect last virtual file via RPC\n";
-        std::cout << "6) Import masstree namespace\n";
-        std::cout << "7) Query masstree\n";
-        std::cout << "8) Run all\n";
-        std::cout << "q) Quit\n";
-    }
-
     MdsClient mds_;
     SchedulerClient scheduler_;
+    std::vector<zb::demo::MenuActionSpec> actions_;
     std::vector<zb::rpc::NodeView> nodes_;
     std::unordered_map<std::string, zb::rpc::NodeType> node_type_by_id_;
     uint64_t cluster_generation_{0};
@@ -779,6 +2225,7 @@ private:
     std::string last_masstree_namespace_id_;
     std::string last_masstree_generation_id_;
     std::string last_masstree_path_prefix_;
+    std::optional<zb::demo::DemoRunResult> last_result_;
 };
 
 } // namespace

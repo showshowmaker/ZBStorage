@@ -7,6 +7,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fcntl.h>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <random>
@@ -23,6 +24,7 @@ constexpr const char* kReadOnlyOpticalMessage = "READ_ONLY_OPTICAL";
 constexpr const char* kNoSpaceRealPolicyMessage = "NO_SPACE_REAL_POLICY";
 constexpr const char* kNoSpaceVirtualPolicyMessage = "NO_SPACE_VIRTUAL_POLICY";
 constexpr const char* kCrossTierRenameMessage = "CROSS_TIER_RENAME";
+constexpr size_t kMaxRetainedMasstreeImportJobs = 1000;
 
 bool IsLocationMetadataMissing(const std::string& error) {
     return error.empty();
@@ -88,6 +90,12 @@ bool IsWriteOpenFlags(uint32_t flags) {
     }
 #endif
     return false;
+}
+
+std::string BuildMasstreeFileName(uint64_t file_index) {
+    std::ostringstream oss;
+    oss << 'f' << std::setw(9) << std::setfill('0') << file_index;
+    return oss.str();
 }
 
 uint32_t ComputeObjectCount(uint64_t file_size, uint64_t object_unit_size) {
@@ -1227,6 +1235,12 @@ void MdsServiceImpl::ImportMasstreeNamespace(google::protobuf::RpcController* cn
                    "path_prefix/namespace_id/generation_id is required");
         return;
     }
+    if (request->file_count() == 0) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INVALID_ARGUMENT,
+                   "file_count must be greater than zero");
+        return;
+    }
 
     MasstreeImportService::Request import_request;
     import_request.masstree_root = masstree_root_;
@@ -1234,14 +1248,14 @@ void MdsServiceImpl::ImportMasstreeNamespace(google::protobuf::RpcController* cn
     import_request.generation_id = request->generation_id();
     import_request.path_prefix = request->path_prefix();
     import_request.inode_start = request->inode_start();
-    import_request.file_count = request->file_count() > 0 ? request->file_count() : 100000000000ULL;
+    import_request.file_count = request->file_count();
     import_request.max_files_per_leaf_dir =
         request->max_files_per_leaf_dir() > 0 ? request->max_files_per_leaf_dir() : 2048U;
     import_request.max_subdirs_per_dir =
         request->max_subdirs_per_dir() > 0 ? request->max_subdirs_per_dir() : 256U;
     import_request.verify_inode_samples = request->verify_inode_samples();
     import_request.verify_dentry_samples = request->verify_dentry_samples();
-    import_request.publish_route = true;
+    import_request.publish_route = request->publish_route();
 
     std::shared_ptr<MasstreeImportJob> job = EnqueueMasstreeImportJob(import_request);
     response->set_job_id(job->job_id);
@@ -1307,7 +1321,8 @@ void MdsServiceImpl::GetRandomMasstreeFileAttr(google::protobuf::RpcController* 
 
     uint64_t inode_id = 0;
     zb::rpc::InodeAttr attr;
-    if (!PickRandomMasstreeFile(route, &inode_id, &attr, &error)) {
+    std::string file_name;
+    if (!PickRandomMasstreeFile(route, &inode_id, &attr, &file_name, &error)) {
         FillStatus(response->mutable_status(),
                    error.empty() ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
                    error.empty() ? "masstree file not found" : error);
@@ -1318,6 +1333,7 @@ void MdsServiceImpl::GetRandomMasstreeFileAttr(google::protobuf::RpcController* 
     response->set_path_prefix(route.path_prefix);
     response->set_generation_id(route.generation_id);
     response->set_inode_id(inode_id);
+    response->set_file_name(file_name);
     *response->mutable_attr() = attr;
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
@@ -1355,7 +1371,10 @@ void MdsServiceImpl::GetMasstreeClusterStats(google::protobuf::RpcController* cn
     response->set_free_capacity_bytes(stats.free_capacity_bytes);
     response->set_total_file_count(stats.total_file_count);
     response->set_total_file_bytes(stats.total_file_bytes);
+    response->set_total_metadata_bytes(stats.total_metadata_bytes);
     response->set_avg_file_size_bytes(stats.avg_file_size_bytes);
+    response->set_min_file_size_bytes(stats.min_file_size_bytes);
+    response->set_max_file_size_bytes(stats.max_file_size_bytes);
     response->set_cursor_node_index(stats.cursor.node_index);
     response->set_cursor_disk_index(stats.cursor.disk_index);
     response->set_cursor_image_index(stats.cursor.image_index_in_disk);
@@ -1407,6 +1426,7 @@ void MdsServiceImpl::GetMasstreeNamespaceStats(google::protobuf::RpcController* 
     response->set_end_cursor_disk_index(stats.end_cursor.disk_index);
     response->set_end_cursor_image_index(stats.end_cursor.image_index_in_disk);
     response->set_end_cursor_image_used_bytes(stats.end_cursor.image_used_bytes);
+    response->set_total_metadata_bytes(stats.total_metadata_bytes);
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 
@@ -2289,8 +2309,9 @@ bool MdsServiceImpl::ResolveMasstreeRoute(const std::string& namespace_id,
 bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
                                             uint64_t* inode_id,
                                             zb::rpc::InodeAttr* attr,
+                                            std::string* file_name,
                                             std::string* error) const {
-    if (!inode_id || !attr) {
+    if (!inode_id || !attr || !file_name) {
         if (error) {
             *error = "masstree random file outputs are null";
         }
@@ -2319,62 +2340,30 @@ bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
     }
 
     static thread_local std::mt19937_64 rng{std::random_device{}()};
-    const uint64_t last_file_inode = first_file_inode + manifest.file_count - 1ULL;
-    std::uniform_int_distribution<uint64_t> dist(first_file_inode, last_file_inode);
-
-    const size_t attempts =
-        static_cast<size_t>(std::min<uint64_t>(manifest.file_count, 16ULL));
-    for (size_t i = 0; i < attempts; ++i) {
-        const uint64_t candidate_inode = dist(rng);
-        zb::rpc::InodeAttr candidate_attr;
-        std::string local_error;
-        if (!masstree_meta_store_.GetInode(route, candidate_inode, &candidate_attr, &local_error)) {
-            if (!local_error.empty()) {
-                if (error) {
-                    *error = local_error;
-                }
-                return false;
-            }
-            continue;
-        }
-        if (candidate_attr.type() != zb::rpc::INODE_FILE) {
-            continue;
-        }
-        *inode_id = candidate_inode;
-        *attr = std::move(candidate_attr);
+    std::uniform_int_distribution<uint64_t> dist(0ULL, manifest.file_count - 1ULL);
+    const uint64_t file_index = dist(rng);
+    const uint64_t candidate_inode = first_file_inode + file_index;
+    zb::rpc::InodeAttr candidate_attr;
+    std::string local_error;
+    if (!masstree_meta_store_.GetInode(route, candidate_inode, &candidate_attr, &local_error)) {
         if (error) {
-            error->clear();
+            *error = local_error.empty() ? "masstree file not found" : local_error;
         }
-        return true;
+        return false;
     }
-
-    for (uint64_t candidate_inode = first_file_inode; candidate_inode <= last_file_inode; ++candidate_inode) {
-        zb::rpc::InodeAttr candidate_attr;
-        std::string local_error;
-        if (!masstree_meta_store_.GetInode(route, candidate_inode, &candidate_attr, &local_error)) {
-            if (!local_error.empty()) {
-                if (error) {
-                    *error = local_error;
-                }
-                return false;
-            }
-            continue;
-        }
-        if (candidate_attr.type() != zb::rpc::INODE_FILE) {
-            continue;
-        }
-        *inode_id = candidate_inode;
-        *attr = std::move(candidate_attr);
+    if (candidate_attr.type() != zb::rpc::INODE_FILE) {
         if (error) {
-            error->clear();
+            *error = "masstree inode is not a file";
         }
-        return true;
+        return false;
     }
-
+    *inode_id = candidate_inode;
+    *attr = std::move(candidate_attr);
+    *file_name = BuildMasstreeFileName(file_index);
     if (error) {
         error->clear();
     }
-    return false;
+    return true;
 }
 
 void MdsServiceImpl::RunMasstreeImportWorker() {
@@ -2400,11 +2389,41 @@ void MdsServiceImpl::RunMasstreeImportWorker() {
             job->result = std::move(result);
             job->error_message.clear();
             job->state = zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED;
+            TrimMasstreeImportJobsLocked();
         } else {
             std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
             job->error_message = error.empty() ? "masstree import failed" : error;
             job->state = zb::rpc::MASSTREE_IMPORT_JOB_FAILED;
+            TrimMasstreeImportJobsLocked();
         }
+    }
+}
+
+void MdsServiceImpl::TrimMasstreeImportJobsLocked() {
+    if (masstree_import_jobs_.size() <= kMaxRetainedMasstreeImportJobs) {
+        return;
+    }
+
+    size_t scan_budget = masstree_import_job_history_.size();
+    while (masstree_import_jobs_.size() > kMaxRetainedMasstreeImportJobs &&
+           !masstree_import_job_history_.empty() &&
+           scan_budget-- > 0) {
+        const std::string job_id = masstree_import_job_history_.front();
+        masstree_import_job_history_.pop_front();
+
+        auto it = masstree_import_jobs_.find(job_id);
+        if (it == masstree_import_jobs_.end()) {
+            continue;
+        }
+
+        const zb::rpc::MasstreeImportJobState state = it->second->state;
+        if (state == zb::rpc::MASSTREE_IMPORT_JOB_PENDING ||
+            state == zb::rpc::MASSTREE_IMPORT_JOB_RUNNING) {
+            masstree_import_job_history_.push_back(job_id);
+            continue;
+        }
+
+        masstree_import_jobs_.erase(it);
     }
 }
 
@@ -2418,7 +2437,9 @@ MdsServiceImpl::EnqueueMasstreeImportJob(const MasstreeImportService::Request& r
         job->job_id = oss.str();
         job->request = request;
         masstree_import_jobs_[job->job_id] = job;
+        masstree_import_job_history_.push_back(job->job_id);
         masstree_import_job_queue_.push_back(job);
+        TrimMasstreeImportJobsLocked();
     }
     masstree_import_job_cv_.notify_one();
     return job;
@@ -2454,6 +2475,10 @@ void MdsServiceImpl::FillMasstreeImportJobInfo(const MasstreeImportJob& job,
     info->set_inode_min(job.result.inode_min);
     info->set_inode_max(job.result.inode_max);
     info->set_inode_pages_bytes(job.result.inode_pages_bytes);
+    info->set_level1_dir_count(job.result.level1_dir_count);
+    info->set_leaf_dir_count(job.result.leaf_dir_count);
+    info->set_total_file_bytes(job.result.total_file_bytes);
+    info->set_avg_file_size_bytes(job.result.avg_file_size_bytes);
 }
 
 brpc::Channel* MdsServiceImpl::GetDataChannel(const std::string& address, std::string* error) {

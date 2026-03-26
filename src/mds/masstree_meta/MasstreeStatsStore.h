@@ -18,7 +18,10 @@ struct MasstreeClusterStatsRecord {
     std::string free_capacity_bytes{"0"};
     uint64_t total_file_count{0};
     std::string total_file_bytes{"0"};
+    std::string total_metadata_bytes{"0"};
     uint64_t avg_file_size_bytes{0};
+    uint64_t min_file_size_bytes{0};
+    uint64_t max_file_size_bytes{0};
     MasstreeOpticalClusterCursor cursor;
 };
 
@@ -27,6 +30,7 @@ struct MasstreeNamespaceStatsRecord {
     std::string generation_id;
     uint64_t file_count{0};
     std::string total_file_bytes{"0"};
+    std::string total_metadata_bytes{"0"};
     uint64_t avg_file_size_bytes{0};
     uint64_t start_global_image_id{0};
     uint64_t end_global_image_id{0};
@@ -65,7 +69,13 @@ public:
     MasstreeClusterStatsRecord BuildUpdatedClusterStats(const MasstreeClusterStatsRecord& current,
                                                         uint64_t delta_file_count,
                                                         const std::string& delta_file_bytes,
+                                                        uint64_t delta_metadata_bytes,
                                                         const MasstreeOpticalClusterCursor& end_cursor) const;
+    MasstreeClusterStatsRecord BuildReplacedClusterStats(
+        const MasstreeClusterStatsRecord& current,
+        const MasstreeNamespaceStatsRecord* previous_namespace_stats,
+        const MasstreeNamespaceStatsRecord& next_namespace_stats,
+        const MasstreeOpticalClusterCursor& end_cursor) const;
 
 private:
     static bool DecodeClusterStats(const std::string& payload,

@@ -132,34 +132,48 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
         return false;
     }
 
-    const MasstreeClusterStatsRecord cluster_after =
-        stats_store.BuildUpdatedClusterStats(cluster_before,
-                                            import_result.file_count,
-                                            import_result.total_file_bytes,
-                                            import_result.end_cursor);
-    MasstreeNamespaceStatsRecord namespace_stats;
-    namespace_stats.namespace_id = normalized.namespace_id;
-    namespace_stats.generation_id = normalized.generation_id;
-    namespace_stats.file_count = import_result.file_count;
-    namespace_stats.total_file_bytes = import_result.total_file_bytes;
-    namespace_stats.avg_file_size_bytes = import_result.avg_file_size_bytes;
-    namespace_stats.start_global_image_id = import_result.start_global_image_id;
-    namespace_stats.end_global_image_id = import_result.end_global_image_id;
-    namespace_stats.start_cursor = import_result.start_cursor;
-    namespace_stats.end_cursor = import_result.end_cursor;
-
-    bool had_previous_cluster_stats = false;
-    std::string previous_cluster_stats_raw;
-    if (!stats_store.LoadClusterStatsRaw(&had_previous_cluster_stats, &previous_cluster_stats_raw, error)) {
-        cleanup();
-        return false;
-    }
     bool had_previous_namespace_stats = false;
     std::string previous_namespace_stats_raw;
     if (!stats_store.LoadNamespaceStatsRaw(normalized.namespace_id,
                                            &had_previous_namespace_stats,
                                            &previous_namespace_stats_raw,
                                            error)) {
+        cleanup();
+        return false;
+    }
+
+    MasstreeNamespaceStatsRecord previous_namespace_stats;
+    const MasstreeNamespaceStatsRecord* previous_namespace_stats_ptr = nullptr;
+    if (had_previous_namespace_stats &&
+        !stats_store.LoadNamespaceStats(normalized.namespace_id, &previous_namespace_stats, error)) {
+        cleanup();
+        return false;
+    }
+    if (had_previous_namespace_stats) {
+        previous_namespace_stats_ptr = &previous_namespace_stats;
+    }
+
+    MasstreeNamespaceStatsRecord namespace_stats;
+    namespace_stats.namespace_id = normalized.namespace_id;
+    namespace_stats.generation_id = normalized.generation_id;
+    namespace_stats.file_count = import_result.file_count;
+    namespace_stats.total_file_bytes = import_result.total_file_bytes;
+    namespace_stats.total_metadata_bytes = std::to_string(import_result.inode_pages_bytes);
+    namespace_stats.avg_file_size_bytes = import_result.avg_file_size_bytes;
+    namespace_stats.start_global_image_id = import_result.start_global_image_id;
+    namespace_stats.end_global_image_id = import_result.end_global_image_id;
+    namespace_stats.start_cursor = import_result.start_cursor;
+    namespace_stats.end_cursor = import_result.end_cursor;
+
+    const MasstreeClusterStatsRecord cluster_after =
+        stats_store.BuildReplacedClusterStats(cluster_before,
+                                             previous_namespace_stats_ptr,
+                                             namespace_stats,
+                                             import_result.end_cursor);
+
+    bool had_previous_cluster_stats = false;
+    std::string previous_cluster_stats_raw;
+    if (!stats_store.LoadClusterStatsRaw(&had_previous_cluster_stats, &previous_cluster_stats_raw, error)) {
         cleanup();
         return false;
     }
@@ -206,6 +220,8 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
         result->inode_max = generate_result.inode_max;
         result->inode_count = generate_result.inode_count;
         result->dentry_count = generate_result.dentry_count;
+        result->level1_dir_count = generate_result.level1_dir_count;
+        result->leaf_dir_count = generate_result.leaf_dir_count;
         result->inode_pages_bytes = import_result.inode_pages_bytes;
         result->avg_file_size_bytes = import_result.avg_file_size_bytes;
         result->total_file_bytes = import_result.total_file_bytes;
