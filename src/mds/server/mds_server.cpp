@@ -75,6 +75,7 @@ int main(int argc, char* argv[]) {
                                     cfg.masstree_root,
                                     archive_meta_options,
                                     cfg.archive_import_page_size_bytes,
+                                    cfg.strict_tier_bypass_pg,
                                     &candidate_queue,
                                     &lease_manager);
     std::unique_ptr<zb::mds::OpticalArchiveManager> archive_manager;

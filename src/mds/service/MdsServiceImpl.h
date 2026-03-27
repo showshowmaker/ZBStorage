@@ -39,6 +39,7 @@ public:
                    const std::string& masstree_root,
                    const ArchiveMetaStore::Options& archive_meta_options,
                    uint32_t archive_import_page_size_bytes,
+                   bool strict_tier_bypass_pg,
                    FileArchiveCandidateQueue* candidate_queue = nullptr,
                    ArchiveLeaseManager* lease_manager = nullptr);
     ~MdsServiceImpl() override;
@@ -254,6 +255,7 @@ private:
     std::string archive_meta_root_;
     std::string masstree_root_;
     uint32_t archive_import_page_size_bytes_{0};
+    bool strict_tier_bypass_pg_{false};
     FileArchiveCandidateQueue* candidate_queue_{};
     ArchiveLeaseManager* lease_manager_{};
     ArchiveNamespaceCatalog archive_namespace_catalog_;

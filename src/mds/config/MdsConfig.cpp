@@ -236,6 +236,13 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
             cfg.pg_view_epoch = static_cast<uint64_t>(std::stoull(value));
         } else if (key == "PG_COUNT") {
             cfg.pg_count = static_cast<uint32_t>(std::stoul(value));
+        } else if (key == "STRICT_TIER_BYPASS_PG") {
+            if (!ParseBool(value, &cfg.strict_tier_bypass_pg)) {
+                if (error) {
+                    *error = "Invalid STRICT_TIER_BYPASS_PG value: " + value;
+                }
+                return {};
+            }
         } else if (key == "OBJECT_UNIT_SIZE") {
             cfg.object_unit_size = static_cast<uint64_t>(std::stoull(value));
         } else if (key == "REPLICA") {

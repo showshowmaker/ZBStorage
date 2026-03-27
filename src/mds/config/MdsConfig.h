@@ -44,6 +44,7 @@ struct MdsConfig {
     uint32_t scheduler_refresh_ms{2000};
     uint64_t pg_view_epoch{1};
     uint32_t pg_count{1024};
+    bool strict_tier_bypass_pg{false};
     uint64_t object_unit_size{4 * 1024 * 1024};
     uint32_t replica{2};
     std::vector<NodeInfo> nodes;

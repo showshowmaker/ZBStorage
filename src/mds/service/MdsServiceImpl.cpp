@@ -254,6 +254,7 @@ MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
                                const std::string& masstree_root,
                                const ArchiveMetaStore::Options& archive_meta_options,
                                uint32_t archive_import_page_size_bytes,
+                               bool strict_tier_bypass_pg,
                                FileArchiveCandidateQueue* candidate_queue,
                                ArchiveLeaseManager* lease_manager)
     : store_(store),
@@ -262,6 +263,7 @@ MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
       archive_meta_root_(archive_meta_root),
       masstree_root_(masstree_root),
       archive_import_page_size_bytes_(archive_import_page_size_bytes),
+      strict_tier_bypass_pg_(strict_tier_bypass_pg),
       candidate_queue_(candidate_queue),
       lease_manager_(lease_manager),
       archive_namespace_catalog_(store),
@@ -1831,13 +1833,20 @@ bool MdsServiceImpl::SelectFilePrimaryLocationWithPreference(uint64_t inode_id,
     std::vector<zb::rpc::ReplicaLocation> replicas;
     std::string local_error;
     if (strict_type) {
-        if (!allocator_->AllocateObjectByPgWithType(1,
-                                                    object_id,
-                                                    0,
-                                                    preferred_type,
-                                                    true,
-                                                    &replicas,
-                                                    &local_error) || replicas.empty()) {
+        const bool ok = strict_tier_bypass_pg_
+                            ? allocator_->AllocateObjectDirectByType(1,
+                                                                     object_id,
+                                                                     preferred_type,
+                                                                     &replicas,
+                                                                     &local_error)
+                            : allocator_->AllocateObjectByPgWithType(1,
+                                                                     object_id,
+                                                                     0,
+                                                                     preferred_type,
+                                                                     true,
+                                                                     &replicas,
+                                                                     &local_error);
+        if (!ok || replicas.empty()) {
             if (error) {
                 *error = local_error.empty() ? "no replica matches strict placement policy" : local_error;
             }

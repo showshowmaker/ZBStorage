@@ -28,6 +28,11 @@ public:
                                     bool strict_type,
                                     std::vector<zb::rpc::ReplicaLocation>* out,
                                     std::string* error);
+    bool AllocateObjectDirectByType(uint32_t replica,
+                                    const std::string& object_id,
+                                    NodeType required_type,
+                                    std::vector<zb::rpc::ReplicaLocation>* out,
+                                    std::string* error);
     bool ResolveNodeAddress(const std::string& node_id, std::string* address) const;
     void SetPgManager(PGManager* pg_manager);
 
