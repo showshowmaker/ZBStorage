@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cerrno>
 #include <chrono>
 #include <cctype>
+#include <cstring>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -208,15 +210,15 @@ std::string FormatDurationSeconds(uint64_t seconds) {
 const char* MasstreeJobStateName(zb::rpc::MasstreeImportJobState state) {
     switch (state) {
     case zb::rpc::MASSTREE_IMPORT_JOB_PENDING:
-        return "待开始";
+        return "???";
     case zb::rpc::MASSTREE_IMPORT_JOB_RUNNING:
-        return "运行中";
+        return "???";
     case zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED:
-        return "已完成";
+        return "???";
     case zb::rpc::MASSTREE_IMPORT_JOB_FAILED:
-        return "失败";
+        return "??";
     default:
-        return "未知";
+        return "??";
     }
 }
 
@@ -334,7 +336,7 @@ void PrintDecimalMetric(const std::string& key, const std::string& value) {
 }
 
 void PrintBoolMetric(const std::string& key, bool value) {
-    std::cout << key << "=" << (value ? "是" : "否") << '\n';
+    std::cout << key << "=" << (value ? "?" : "?") << '\n';
 }
 
 void AddCheck(std::vector<CheckResult>* checks,
@@ -863,52 +865,39 @@ private:
 
         zb::rpc::GetMasstreeClusterStatsReply masstree_stats;
         if (!mds_.GetMasstreeClusterStats(&masstree_stats)) {
-            std::cerr << "?? Masstree ??????: " << masstree_stats.status().message() << '
-';
+            std::cerr << "?? Masstree ??????: " << masstree_stats.status().message() << '\n';
             return false;
         }
 
         const uint64_t online_logical_node_count = real_stats.logical_node_count + virtual_stats.logical_node_count;
-        std::cout << "????????=" << real_stats.physical_node_count << '
-';
-        std::cout << "????????=" << real_stats.logical_node_count << '
-';
-        std::cout << "??????=" << real_stats.disk_count << '
-';
+        std::cout << "????????=" << real_stats.physical_node_count << '\n';
+        std::cout << "????????=" << real_stats.logical_node_count << '\n';
+        std::cout << "??????=" << real_stats.disk_count << '\n';
         PrintByteMetric("????????", real_stats.total_capacity_bytes);
         PrintByteMetric("?????????", real_stats.used_capacity_bytes);
         PrintByteMetric("?????????", real_stats.free_capacity_bytes);
 
-        std::cout << "????????=" << virtual_stats.logical_node_count << '
-';
-        std::cout << "??????=" << virtual_stats.disk_count << '
-';
+        std::cout << "????????=" << virtual_stats.logical_node_count << '\n';
+        std::cout << "??????=" << virtual_stats.disk_count << '\n';
         PrintByteMetric("????????", virtual_stats.total_capacity_bytes);
         PrintByteMetric("?????????", virtual_stats.used_capacity_bytes);
         PrintByteMetric("?????????", virtual_stats.free_capacity_bytes);
 
-        std::cout << "???????=" << online_logical_node_count << '
-';
-        std::cout << "?????=" << masstree_stats.optical_node_count() << '
-';
-        std::cout << "?????=" << masstree_stats.optical_device_count() << '
-';
+        std::cout << "???????=" << online_logical_node_count << '\n';
+        std::cout << "?????=" << masstree_stats.optical_node_count() << '\n';
+        std::cout << "?????=" << masstree_stats.optical_device_count() << '\n';
         PrintDecimalMetric("???????", masstree_stats.total_capacity_bytes());
         PrintDecimalMetric("????????", masstree_stats.used_capacity_bytes());
         PrintDecimalMetric("????????", masstree_stats.free_capacity_bytes());
-        std::cout << "????=" << masstree_stats.total_file_count() << '
-';
+        std::cout << "????=" << masstree_stats.total_file_count() << '\n';
         PrintDecimalMetric("??????", masstree_stats.total_file_bytes());
         std::cout << "????????=" << masstree_stats.avg_file_size_bytes()
-                  << " (" << FormatBytes(masstree_stats.avg_file_size_bytes()) << ")
-";
+                  << " (" << FormatBytes(masstree_stats.avg_file_size_bytes()) << ")\n";
         PrintDecimalMetric("???????", masstree_stats.total_metadata_bytes());
         std::cout << "????????=" << masstree_stats.min_file_size_bytes()
-                  << " (" << FormatBytes(masstree_stats.min_file_size_bytes()) << ")
-";
+                  << " (" << FormatBytes(masstree_stats.min_file_size_bytes()) << ")\n";
         std::cout << "????????=" << masstree_stats.max_file_size_bytes()
-                  << " (" << FormatBytes(masstree_stats.max_file_size_bytes()) << ")
-";
+                  << " (" << FormatBytes(masstree_stats.max_file_size_bytes()) << ")\n";
         return true;
     }
 
@@ -1368,16 +1357,12 @@ private:
 
     bool RunTierIoScenario(const TierIoOptions& options, std::string* saved_logical_path) {
         PrintSection("POSIX " + DisplayTierName(options.expected_tier) + "???");
-        std::cout << "????=" << BuildTierLogicalPath(options.dir_name) + "/demo" << '
-';
-        std::cout << "????=" << options.repeat << '
-';
+        std::cout << "????=" << BuildTierLogicalPath(options.dir_name) + "/demo" << '\n';
+        std::cout << "????=" << options.repeat << '\n';
         std::cout << "????????=" << options.file_size_bytes
-                  << " (" << FormatBytes(options.file_size_bytes) << ")
-";
+                  << " (" << FormatBytes(options.file_size_bytes) << ")\n";
         std::cout << "?????=" << options.chunk_size_bytes
-                  << " (" << FormatBytes(options.chunk_size_bytes) << ")
-";
+                  << " (" << FormatBytes(options.chunk_size_bytes) << ")\n";
         PrintBoolMetric("????", options.verify_hash);
         PrintBoolMetric("????", options.keep_file);
         PrintBoolMetric("?????", options.sync_on_close);
@@ -1403,54 +1388,31 @@ private:
         const double write_throughput_mib_s = ThroughputMiBS(total_written, total_write_us);
         const double read_throughput_mib_s = ThroughputMiBS(total_read, total_read_us);
 
-        std::cout << "????=" << last_result.logical_path << '
-';
-        std::cout << "????=" << last_result.mounted_path << '
-';
-        std::cout << "?????=" << last_result.bytes_written << '
-';
-        std::cout << "?????=" << last_result.bytes_read << '
-';
-        std::cout << "????=" << FormatHex64(last_result.write_hash) << '
-';
-        std::cout << "????=" << FormatHex64(last_result.read_hash) << '
-';
-        std::cout << "??????=" << FormatDouble(static_cast<double>(last_result.write_elapsed_us) / 1000.0)
-                  << '
-';
-        std::cout << "??????=" << FormatDouble(static_cast<double>(last_result.read_elapsed_us) / 1000.0)
-                  << '
-';
+        std::cout << "????=" << last_result.logical_path << '\n';
+        std::cout << "????=" << last_result.mounted_path << '\n';
+        std::cout << "?????=" << last_result.bytes_written << '\n';
+        std::cout << "?????=" << last_result.bytes_read << '\n';
+        std::cout << "????=" << FormatHex64(last_result.write_hash) << '\n';
+        std::cout << "????=" << FormatHex64(last_result.read_hash) << '\n';
+        std::cout << "??????=" << FormatDouble(static_cast<double>(last_result.write_elapsed_us) / 1000.0) << '\n';
+        std::cout << "??????=" << FormatDouble(static_cast<double>(last_result.read_elapsed_us) / 1000.0) << '\n';
         std::cout << "????MiB??="
-                  << FormatDouble(ThroughputMiBS(last_result.bytes_written, last_result.write_elapsed_us)) << '
-';
+                  << FormatDouble(ThroughputMiBS(last_result.bytes_written, last_result.write_elapsed_us)) << '\n';
         std::cout << "????MiB??="
-                  << FormatDouble(ThroughputMiBS(last_result.bytes_read, last_result.read_elapsed_us)) << '
-';
-        std::cout << "??????=" << total_written << '
-';
-        std::cout << "??????=" << total_read << '
-';
+                  << FormatDouble(ThroughputMiBS(last_result.bytes_read, last_result.read_elapsed_us)) << '\n';
+        std::cout << "??????=" << total_written << '\n';
+        std::cout << "??????=" << total_read << '\n';
         std::cout << "????????="
-                  << FormatDouble(static_cast<double>(total_write_us) / 1000.0 / options.repeat) << '
-';
+                  << FormatDouble(static_cast<double>(total_write_us) / 1000.0 / options.repeat) << '\n';
         std::cout << "????????="
-                  << FormatDouble(static_cast<double>(total_read_us) / 1000.0 / options.repeat) << '
-';
-        std::cout << "??????MiB??=" << FormatDouble(write_throughput_mib_s) << '
-';
-        std::cout << "??????MiB??=" << FormatDouble(read_throughput_mib_s) << '
-';
-        std::cout << "inode??=" << last_result.inspection.inode_id << '
-';
-        std::cout << "??????=" << last_result.inspection.size_bytes << '
-';
-        std::cout << "????=" << last_result.inspection.node_id << '
-';
-        std::cout << "????=" << last_result.inspection.disk_id << '
-';
-        std::cout << "??????=" << DisplayTierName(last_result.inspection.actual_tier) << '
-';
+                  << FormatDouble(static_cast<double>(total_read_us) / 1000.0 / options.repeat) << '\n';
+        std::cout << "??????MiB??=" << FormatDouble(write_throughput_mib_s) << '\n';
+        std::cout << "??????MiB??=" << FormatDouble(read_throughput_mib_s) << '\n';
+        std::cout << "inode??=" << last_result.inspection.inode_id << '\n';
+        std::cout << "??????=" << last_result.inspection.size_bytes << '\n';
+        std::cout << "????=" << last_result.inspection.node_id << '\n';
+        std::cout << "????=" << last_result.inspection.disk_id << '\n';
+        std::cout << "??????=" << DisplayTierName(last_result.inspection.actual_tier) << '\n';
 
         std::vector<CheckResult> checks;
         AddCheck(&checks,
@@ -1566,10 +1528,10 @@ private:
 
     bool InspectKnownFile(const std::string& logical_path, const std::string& label) {
         if (logical_path.empty()) {
-            std::cerr << "当前还没有记录过" << label << "文件\n";
+            std::cerr << "????????" << label << "??\n";
             return false;
         }
-        PrintSection("检查" + label + "文件");
+        PrintSection("??" + label + "??");
         return InspectFile(logical_path, "", nullptr);
     }
 
@@ -1579,14 +1541,12 @@ private:
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup(logical_path, &attr, &status)) {
-            std::cerr << "?????? " << logical_path << ": " << status.message() << '
-';
+            std::cerr << "?????? " << logical_path << ": " << status.message() << '\n';
             return false;
         }
         zb::rpc::FileLocationView view;
         if (!mds_.GetFileLocation(attr.inode_id(), &view, &status)) {
-            std::cerr << "?????????inode=" << attr.inode_id() << ": " << status.message() << '
-';
+            std::cerr << "?????????inode=" << attr.inode_id() << ": " << status.message() << '\n';
             return false;
         }
         const std::string node_id = view.disk_location().node_id();
@@ -1600,16 +1560,11 @@ private:
             actual_tier = "virtual";
         }
 
-        std::cout << "inode??=" << attr.inode_id() << '
-';
-        std::cout << "????=" << attr.size() << " (" << FormatBytes(attr.size()) << ")
-";
-        std::cout << "????=" << node_id << '
-';
-        std::cout << "????=" << disk_id << '
-';
-        std::cout << "??????=" << DisplayTierName(actual_tier) << '
-';
+        std::cout << "inode??=" << attr.inode_id() << '\n';
+        std::cout << "????=" << attr.size() << " (" << FormatBytes(attr.size()) << ")\n";
+        std::cout << "????=" << node_id << '\n';
+        std::cout << "????=" << disk_id << '\n';
+        std::cout << "??????=" << DisplayTierName(actual_tier) << '\n';
         if (out) {
             out->inode_id = attr.inode_id();
             out->size_bytes = attr.size();
@@ -1619,8 +1574,7 @@ private:
         }
         if (!expected_tier.empty() && actual_tier != expected_tier) {
             std::cerr << "?????" << DisplayTierName(expected_tier)
-                      << "????" << DisplayTierName(actual_tier) << '
-';
+                      << "????" << DisplayTierName(actual_tier) << '\n';
             return false;
         }
         return true;
