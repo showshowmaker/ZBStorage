@@ -547,14 +547,12 @@ const char* InodeTypeToEnglishString(zb::rpc::InodeType type) {
 
 const char* ArchiveStateToEnglishString(zb::rpc::InodeArchiveState state) {
     switch (state) {
-        case zb::rpc::ARCHIVE_PENDING:
+        case zb::rpc::INODE_ARCHIVE_PENDING:
             return "pending_archive";
-        case zb::rpc::ARCHIVE_IN_PROGRESS:
+        case zb::rpc::INODE_ARCHIVE_ARCHIVING:
             return "archiving";
-        case zb::rpc::ARCHIVE_ARCHIVED:
+        case zb::rpc::INODE_ARCHIVE_ARCHIVED:
             return "archived";
-        case zb::rpc::ARCHIVE_RESTORED:
-            return "restored";
         default:
             return "unknown";
     }
