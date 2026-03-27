@@ -237,15 +237,15 @@ std::string NodeTypeName(zb::rpc::NodeType type) {
 
 std::string DisplayTierName(const std::string& tier) {
     if (tier == "real") {
-        return "??";
+        return "真实";
     }
     if (tier == "virtual") {
-        return "??";
+        return "虚拟";
     }
     if (tier == "optical") {
-        return "??";
+        return "光盘";
     }
-    return tier.empty() ? "??" : tier;
+    return tier.empty() ? "未知" : tier;
 }
 
 void PrintSection(const std::string& title) {
@@ -287,6 +287,14 @@ struct TierStats {
     uint64_t total_capacity_bytes{0};
     uint64_t used_capacity_bytes{0};
     uint64_t free_capacity_bytes{0};
+};
+
+struct TierIoDiagnostics {
+    bool has_host_space{false};
+    uint64_t host_capacity_bytes{0};
+    uint64_t host_available_bytes{0};
+    TierStats real_stats;
+    TierStats virtual_stats;
 };
 
 struct CheckResult {
@@ -336,7 +344,45 @@ void PrintDecimalMetric(const std::string& key, const std::string& value) {
 }
 
 void PrintBoolMetric(const std::string& key, bool value) {
-    std::cout << key << "=" << (value ? "?" : "?") << '\n';
+    std::cout << key << "=" << (value ? "是" : "否") << '\n';
+}
+
+void CollectTierStats(const std::vector<zb::rpc::NodeView>& nodes, TierStats* real_stats, TierStats* virtual_stats) {
+    if (!real_stats || !virtual_stats) {
+        return;
+    }
+    *real_stats = TierStats{};
+    *virtual_stats = TierStats{};
+    for (const auto& node : nodes) {
+        TierStats* target = nullptr;
+        uint64_t fanout = 1;
+        if (node.node_type() == zb::rpc::NODE_REAL) {
+            target = real_stats;
+        } else if (node.node_type() == zb::rpc::NODE_VIRTUAL_POOL) {
+            target = virtual_stats;
+            fanout = std::max<uint64_t>(1, node.virtual_node_count());
+        } else {
+            continue;
+        }
+        target->physical_node_count += 1;
+        target->logical_node_count += fanout;
+        target->disk_count += static_cast<uint64_t>(node.disks_size()) * fanout;
+
+        uint64_t node_total = 0;
+        uint64_t node_free = 0;
+        for (const auto& disk : node.disks()) {
+            node_total += disk.capacity_bytes();
+            node_free += disk.free_bytes();
+        }
+        target->total_capacity_bytes += node_total * fanout;
+        target->free_capacity_bytes += node_free * fanout;
+    }
+    real_stats->used_capacity_bytes = real_stats->total_capacity_bytes > real_stats->free_capacity_bytes
+                                          ? (real_stats->total_capacity_bytes - real_stats->free_capacity_bytes)
+                                          : 0;
+    virtual_stats->used_capacity_bytes = virtual_stats->total_capacity_bytes > virtual_stats->free_capacity_bytes
+                                             ? (virtual_stats->total_capacity_bytes - virtual_stats->free_capacity_bytes)
+                                             : 0;
 }
 
 void AddCheck(std::vector<CheckResult>* checks,
@@ -832,36 +878,7 @@ private:
 
         TierStats real_stats;
         TierStats virtual_stats;
-        for (const auto& node : nodes_) {
-            TierStats* target = nullptr;
-            uint64_t fanout = 1;
-            if (node.node_type() == zb::rpc::NODE_REAL) {
-                target = &real_stats;
-            } else if (node.node_type() == zb::rpc::NODE_VIRTUAL_POOL) {
-                target = &virtual_stats;
-                fanout = std::max<uint64_t>(1, node.virtual_node_count());
-            } else {
-                continue;
-            }
-            target->physical_node_count += 1;
-            target->logical_node_count += fanout;
-            target->disk_count += static_cast<uint64_t>(node.disks_size()) * fanout;
-
-            uint64_t node_total = 0;
-            uint64_t node_free = 0;
-            for (const auto& disk : node.disks()) {
-                node_total += disk.capacity_bytes();
-                node_free += disk.free_bytes();
-            }
-            target->total_capacity_bytes += node_total * fanout;
-            target->free_capacity_bytes += node_free * fanout;
-        }
-        real_stats.used_capacity_bytes = real_stats.total_capacity_bytes > real_stats.free_capacity_bytes
-                                             ? (real_stats.total_capacity_bytes - real_stats.free_capacity_bytes)
-                                             : 0;
-        virtual_stats.used_capacity_bytes = virtual_stats.total_capacity_bytes > virtual_stats.free_capacity_bytes
-                                                ? (virtual_stats.total_capacity_bytes - virtual_stats.free_capacity_bytes)
-                                                : 0;
+        CollectTierStats(nodes_, &real_stats, &virtual_stats);
 
         zb::rpc::GetMasstreeClusterStatsReply masstree_stats;
         if (!mds_.GetMasstreeClusterStats(&masstree_stats)) {
@@ -1355,17 +1372,88 @@ private:
         return RunTierIoScenario(options, saved_logical_path);
     }
 
+    bool BuildTierIoDiagnostics(TierIoDiagnostics* diagnostics) {
+        if (!diagnostics) {
+            return false;
+        }
+        if (!RefreshClusterView()) {
+            return false;
+        }
+        CollectTierStats(nodes_, &diagnostics->real_stats, &diagnostics->virtual_stats);
+        std::error_code ec;
+        const fs::space_info info = fs::space(fs::path(FLAGS_mount_point), ec);
+        if (!ec) {
+            diagnostics->has_host_space = true;
+            diagnostics->host_capacity_bytes = info.capacity;
+            diagnostics->host_available_bytes = info.available;
+        } else {
+            diagnostics->has_host_space = false;
+            diagnostics->host_capacity_bytes = 0;
+            diagnostics->host_available_bytes = 0;
+        }
+        return true;
+    }
+
+    const TierStats& SelectTierStats(const std::string& tier, const TierIoDiagnostics& diagnostics) const {
+        if (tier == "virtual") {
+            return diagnostics.virtual_stats;
+        }
+        return diagnostics.real_stats;
+    }
+
+
+
+    void PrintTierIoDiagnostics(const TierIoOptions& options, const TierIoDiagnostics& diagnostics) {
+        std::cout << "挂载点=" << FLAGS_mount_point << std::endl;
+        if (diagnostics.has_host_space) {
+            PrintByteMetric("宿主机文件系统可用字节", diagnostics.host_available_bytes);
+        }
+        const TierStats& tier_stats = SelectTierStats(options.expected_tier, diagnostics);
+        PrintByteMetric(DisplayTierName(options.expected_tier) + "层总容量字节", tier_stats.total_capacity_bytes);
+        PrintByteMetric(DisplayTierName(options.expected_tier) + "层已用容量字节", tier_stats.used_capacity_bytes);
+        PrintByteMetric(DisplayTierName(options.expected_tier) + "层剩余容量字节", tier_stats.free_capacity_bytes);
+    }
+
+    std::string ExplainNoSpaceForTierWrite(const TierIoOptions& options,
+                                           const TierIoDiagnostics& diagnostics) const {
+        const TierStats& tier_stats = SelectTierStats(options.expected_tier, diagnostics);
+        std::ostringstream oss;
+        if (diagnostics.has_host_space && diagnostics.host_available_bytes < options.file_size_bytes) {
+            oss << "宿主机挂载文件系统可用空间不足，当前可用="
+                << diagnostics.host_available_bytes << " (" << FormatBytes(diagnostics.host_available_bytes)
+                << ")，待写入=" << options.file_size_bytes << " (" << FormatBytes(options.file_size_bytes) << ")";
+            return oss.str();
+        }
+        if (tier_stats.free_capacity_bytes < options.file_size_bytes) {
+            oss << DisplayTierName(options.expected_tier)
+                << "层的可写剩余容量不足，当前剩余="
+                << tier_stats.free_capacity_bytes << " (" << FormatBytes(tier_stats.free_capacity_bytes)
+                << ")，待写入=" << options.file_size_bytes << " (" << FormatBytes(options.file_size_bytes)
+                << ")。这类场景通常会被 MDS/FUSE 映射成 ENOSPC，而不一定是宿主机磁盘真正写满。";
+            return oss.str();
+        }
+        oss << "本次 ENOSPC 更可能来自 MDS 的放置策略拒绝。FUSE 会把 NO_SPACE_REAL_POLICY/NO_SPACE_VIRTUAL_POLICY "
+               "映射成 errno=28，因此即使宿主机磁盘还有空间，也可能返回 No space left on device。";
+        return oss.str();
+    }
+
     bool RunTierIoScenario(const TierIoOptions& options, std::string* saved_logical_path) {
-        PrintSection("POSIX " + DisplayTierName(options.expected_tier) + "???");
-        std::cout << "????=" << BuildTierLogicalPath(options.dir_name) + "/demo" << '\n';
-        std::cout << "????=" << options.repeat << '\n';
-        std::cout << "????????=" << options.file_size_bytes
-                  << " (" << FormatBytes(options.file_size_bytes) << ")\n";
-        std::cout << "?????=" << options.chunk_size_bytes
-                  << " (" << FormatBytes(options.chunk_size_bytes) << ")\n";
-        PrintBoolMetric("????", options.verify_hash);
-        PrintBoolMetric("????", options.keep_file);
-        PrintBoolMetric("?????", options.sync_on_close);
+        TierIoDiagnostics diagnostics;
+        if (!BuildTierIoDiagnostics(&diagnostics)) {
+            return false;
+        }
+
+        PrintSection("POSIX " + DisplayTierName(options.expected_tier) + "层演示");
+        std::cout << "目标目录=" << BuildTierLogicalPath(options.dir_name) + "/demo" << std::endl;
+        std::cout << "重复次数=" << options.repeat << std::endl;
+        std::cout << "期望文件大小字节=" << options.file_size_bytes
+                  << " (" << FormatBytes(options.file_size_bytes) << ")" << std::endl;
+        std::cout << "块大小字节=" << options.chunk_size_bytes
+                  << " (" << FormatBytes(options.chunk_size_bytes) << ")" << std::endl;
+        PrintBoolMetric("校验哈希", options.verify_hash);
+        PrintBoolMetric("保留文件", options.keep_file);
+        PrintBoolMetric("关闭前刷盘", options.sync_on_close);
+        PrintTierIoDiagnostics(options, diagnostics);
 
         uint64_t total_written = 0;
         uint64_t total_read = 0;
@@ -1375,7 +1463,7 @@ private:
 
         for (uint32_t attempt = 0; attempt < options.repeat; ++attempt) {
             TierIoIterationResult iteration;
-            if (!RunSingleTierIoIteration(options, attempt, &iteration)) {
+            if (!RunSingleTierIoIteration(options, diagnostics, attempt, &iteration)) {
                 return false;
             }
             last_result = iteration;
@@ -1388,59 +1476,60 @@ private:
         const double write_throughput_mib_s = ThroughputMiBS(total_written, total_write_us);
         const double read_throughput_mib_s = ThroughputMiBS(total_read, total_read_us);
 
-        std::cout << "????=" << last_result.logical_path << '\n';
-        std::cout << "????=" << last_result.mounted_path << '\n';
-        std::cout << "?????=" << last_result.bytes_written << '\n';
-        std::cout << "?????=" << last_result.bytes_read << '\n';
-        std::cout << "????=" << FormatHex64(last_result.write_hash) << '\n';
-        std::cout << "????=" << FormatHex64(last_result.read_hash) << '\n';
-        std::cout << "??????=" << FormatDouble(static_cast<double>(last_result.write_elapsed_us) / 1000.0) << '\n';
-        std::cout << "??????=" << FormatDouble(static_cast<double>(last_result.read_elapsed_us) / 1000.0) << '\n';
-        std::cout << "????MiB??="
-                  << FormatDouble(ThroughputMiBS(last_result.bytes_written, last_result.write_elapsed_us)) << '\n';
-        std::cout << "????MiB??="
-                  << FormatDouble(ThroughputMiBS(last_result.bytes_read, last_result.read_elapsed_us)) << '\n';
-        std::cout << "??????=" << total_written << '\n';
-        std::cout << "??????=" << total_read << '\n';
-        std::cout << "????????="
-                  << FormatDouble(static_cast<double>(total_write_us) / 1000.0 / options.repeat) << '\n';
-        std::cout << "????????="
-                  << FormatDouble(static_cast<double>(total_read_us) / 1000.0 / options.repeat) << '\n';
-        std::cout << "??????MiB??=" << FormatDouble(write_throughput_mib_s) << '\n';
-        std::cout << "??????MiB??=" << FormatDouble(read_throughput_mib_s) << '\n';
-        std::cout << "inode??=" << last_result.inspection.inode_id << '\n';
-        std::cout << "??????=" << last_result.inspection.size_bytes << '\n';
-        std::cout << "????=" << last_result.inspection.node_id << '\n';
-        std::cout << "????=" << last_result.inspection.disk_id << '\n';
-        std::cout << "??????=" << DisplayTierName(last_result.inspection.actual_tier) << '\n';
+        std::cout << "逻辑路径=" << last_result.logical_path << std::endl;
+        std::cout << "挂载路径=" << last_result.mounted_path << std::endl;
+        std::cout << "写入字节数=" << last_result.bytes_written << std::endl;
+        std::cout << "读取字节数=" << last_result.bytes_read << std::endl;
+        std::cout << "写入哈希=" << FormatHex64(last_result.write_hash) << std::endl;
+        std::cout << "读取哈希=" << FormatHex64(last_result.read_hash) << std::endl;
+        std::cout << "写入耗时毫秒=" << FormatDouble(static_cast<double>(last_result.write_elapsed_us) / 1000.0) << std::endl;
+        std::cout << "读取耗时毫秒=" << FormatDouble(static_cast<double>(last_result.read_elapsed_us) / 1000.0) << std::endl;
+        std::cout << "写入吞吐MiB每秒="
+                  << FormatDouble(ThroughputMiBS(last_result.bytes_written, last_result.write_elapsed_us)) << std::endl;
+        std::cout << "读取吞吐MiB每秒="
+                  << FormatDouble(ThroughputMiBS(last_result.bytes_read, last_result.read_elapsed_us)) << std::endl;
+        std::cout << "总写入字节数=" << total_written << std::endl;
+        std::cout << "总读取字节数=" << total_read << std::endl;
+        std::cout << "平均写入耗时毫秒="
+                  << FormatDouble(static_cast<double>(total_write_us) / 1000.0 / options.repeat) << std::endl;
+        std::cout << "平均读取耗时毫秒="
+                  << FormatDouble(static_cast<double>(total_read_us) / 1000.0 / options.repeat) << std::endl;
+        std::cout << "平均写入吞吐MiB每秒=" << FormatDouble(write_throughput_mib_s) << std::endl;
+        std::cout << "平均读取吞吐MiB每秒=" << FormatDouble(read_throughput_mib_s) << std::endl;
+        std::cout << "inode编号=" << last_result.inspection.inode_id << std::endl;
+        std::cout << "文件大小=" << last_result.inspection.size_bytes << " ("
+                  << FormatBytes(last_result.inspection.size_bytes) << ")" << std::endl;
+        std::cout << "节点编号=" << last_result.inspection.node_id << std::endl;
+        std::cout << "磁盘编号=" << last_result.inspection.disk_id << std::endl;
+        std::cout << "解析节点类型=" << DisplayTierName(last_result.inspection.actual_tier) << std::endl;
 
         std::vector<CheckResult> checks;
         AddCheck(&checks,
-                 "??????",
+                 "文件大小写入",
                  last_result.bytes_written == options.file_size_bytes,
-                 "???=" + std::to_string(last_result.bytes_written) +
-                     " ???=" + std::to_string(options.file_size_bytes));
+                 "实际=" + std::to_string(last_result.bytes_written) +
+                     " 期望=" + std::to_string(options.file_size_bytes));
         AddCheck(&checks,
-                 "??????",
+                 "文件大小读取",
                  last_result.bytes_read == options.file_size_bytes,
-                 "???=" + std::to_string(last_result.bytes_read) +
-                     " ???=" + std::to_string(options.file_size_bytes));
+                 "实际=" + std::to_string(last_result.bytes_read) +
+                     " 期望=" + std::to_string(options.file_size_bytes));
         AddCheck(&checks,
-                 "??????",
+                 "文件哈希一致",
                  !options.verify_hash || last_result.read_hash == last_result.write_hash,
-                 options.verify_hash ? ("??=" + FormatHex64(last_result.write_hash) +
-                                        " ??=" + FormatHex64(last_result.read_hash))
-                                     : "???????");
+                 options.verify_hash ? ("写入=" + FormatHex64(last_result.write_hash) +
+                                        " 读取=" + FormatHex64(last_result.read_hash))
+                                     : "未启用哈希校验");
         AddCheck(&checks,
-                 "??????",
+                 "属性大小一致",
                  last_result.inspection.size_bytes == options.file_size_bytes,
-                 "???=" + std::to_string(last_result.inspection.size_bytes) +
-                     " ???=" + std::to_string(options.file_size_bytes));
+                 "实际=" + std::to_string(last_result.inspection.size_bytes) +
+                     " 期望=" + std::to_string(options.file_size_bytes));
         AddCheck(&checks,
-                 "??????",
+                 "落盘层级正确",
                  last_result.inspection.actual_tier == options.expected_tier,
-                 "???=" + DisplayTierName(last_result.inspection.actual_tier) +
-                     " ???=" + DisplayTierName(options.expected_tier));
+                 "实际=" + DisplayTierName(last_result.inspection.actual_tier) +
+                     " 期望=" + DisplayTierName(options.expected_tier));
 
         bool ok = true;
         for (const auto& check : checks) {
@@ -1453,10 +1542,11 @@ private:
     }
 
     bool RunSingleTierIoIteration(const TierIoOptions& options,
+                                  const TierIoDiagnostics& diagnostics,
                                   uint32_t attempt,
                                   TierIoIterationResult* result) {
         if (!result) {
-            std::cerr << "缺少层级读写结果输出对象\n";
+            std::cerr << "缺少层级读写结果输出对象" << std::endl;
             return false;
         }
         const std::string token = TimestampToken() + (options.repeat > 1 ? ("_" + std::to_string(attempt + 1)) : "");
@@ -1470,13 +1560,14 @@ private:
         std::error_code ec;
         fs::create_directories(mounted_dir, ec);
         if (ec) {
-            std::cerr << "创建目录失败 " << mounted_dir << ": " << ec.message() << '\n';
+            std::cerr << "创建目录失败 " << mounted_dir << ": " << ec.message() << std::endl;
             return false;
         }
 
         uint64_t write_hash = 14695981039346656037ULL;
         uint64_t bytes_written = 0;
         uint64_t write_elapsed_us = 0;
+        int write_errno = 0;
         if (!WritePatternFile(mounted_path,
                               options.expected_tier,
                               options.chunk_size_bytes,
@@ -1484,7 +1575,11 @@ private:
                               options.sync_on_close,
                               &bytes_written,
                               &write_hash,
-                              &write_elapsed_us)) {
+                              &write_elapsed_us,
+                              &write_errno)) {
+            if (write_errno == ENOSPC) {
+                std::cerr << ExplainNoSpaceForTierWrite(options, diagnostics) << std::endl;
+            }
             return false;
         }
 
@@ -1519,7 +1614,7 @@ private:
         if (!options.keep_file) {
             fs::remove(fs::path(mounted_path), ec);
             if (ec) {
-                std::cerr << "删除文件失败 " << mounted_path << ": " << ec.message() << '\n';
+                std::cerr << "删除文件失败 " << mounted_path << ": " << ec.message() << std::endl;
                 return false;
             }
         }
@@ -1528,10 +1623,10 @@ private:
 
     bool InspectKnownFile(const std::string& logical_path, const std::string& label) {
         if (logical_path.empty()) {
-            std::cerr << "????????" << label << "??\n";
+            std::cerr << "没有记录可供查看的" << label << "路径" << std::endl;
             return false;
         }
-        PrintSection("??" + label + "??");
+        PrintSection("查看" + label + "文件");
         return InspectFile(logical_path, "", nullptr);
     }
 
@@ -1541,12 +1636,12 @@ private:
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup(logical_path, &attr, &status)) {
-            std::cerr << "?????? " << logical_path << ": " << status.message() << '\n';
+            std::cerr << "查询文件失败 " << logical_path << ": " << status.message() << std::endl;
             return false;
         }
         zb::rpc::FileLocationView view;
         if (!mds_.GetFileLocation(attr.inode_id(), &view, &status)) {
-            std::cerr << "?????????inode=" << attr.inode_id() << ": " << status.message() << '\n';
+            std::cerr << "查询文件位置失败 inode=" << attr.inode_id() << ": " << status.message() << std::endl;
             return false;
         }
         const std::string node_id = view.disk_location().node_id();
@@ -1560,11 +1655,11 @@ private:
             actual_tier = "virtual";
         }
 
-        std::cout << "inode??=" << attr.inode_id() << '\n';
-        std::cout << "????=" << attr.size() << " (" << FormatBytes(attr.size()) << ")\n";
-        std::cout << "????=" << node_id << '\n';
-        std::cout << "????=" << disk_id << '\n';
-        std::cout << "??????=" << DisplayTierName(actual_tier) << '\n';
+        std::cout << "inode编号=" << attr.inode_id() << std::endl;
+        std::cout << "属性大小字节=" << attr.size() << " (" << FormatBytes(attr.size()) << ")" << std::endl;
+        std::cout << "节点编号=" << node_id << std::endl;
+        std::cout << "磁盘编号=" << disk_id << std::endl;
+        std::cout << "解析节点类型=" << DisplayTierName(actual_tier) << std::endl;
         if (out) {
             out->inode_id = attr.inode_id();
             out->size_bytes = attr.size();
@@ -1573,8 +1668,8 @@ private:
             out->actual_tier = actual_tier;
         }
         if (!expected_tier.empty() && actual_tier != expected_tier) {
-            std::cerr << "?????" << DisplayTierName(expected_tier)
-                      << "????" << DisplayTierName(actual_tier) << '\n';
+            std::cerr << "期望层级为" << DisplayTierName(expected_tier)
+                      << "，实际为" << DisplayTierName(actual_tier) << std::endl;
             return false;
         }
         return true;
@@ -1988,13 +2083,20 @@ private:
                                  bool sync_on_close,
                                  uint64_t* bytes_written,
                                  uint64_t* hash_out,
-                                 uint64_t* elapsed_us) {
+                                 uint64_t* elapsed_us,
+                                 int* failure_errno) {
+        if (failure_errno) {
+            *failure_errno = 0;
+        }
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out.is_open()) {
             const int open_errno = errno;
-            std::cerr << "????????: " << path
+            if (failure_errno) {
+                *failure_errno = open_errno;
+            }
+            std::cerr << "打开写入文件失败: " << path
                       << " errno=" << open_errno
-                      << " ??=" << std::strerror(open_errno) << '\n';
+                      << " 错误=" << std::strerror(open_errno) << '\n';
             return false;
         }
         uint64_t hash = 14695981039346656037ULL;
@@ -2007,7 +2109,15 @@ private:
             FillPatternChunk(&buffer, current_size, written, label);
             out.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
             if (!out) {
-                std::cerr << "??????: " << path << '\n';
+                const int write_errno = errno;
+                if (failure_errno) {
+                    *failure_errno = write_errno;
+                }
+                std::cerr << "写入文件失败: " << path;
+                if (write_errno != 0) {
+                    std::cerr << " errno=" << write_errno << " 错误=" << std::strerror(write_errno);
+                }
+                std::cerr << '\n';
                 return false;
             }
             hash = Fnv1a64Append(hash, buffer.data(), buffer.size());
@@ -2016,13 +2126,29 @@ private:
         if (sync_on_close) {
             out.flush();
             if (!out) {
-                std::cerr << "??????: " << path << '\n';
+                const int flush_errno = errno;
+                if (failure_errno) {
+                    *failure_errno = flush_errno;
+                }
+                std::cerr << "刷新文件失败: " << path;
+                if (flush_errno != 0) {
+                    std::cerr << " errno=" << flush_errno << " 错误=" << std::strerror(flush_errno);
+                }
+                std::cerr << '\n';
                 return false;
             }
         }
         out.close();
         if (!out) {
-            std::cerr << "????????: " << path << '\n';
+            const int close_errno = errno;
+            if (failure_errno) {
+                *failure_errno = close_errno;
+            }
+            std::cerr << "关闭写入文件失败: " << path;
+            if (close_errno != 0) {
+                std::cerr << " errno=" << close_errno << " 错误=" << std::strerror(close_errno);
+            }
+            std::cerr << '\n';
             return false;
         }
         const auto finished_at = std::chrono::steady_clock::now();
@@ -2048,9 +2174,9 @@ private:
         std::ifstream in(path, std::ios::binary);
         if (!in.is_open()) {
             const int open_errno = errno;
-            std::cerr << "????????: " << path
+            std::cerr << "打开读取文件失败: " << path
                       << " errno=" << open_errno
-                      << " ??=" << std::strerror(open_errno) << '\n';
+                      << " 错误=" << std::strerror(open_errno) << '\n';
             return false;
         }
         uint64_t hash = 14695981039346656037ULL;
@@ -2069,7 +2195,7 @@ private:
             read_total += static_cast<uint64_t>(count);
         }
         if (in.bad()) {
-            std::cerr << "??????: " << path << '\n';
+            std::cerr << "读取文件失败: " << path << '\n';
             return false;
         }
         const auto finished_at = std::chrono::steady_clock::now();
