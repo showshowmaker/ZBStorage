@@ -935,7 +935,7 @@ private:
         actions_.push_back({"6",
                             "TC-P5 Masstree 查询",
                             "执行随机元数据查询并输出统计",
-                            "6 namespace=<id> [n=<count>] [path_prefix=<path>]",
+                            "6 [n=<count>]",
                             {"query", "p5"}});
         actions_.push_back({"7", "执行完整测试集", "按顺序执行健康检查、P1、P2、P3、P4、P5", "7", {"all"}});
         actions_.push_back({"8", "查看上次结果", "重新展示最近一次测试结果", "8", {"last"}});
@@ -1037,8 +1037,8 @@ private:
         out << "\n示例:\n";
         out << "  2 tc_p1_expected_real_node_count=1 tc_p1_expected_virtual_node_count=99\n";
 	        out << "  5 namespace=demo-ns generation=gen-report-001 file_count=100000000 template_id=template-100m-v1 template_mode=legacy_records\n";
-        out << "  6 namespace=demo-ns n=1000\n";
-        out << "  6 namespace=demo-ns n=1000 log_file=logs/p5_run.log\n";
+        out << "  6 n=1\n";
+        out << "  6 n=1000 log_file=logs/p5_run.log\n";
         return out.str();
     }
 
@@ -1903,18 +1903,7 @@ private:
 
     bool RunMasstreeQueryDemo() {
         PrintSection("Masstree Query Demo");
-        if (last_masstree_namespace_id_.empty()) {
-            last_masstree_namespace_id_ = FLAGS_masstree_namespace_id;
-        }
-        if (last_masstree_path_prefix_.empty()) {
-            last_masstree_path_prefix_ = FLAGS_masstree_path_prefix.empty()
-                                             ? "/masstree_demo/" + FLAGS_masstree_namespace_id
-                                             : NormalizeLogicalPath(FLAGS_masstree_path_prefix);
-        }
-
         zb::rpc::GetRandomMasstreeFileAttrRequest attr_request;
-        attr_request.set_namespace_id(last_masstree_namespace_id_);
-        attr_request.set_path_prefix(last_masstree_path_prefix_);
         const uint32_t sample_count = std::max<uint32_t>(1, FLAGS_masstree_query_samples);
         struct QuerySample {
             uint32_t index{0};
@@ -1953,26 +1942,6 @@ private:
             samples.push_back(std::move(sample));
         }
 
-        std::string resolved_namespace_id = attr_request.namespace_id();
-        std::string resolved_path_prefix = attr_request.path_prefix();
-        std::string resolved_generation_id;
-        for (const auto& sample : samples) {
-            if (!sample.ok) {
-                continue;
-            }
-            if (resolved_namespace_id.empty()) {
-                resolved_namespace_id = sample.reply.namespace_id();
-            }
-            if (resolved_path_prefix.empty()) {
-                resolved_path_prefix = sample.reply.path_prefix();
-            }
-            resolved_generation_id = sample.reply.generation_id();
-            break;
-        }
-
-        std::cout << "namespace_id=" << resolved_namespace_id << '\n';
-        std::cout << "path_prefix=" << resolved_path_prefix << '\n';
-        std::cout << "generation_id=" << resolved_generation_id << '\n';
         std::cout << "query_samples=" << sample_count << '\n';
         std::cout << "query_success_count=" << success_count << '\n';
         std::cout << "query_failure_count=" << failure_count << '\n';
@@ -1986,56 +1955,37 @@ private:
         std::cout << "min_query_latency_us=" << (sample_count == 0 ? 0 : min_latency_us) << '\n';
         std::cout << "max_query_latency_us=" << max_latency_us << '\n';
         for (const auto& sample : samples) {
-            const std::string prefix = "query[" + std::to_string(sample.index) + "]";
-            std::cout << prefix << ".ok=" << (sample.ok ? "true" : "false") << '\n';
-            std::cout << prefix << ".latency_us=" << sample.latency_us << '\n';
-            std::cout << prefix << ".status_code=" << static_cast<int>(sample.reply.status().code()) << '\n';
-            std::cout << prefix << ".status_message="
-                      << (sample.ok ? "OK" : sample.error_message) << '\n';
+            std::cout << "样本序号=" << sample.index << '\n';
+            std::cout << "查询成功=" << (sample.ok ? "true" : "false") << '\n';
+            std::cout << "查询耗时微秒=" << sample.latency_us << '\n';
+            std::cout << "状态码=" << static_cast<int>(sample.reply.status().code()) << '\n';
+            std::cout << "状态信息=" << (sample.ok ? "OK" : sample.error_message) << '\n';
             if (!sample.ok) {
                 continue;
             }
             const auto& attr = sample.reply.attr();
-            std::cout << prefix << ".namespace_id=" << sample.reply.namespace_id() << '\n';
-            std::cout << prefix << ".path_prefix=" << sample.reply.path_prefix() << '\n';
-            std::cout << prefix << ".generation_id=" << sample.reply.generation_id() << '\n';
-            std::cout << prefix << ".inode_id=" << sample.reply.inode_id() << '\n';
-            std::cout << prefix << ".file_name=" << sample.reply.file_name() << '\n';
-            std::cout << prefix << ".type=" << InodeTypeToString(attr.type()) << '\n';
-            std::cout << prefix << ".mode=" << attr.mode() << '\n';
-            std::cout << prefix << ".uid=" << attr.uid() << '\n';
-            std::cout << prefix << ".gid=" << attr.gid() << '\n';
-            std::cout << prefix << ".size_bytes=" << attr.size() << '\n';
-            std::cout << prefix << ".size_human=" << FormatBytes(attr.size()) << '\n';
-            std::cout << prefix << ".atime=" << attr.atime() << '\n';
-            std::cout << prefix << ".mtime=" << attr.mtime() << '\n';
-            std::cout << prefix << ".ctime=" << attr.ctime() << '\n';
-            std::cout << prefix << ".nlink=" << attr.nlink() << '\n';
-            std::cout << prefix << ".object_unit_size=" << attr.object_unit_size() << '\n';
-            std::cout << prefix << ".replica=" << attr.replica() << '\n';
-            std::cout << prefix << ".version=" << attr.version() << '\n';
-            std::cout << prefix << ".file_archive_state="
-                      << ArchiveStateToString(attr.file_archive_state()) << '\n';
+            std::cout << "文件元数据={\n";
+            std::cout << "  namespace_id=" << sample.reply.namespace_id() << '\n';
+            std::cout << "  path_prefix=" << sample.reply.path_prefix() << '\n';
+            std::cout << "  generation_id=" << sample.reply.generation_id() << '\n';
+            std::cout << "  inode_id=" << sample.reply.inode_id() << '\n';
+            std::cout << "  file_name=" << sample.reply.file_name() << '\n';
+            std::cout << "  type=" << InodeTypeToString(attr.type()) << '\n';
+            std::cout << "  mode=" << attr.mode() << '\n';
+            std::cout << "  uid=" << attr.uid() << '\n';
+            std::cout << "  gid=" << attr.gid() << '\n';
+            std::cout << "  size_bytes=" << attr.size() << '\n';
+            std::cout << "  size_human=" << FormatBytes(attr.size()) << '\n';
+            std::cout << "  atime=" << attr.atime() << '\n';
+            std::cout << "  mtime=" << attr.mtime() << '\n';
+            std::cout << "  ctime=" << attr.ctime() << '\n';
+            std::cout << "  nlink=" << attr.nlink() << '\n';
+            std::cout << "  object_unit_size=" << attr.object_unit_size() << '\n';
+            std::cout << "  replica=" << attr.replica() << '\n';
+            std::cout << "  version=" << attr.version() << '\n';
+            std::cout << "  file_archive_state=" << ArchiveStateToString(attr.file_archive_state()) << '\n';
+            std::cout << "}\n";
         }
-
-        zb::rpc::GetMasstreeClusterStatsReply stats_reply;
-        if (!mds_.GetMasstreeClusterStats(&stats_reply)) {
-            std::cerr << "GetMasstreeClusterStats failed: " << stats_reply.status().message() << '\n';
-            return false;
-        }
-        std::cout << "disk_node_count=" << stats_reply.disk_node_count() << '\n';
-        std::cout << "optical_node_count=" << stats_reply.optical_node_count() << '\n';
-        std::cout << "disk_device_count=" << stats_reply.disk_device_count() << '\n';
-        std::cout << "optical_device_count=" << stats_reply.optical_device_count() << '\n';
-        std::cout << "total_capacity_bytes=" << stats_reply.total_capacity_bytes() << '\n';
-        std::cout << "total_file_count=" << stats_reply.total_file_count() << '\n';
-        std::cout << "total_file_bytes=" << stats_reply.total_file_bytes() << '\n';
-        std::cout << "avg_file_size_bytes=" << stats_reply.avg_file_size_bytes() << '\n';
-        std::cout << "used_capacity_bytes=" << stats_reply.used_capacity_bytes() << '\n';
-        std::cout << "free_capacity_bytes=" << stats_reply.free_capacity_bytes() << '\n';
-        std::cout << "total_metadata_bytes=" << stats_reply.total_metadata_bytes() << '\n';
-        std::cout << "min_file_size_bytes=" << stats_reply.min_file_size_bytes() << '\n';
-        std::cout << "max_file_size_bytes=" << stats_reply.max_file_size_bytes() << '\n';
         return failure_count == 0;
     }
 

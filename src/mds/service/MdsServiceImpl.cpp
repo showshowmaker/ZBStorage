@@ -1335,13 +1335,6 @@ void MdsServiceImpl::GetRandomMasstreeFileAttr(google::protobuf::RpcController* 
                    "Service not initialized");
         return;
     }
-    if (request->namespace_id().empty() && request->path_prefix().empty()) {
-        FillStatus(response->mutable_status(),
-                   zb::rpc::MDS_INVALID_ARGUMENT,
-                   "namespace_id or path_prefix is required");
-        return;
-    }
-
     MasstreeNamespaceRoute route;
     std::string error;
     if (!ResolveMasstreeRoute(request->namespace_id(), request->path_prefix(), &route, &error)) {
@@ -2329,6 +2322,21 @@ bool MdsServiceImpl::ResolveMasstreeRoute(const std::string& namespace_id,
     std::vector<MasstreeNamespaceRoute> routes;
     if (!masstree_namespace_catalog_.ListRoutes(&routes, error)) {
         return false;
+    }
+    if (namespace_id.empty()) {
+        if (routes.empty()) {
+            if (error) {
+                error->clear();
+            }
+            return false;
+        }
+        static thread_local std::mt19937_64 rng{std::random_device{}()};
+        std::uniform_int_distribution<size_t> dist(0, routes.size() - 1);
+        *route = routes[dist(rng)];
+        if (error) {
+            error->clear();
+        }
+        return true;
     }
     for (const auto& candidate : routes) {
         if (candidate.namespace_id == namespace_id) {
