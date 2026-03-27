@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <random>
@@ -169,6 +170,20 @@ const char* NoSpaceMessageForPlacementTarget(zb::rpc::PathPlacementTarget target
         default:
             return "NO_SPACE_POLICY";
     }
+}
+
+void LogRequestFailure(const char* method,
+                       const std::string& path,
+                       const std::string& error,
+                       zb::rpc::PathPlacementTarget target = zb::rpc::PATH_PLACEMENT_ANY) {
+    std::cerr << "[mds] " << method << " failed: path=" << path;
+    if (target != zb::rpc::PATH_PLACEMENT_ANY) {
+        std::cerr << " target=" << static_cast<int>(target);
+    }
+    if (!error.empty()) {
+        std::cerr << " error=" << error;
+    }
+    std::cerr << std::endl;
 }
 
 std::vector<std::string> BuildPathPrefixCandidates(const std::string& normalized_path) {
@@ -517,6 +532,7 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     uint64_t parent_inode = 0;
     std::string name;
     if (!ResolveParent(request->path(), &parent_inode, &name, &error)) {
+        LogRequestFailure("Create.ResolveParent", request->path(), error.empty() ? "parent not found" : error);
         FillStatus(response->mutable_status(), zb::rpc::MDS_NOT_FOUND, error.empty() ? "parent not found" : error);
         return;
     }
@@ -526,12 +542,14 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
         return;
     }
     if (!error.empty()) {
+        LogRequestFailure("Create.DentryExists", request->path(), error);
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
     }
 
     zb::rpc::InodeAttr parent_attr;
     if (!GetInode(parent_inode, &parent_attr, &error)) {
+        LogRequestFailure("Create.GetParentInode", request->path(), error);
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
     }
@@ -542,6 +560,7 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
 
     uint64_t inode_id = AllocateInodeId(&error);
     if (inode_id == 0) {
+        LogRequestFailure("Create.AllocateInodeId", request->path(), error);
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
     }
@@ -568,6 +587,7 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     const bool has_path_policy =
         MatchPathPlacementPolicy(request->path(), &placement_policy, nullptr, &policy_error);
     if (!policy_error.empty()) {
+        LogRequestFailure("Create.MatchPathPlacementPolicy", request->path(), policy_error);
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, policy_error);
         return;
     }
@@ -592,6 +612,10 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
         if (has_strict_tier_policy) {
             error = NoSpaceMessageForPlacementTarget(placement_policy.target());
         }
+        LogRequestFailure("Create.SelectFilePrimaryLocation",
+                          request->path(),
+                          error,
+                          has_strict_tier_policy ? placement_policy.target() : zb::rpc::PATH_PLACEMENT_ANY);
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
     }
@@ -605,10 +629,12 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     }
     disk_location.set_disk_id(primary_location.disk_id());
     if (!SaveDiskFileLocation(inode_id, disk_location, &batch)) {
+        LogRequestFailure("Create.SaveDiskFileLocation", request->path(), "failed to encode disk file location");
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to encode disk file location");
         return;
     }
     if (!store_->WriteBatch(&batch, &error)) {
+        LogRequestFailure("Create.WriteBatch", request->path(), error);
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
     }

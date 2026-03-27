@@ -108,6 +108,11 @@ private:
             request.set_peer_address(peer_address_);
             request.set_applied_lsn(storage_service_->GetReplicationStatus().applied_lsn);
 
+            const zb::msg::Status refresh_status = disk_manager_->Refresh();
+            if (!refresh_status.ok()) {
+                std::cerr << "Failed to refresh disk stats before heartbeat: "
+                          << refresh_status.message << std::endl;
+            }
             auto reports = disk_manager_->GetReport();
             for (const auto& disk : reports) {
                 zb::rpc::DiskHeartbeat* out = request.add_disks();

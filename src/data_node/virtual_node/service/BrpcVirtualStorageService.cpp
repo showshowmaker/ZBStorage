@@ -1,6 +1,7 @@
 #include "BrpcVirtualStorageService.h"
 
 #include <brpc/controller.h>
+#include <iostream>
 
 #include "../../common/ObjectStore.h"
 #include "../../../msg/status.h"
@@ -31,6 +32,19 @@ void FillStatus(const zb::msg::Status& status, zb::rpc::Status* out) {
     }
     out->set_code(ToProtoStatusCode(status.code));
     out->set_message(status.message);
+}
+
+void LogFailure(const char* method, const zb::msg::Status& status, const std::string& detail) {
+    if (status.ok()) {
+        return;
+    }
+    std::cerr << "[virtual_node] " << method
+              << " failed: code=" << static_cast<int>(status.code)
+              << " msg=" << status.message;
+    if (!detail.empty()) {
+        std::cerr << " detail=" << detail;
+    }
+    std::cerr << std::endl;
 }
 
 void FillFileMeta(const zb::msg::FileMeta& in, zb::rpc::FileMeta* out) {
@@ -107,6 +121,7 @@ void BrpcVirtualStorageService::WriteObject(google::protobuf::RpcController* cnt
     object_req.is_replication = request->is_replication();
     const zb::msg::Status st = service_->PutObject(object_req);
     FillStatus(st, response->mutable_status());
+    LogFailure("WriteObject", st, "disk_id=" + request->disk_id() + " object_id=" + request->object_id());
     if (st.ok()) {
         response->set_bytes(static_cast<uint64_t>(request->data().size()));
     }
@@ -134,6 +149,7 @@ void BrpcVirtualStorageService::ReadObject(google::protobuf::RpcController* cntl
     object_req.size = request->size();
     const zb::data_node::ObjectReadResult result = service_->GetObject(object_req);
     FillStatus(result.status, response->mutable_status());
+    LogFailure("ReadObject", result.status, "disk_id=" + request->disk_id() + " object_id=" + request->object_id());
     if (result.status.ok()) {
         response->set_bytes(static_cast<uint64_t>(result.data.size()));
         response->set_data(result.data);
@@ -160,6 +176,7 @@ void BrpcVirtualStorageService::DeleteObject(google::protobuf::RpcController* cn
     object_req.object_id = request->object_id();
     const zb::msg::Status st = service_->DeleteObject(object_req);
     FillStatus(st, response->mutable_status());
+    LogFailure("DeleteObject", st, "disk_id=" + request->disk_id() + " object_id=" + request->object_id());
 }
 
 void BrpcVirtualStorageService::ReadArchivedFile(google::protobuf::RpcController* cntl_base,
@@ -252,6 +269,7 @@ void BrpcVirtualStorageService::GetDiskReport(google::protobuf::RpcController* c
 
     zb::msg::DiskReportReply internal_reply = service_->GetDiskReport();
     FillStatus(internal_reply.status, response->mutable_status());
+    LogFailure("GetDiskReport", internal_reply.status, "");
     for (const auto& report : internal_reply.reports) {
         zb::rpc::DiskReport* item = response->add_reports();
         item->set_id(report.id);
@@ -339,6 +357,12 @@ void BrpcVirtualStorageService::AllocateFileWrite(google::protobuf::RpcControlle
     internal_req.object_unit_size_hint = request->object_unit_size_hint();
     const zb::msg::AllocateFileWriteReply internal_reply = service_->AllocateFileWrite(internal_req);
     FillStatus(internal_reply.status, response->mutable_status());
+    LogFailure("AllocateFileWrite",
+               internal_reply.status,
+               "inode_id=" + std::to_string(request->inode_id()) +
+                   " disk_id=" + request->disk_id() +
+                   " offset=" + std::to_string(request->offset()) +
+                   " size=" + std::to_string(request->size()));
     if (internal_reply.status.ok()) {
         FillFileMeta(internal_reply.meta, response->mutable_meta());
         response->set_txid(internal_reply.txid);
@@ -373,6 +397,12 @@ void BrpcVirtualStorageService::CommitFileWrite(google::protobuf::RpcController*
     internal_req.mtime_sec = request->mtime_sec();
     const zb::msg::CommitFileWriteReply internal_reply = service_->CommitFileWrite(internal_req);
     FillStatus(internal_reply.status, response->mutable_status());
+    LogFailure("CommitFileWrite",
+               internal_reply.status,
+               "inode_id=" + std::to_string(request->inode_id()) +
+                   " txid=" + request->txid() +
+                   " file_size=" + std::to_string(request->file_size()) +
+                   " expected_version=" + std::to_string(request->expected_version()));
     if (internal_reply.status.ok()) {
         FillFileMeta(internal_reply.meta, response->mutable_meta());
     }

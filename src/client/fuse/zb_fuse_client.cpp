@@ -14,6 +14,7 @@
 #include <ctime>
 #include <fcntl.h>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <limits>
@@ -76,6 +77,32 @@ int StatusToErrno(const zb::rpc::MdsStatus& status) {
         default:
             return EIO;
     }
+}
+
+void LogMdsFailure(const char* op, const char* path, const zb::rpc::MdsStatus& status) {
+    std::cerr << "[fuse] " << op
+              << " failed: path=" << (path ? path : "")
+              << " code=" << static_cast<int>(status.code())
+              << " msg=" << status.message()
+              << " errno=" << StatusToErrno(status)
+              << std::endl;
+}
+
+void LogDataFailure(const char* op,
+                    const char* path,
+                    uint64_t inode_id,
+                    const zb::rpc::ReplicaLocation& anchor,
+                    const zb::rpc::Status& status) {
+    std::cerr << "[fuse] " << op
+              << " failed: path=" << (path ? path : "")
+              << " inode_id=" << inode_id
+              << " node_id=" << anchor.node_id()
+              << " disk_id=" << anchor.disk_id()
+              << " tier=" << static_cast<int>(anchor.storage_tier())
+              << " code=" << static_cast<int>(status.code())
+              << " msg=" << status.message()
+              << " errno=" << StatusToErrno(status)
+              << std::endl;
 }
 
 bool NormalizeMountPath(const std::string& path, std::string* normalized) {
@@ -1614,6 +1641,7 @@ int FuseOpen(const char* path, struct fuse_file_info* fi) {
     zb::rpc::MdsStatus status;
     uint64_t handle_id = 0;
     if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &location, &open_anchor, &status)) {
+        LogMdsFailure("Open", path, status);
         return -StatusToErrno(status);
     }
     const zb::rpc::InodeAttr& attr = location.attr();
@@ -1626,6 +1654,7 @@ int FuseOpen(const char* path, struct fuse_file_info* fi) {
         zb::rpc::ReplicaLocation anchor = open_anchor;
         if (anchor.node_id().empty() || anchor.disk_id().empty()) {
             if (!GetOrFetchAnchor(state, attr.inode_id(), &anchor, &status)) {
+                LogMdsFailure("Open.GetOrFetchAnchor", path, status);
                 return -StatusToErrno(status);
             }
         } else {
@@ -1657,6 +1686,10 @@ int FuseOpen(const char* path, struct fuse_file_info* fi) {
                                     &object_unit_size,
                                     &file_meta_version,
                                     &node_errno)) {
+            zb::rpc::Status st;
+            st.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+            st.set_message(std::strerror(node_errno));
+            LogDataFailure("Open.GetOrFetchNodeFileMeta", path, attr.inode_id(), anchor, st);
             return -node_errno;
         }
     }
@@ -1686,12 +1719,14 @@ int FuseCreate(const char* path, mode_t mode, struct fuse_file_info* fi) {
     zb::rpc::ReplicaLocation create_anchor;
     zb::rpc::MdsStatus status;
     if (!state->mds.Create(path, static_cast<uint32_t>(mode), ctx->uid, ctx->gid, &create_location, &create_anchor, &status)) {
+        LogMdsFailure("Create", path, status);
         return -StatusToErrno(status);
     }
     uint64_t handle_id = 0;
     zb::rpc::FileLocationView open_location;
     zb::rpc::ReplicaLocation open_anchor;
     if (!state->mds.Open(path, static_cast<uint32_t>(fi->flags), &handle_id, &open_location, &open_anchor, &status)) {
+        LogMdsFailure("Create.OpenAfterCreate", path, status);
         return -StatusToErrno(status);
     }
     const zb::rpc::InodeAttr& attr = open_location.attr();
@@ -1706,6 +1741,7 @@ int FuseCreate(const char* path, mode_t mode, struct fuse_file_info* fi) {
     }
     if (anchor.node_id().empty() || anchor.disk_id().empty()) {
         if (!GetOrFetchAnchor(state, attr.inode_id(), &anchor, &status)) {
+            LogMdsFailure("Create.GetOrFetchAnchor", path, status);
             return -StatusToErrno(status);
         }
     } else {
@@ -1730,6 +1766,10 @@ int FuseCreate(const char* path, mode_t mode, struct fuse_file_info* fi) {
                                 &object_unit_size,
                                 &file_meta_version,
                                 &node_errno)) {
+        zb::rpc::Status st;
+        st.set_code(zb::rpc::STATUS_INTERNAL_ERROR);
+        st.set_message(std::strerror(node_errno));
+        LogDataFailure("Create.GetOrFetchNodeFileMeta", path, attr.inode_id(), anchor, st);
         return -node_errno;
     }
     fi->fh = handle_id;
@@ -1943,11 +1983,13 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
     zb::rpc::MdsStatus status;
     uint64_t inode_id = ResolveInode(fi, path, state, &status);
     if (inode_id == 0) {
+        LogMdsFailure("Write.ResolveInode", path, status);
         return -StatusToErrno(status);
     }
 
     zb::rpc::FileLocationView location;
     if (!state->mds.GetFileLocationView(inode_id, &location, &status)) {
+        LogMdsFailure("Write.GetFileLocationView", path, status);
         return -StatusToErrno(status);
     }
     if (IsArchivedReadOnly(location)) {
@@ -1957,6 +1999,7 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
     if (!SelectLocationForIo(location, &anchor)) {
         status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
         status.set_message("GetFileLocation returned empty location");
+        LogMdsFailure("Write.SelectLocationForIo", path, status);
         return -StatusToErrno(status);
     }
     UpdateInodeAnchorCache(state, inode_id, anchor);
@@ -1984,6 +2027,7 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
                                              &txid,
                                              &slices,
                                              &data_status)) {
+        LogDataFailure("Write.AllocateFileWrite", path, inode_id, anchor, data_status);
         return -StatusToErrno(data_status);
     }
     const uint64_t object_unit_size =
@@ -2005,6 +2049,10 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
         const zb::rpc::ReplicaLocation replica = BuildObjectReplicaFromAnchor(anchor, slice.object_id());
         std::string error;
         if (!state->data_nodes.Write(replica, slice.object_offset(), data, &error)) {
+            zb::rpc::Status st;
+            st.set_code(zb::rpc::STATUS_IO_ERROR);
+            st.set_message(error);
+            LogDataFailure("Write.WriteObject", path, inode_id, replica, st);
             return -EIO;
         }
         cursor += write_len;
@@ -2025,6 +2073,7 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
                                            static_cast<uint64_t>(std::time(nullptr)),
                                            &committed_meta,
                                            &data_status)) {
+        LogDataFailure("Write.CommitFileWrite", path, inode_id, anchor, data_status);
         return -StatusToErrno(data_status);
     }
     UpdateCachedFileMeta(state,
