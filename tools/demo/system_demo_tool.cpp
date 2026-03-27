@@ -494,6 +494,22 @@ std::string FormatDouble(double value, int precision = 2) {
     return oss.str();
 }
 
+std::string FormatLatencyHuman(uint64_t latency_us) {
+    std::ostringstream oss;
+    if (latency_us < 1000ULL) {
+        oss << latency_us << "us";
+        return oss.str();
+    }
+    const double latency_ms = static_cast<double>(latency_us) / 1000.0;
+    if (latency_ms < 1000.0) {
+        oss << std::fixed << std::setprecision(2) << latency_ms << "ms";
+        return oss.str();
+    }
+    const double latency_s = latency_ms / 1000.0;
+    oss << std::fixed << std::setprecision(2) << latency_s << "s";
+    return oss.str();
+}
+
 const char* InodeTypeToString(zb::rpc::InodeType type) {
     switch (type) {
     case zb::rpc::INODE_FILE:
@@ -515,6 +531,32 @@ const char* ArchiveStateToString(zb::rpc::InodeArchiveState state) {
         return "已归档";
     default:
         return "未知";
+    }
+}
+
+const char* InodeTypeToEnglishString(zb::rpc::InodeType type) {
+    switch (type) {
+        case zb::rpc::INODE_FILE:
+            return "file";
+        case zb::rpc::INODE_DIR:
+            return "directory";
+        default:
+            return "unknown";
+    }
+}
+
+const char* ArchiveStateToEnglishString(zb::rpc::InodeArchiveState state) {
+    switch (state) {
+        case zb::rpc::ARCHIVE_PENDING:
+            return "pending_archive";
+        case zb::rpc::ARCHIVE_IN_PROGRESS:
+            return "archiving";
+        case zb::rpc::ARCHIVE_ARCHIVED:
+            return "archived";
+        case zb::rpc::ARCHIVE_RESTORED:
+            return "restored";
+        default:
+            return "unknown";
     }
 }
 
@@ -1950,14 +1992,15 @@ private:
                                                     : static_cast<double>(success_count) / static_cast<double>(sample_count),
                                   4)
                   << '\n';
-        std::cout << "total_query_latency_us=" << total_latency_us << '\n';
-        std::cout << "avg_query_latency_us=" << (sample_count == 0 ? 0 : (total_latency_us / sample_count)) << '\n';
-        std::cout << "min_query_latency_us=" << (sample_count == 0 ? 0 : min_latency_us) << '\n';
-        std::cout << "max_query_latency_us=" << max_latency_us << '\n';
+        std::cout << "total_query_latency=" << FormatLatencyHuman(total_latency_us) << '\n';
+        std::cout << "avg_query_latency="
+                  << FormatLatencyHuman(sample_count == 0 ? 0 : (total_latency_us / sample_count)) << '\n';
+        std::cout << "min_query_latency=" << FormatLatencyHuman(sample_count == 0 ? 0 : min_latency_us) << '\n';
+        std::cout << "max_query_latency=" << FormatLatencyHuman(max_latency_us) << '\n';
         for (const auto& sample : samples) {
             std::cout << "样本序号=" << sample.index << '\n';
             std::cout << "查询成功=" << (sample.ok ? "true" : "false") << '\n';
-            std::cout << "查询耗时微秒=" << sample.latency_us << '\n';
+            std::cout << "查询耗时=" << FormatLatencyHuman(sample.latency_us) << '\n';
             std::cout << "状态码=" << static_cast<int>(sample.reply.status().code()) << '\n';
             std::cout << "状态信息=" << (sample.ok ? "OK" : sample.error_message) << '\n';
             if (!sample.ok) {
@@ -1970,7 +2013,7 @@ private:
             std::cout << "  generation_id=" << sample.reply.generation_id() << '\n';
             std::cout << "  inode_id=" << sample.reply.inode_id() << '\n';
             std::cout << "  file_name=" << sample.reply.file_name() << '\n';
-            std::cout << "  type=" << InodeTypeToString(attr.type()) << '\n';
+            std::cout << "  type=" << InodeTypeToEnglishString(attr.type()) << '\n';
             std::cout << "  mode=" << attr.mode() << '\n';
             std::cout << "  uid=" << attr.uid() << '\n';
             std::cout << "  gid=" << attr.gid() << '\n';
@@ -1980,10 +2023,9 @@ private:
             std::cout << "  mtime=" << attr.mtime() << '\n';
             std::cout << "  ctime=" << attr.ctime() << '\n';
             std::cout << "  nlink=" << attr.nlink() << '\n';
-            std::cout << "  object_unit_size=" << attr.object_unit_size() << '\n';
             std::cout << "  replica=" << attr.replica() << '\n';
             std::cout << "  version=" << attr.version() << '\n';
-            std::cout << "  file_archive_state=" << ArchiveStateToString(attr.file_archive_state()) << '\n';
+            std::cout << "  file_archive_state=" << ArchiveStateToEnglishString(attr.file_archive_state()) << '\n';
             std::cout << "}\n";
         }
         return failure_count == 0;
