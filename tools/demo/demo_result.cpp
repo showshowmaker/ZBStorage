@@ -187,7 +187,6 @@ void RenderResult(const DemoRunResult& result) {
     }
 
     PrintMetrics(result.metrics);
-    PrintChecks(result.checks);
     PrintRawBlock("原始输出", result.raw_stdout);
     PrintRawBlock("错误输出", result.raw_stderr);
 }
