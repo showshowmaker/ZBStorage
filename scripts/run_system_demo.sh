@@ -3,9 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
+RUN_DIR="${RUN_DIR:-${ROOT_DIR}/.demo_run}"
 MDS_ADDR="${MDS_ADDR:-127.0.0.1:9000}"
 SCHEDULER_ADDR="${SCHEDULER_ADDR:-127.0.0.1:9100}"
-MOUNT_POINT="${MOUNT_POINT:-${ROOT_DIR}/.demo_run/mnt}"
+MOUNT_POINT="${MOUNT_POINT:-${RUN_DIR}/mnt}"
 REAL_DIR_NAME="${REAL_DIR_NAME:-real}"
 VIRTUAL_DIR_NAME="${VIRTUAL_DIR_NAME:-virtual}"
 
