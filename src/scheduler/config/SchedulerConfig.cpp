@@ -81,12 +81,21 @@ SchedulerConfig SchedulerConfig::LoadFromFile(const std::string& path, std::stri
                 }
                 return {};
             }
+        } else if (key == "CLUSTER_VIEW_SNAPSHOT_INTERVAL_MS") {
+            if (!ParseUint64(value, &cfg.cluster_view_snapshot_interval_ms)) {
+                if (error) {
+                    *error = "Invalid CLUSTER_VIEW_SNAPSHOT_INTERVAL_MS at line " + std::to_string(line_no);
+                }
+                return {};
+            }
         } else if (key == "START_CMD_TEMPLATE") {
             cfg.start_cmd_template = value;
         } else if (key == "STOP_CMD_TEMPLATE") {
             cfg.stop_cmd_template = value;
         } else if (key == "REBOOT_CMD_TEMPLATE") {
             cfg.reboot_cmd_template = value;
+        } else if (key == "CLUSTER_VIEW_SNAPSHOT_PATH") {
+            cfg.cluster_view_snapshot_path = value;
         }
     }
 
