@@ -210,15 +210,15 @@ std::string FormatDurationSeconds(uint64_t seconds) {
 const char* MasstreeJobStateName(zb::rpc::MasstreeImportJobState state) {
     switch (state) {
     case zb::rpc::MASSTREE_IMPORT_JOB_PENDING:
-        return "???";
+        return "等待中";
     case zb::rpc::MASSTREE_IMPORT_JOB_RUNNING:
-        return "???";
+        return "运行中";
     case zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED:
-        return "???";
+        return "已完成";
     case zb::rpc::MASSTREE_IMPORT_JOB_FAILED:
-        return "??";
+        return "失败";
     default:
-        return "??";
+        return "未知";
     }
 }
 
@@ -290,9 +290,6 @@ struct TierStats {
 };
 
 struct TierIoDiagnostics {
-    bool has_host_space{false};
-    uint64_t host_capacity_bytes{0};
-    uint64_t host_available_bytes{0};
     TierStats real_stats;
     TierStats virtual_stats;
 };
@@ -871,7 +868,7 @@ private:
     }
 
     bool RunStatsScenario() {
-        PrintSection("TC-P1 ????");
+        PrintSection("TC-P1 全局统计");
         if (!RefreshClusterView()) {
             return false;
         }
@@ -882,38 +879,38 @@ private:
 
         zb::rpc::GetMasstreeClusterStatsReply masstree_stats;
         if (!mds_.GetMasstreeClusterStats(&masstree_stats)) {
-            std::cerr << "?? Masstree ??????: " << masstree_stats.status().message() << '\n';
+            std::cerr << "获取 Masstree 集群统计失败: " << masstree_stats.status().message() << '\n';
             return false;
         }
 
         const uint64_t online_logical_node_count = real_stats.logical_node_count + virtual_stats.logical_node_count;
-        std::cout << "????????=" << real_stats.physical_node_count << '\n';
-        std::cout << "????????=" << real_stats.logical_node_count << '\n';
-        std::cout << "??????=" << real_stats.disk_count << '\n';
-        PrintByteMetric("????????", real_stats.total_capacity_bytes);
-        PrintByteMetric("?????????", real_stats.used_capacity_bytes);
-        PrintByteMetric("?????????", real_stats.free_capacity_bytes);
+        std::cout << "真实层物理节点数=" << real_stats.physical_node_count << '\n';
+        std::cout << "真实层逻辑节点数=" << real_stats.logical_node_count << '\n';
+        std::cout << "真实层磁盘数=" << real_stats.disk_count << '\n';
+        PrintByteMetric("真实层总容量字节", real_stats.total_capacity_bytes);
+        PrintByteMetric("真实层已用容量字节", real_stats.used_capacity_bytes);
+        PrintByteMetric("真实层剩余容量字节", real_stats.free_capacity_bytes);
 
-        std::cout << "????????=" << virtual_stats.logical_node_count << '\n';
-        std::cout << "??????=" << virtual_stats.disk_count << '\n';
-        PrintByteMetric("????????", virtual_stats.total_capacity_bytes);
-        PrintByteMetric("?????????", virtual_stats.used_capacity_bytes);
-        PrintByteMetric("?????????", virtual_stats.free_capacity_bytes);
+        std::cout << "虚拟层逻辑节点数=" << virtual_stats.logical_node_count << '\n';
+        std::cout << "虚拟层磁盘数=" << virtual_stats.disk_count << '\n';
+        PrintByteMetric("虚拟层总容量字节", virtual_stats.total_capacity_bytes);
+        PrintByteMetric("虚拟层已用容量字节", virtual_stats.used_capacity_bytes);
+        PrintByteMetric("虚拟层剩余容量字节", virtual_stats.free_capacity_bytes);
 
-        std::cout << "???????=" << online_logical_node_count << '\n';
-        std::cout << "?????=" << masstree_stats.optical_node_count() << '\n';
-        std::cout << "?????=" << masstree_stats.optical_device_count() << '\n';
-        PrintDecimalMetric("???????", masstree_stats.total_capacity_bytes());
-        PrintDecimalMetric("????????", masstree_stats.used_capacity_bytes());
-        PrintDecimalMetric("????????", masstree_stats.free_capacity_bytes());
-        std::cout << "????=" << masstree_stats.total_file_count() << '\n';
-        PrintDecimalMetric("??????", masstree_stats.total_file_bytes());
-        std::cout << "????????=" << masstree_stats.avg_file_size_bytes()
+        std::cout << "在线逻辑节点数=" << online_logical_node_count << '\n';
+        std::cout << "光盘节点数=" << masstree_stats.optical_node_count() << '\n';
+        std::cout << "光盘设备数=" << masstree_stats.optical_device_count() << '\n';
+        PrintDecimalMetric("冷层总容量字节", masstree_stats.total_capacity_bytes());
+        PrintDecimalMetric("冷层已用容量字节", masstree_stats.used_capacity_bytes());
+        PrintDecimalMetric("冷层剩余容量字节", masstree_stats.free_capacity_bytes());
+        std::cout << "总文件数=" << masstree_stats.total_file_count() << '\n';
+        PrintDecimalMetric("总文件字节数", masstree_stats.total_file_bytes());
+        std::cout << "平均文件大小字节=" << masstree_stats.avg_file_size_bytes()
                   << " (" << FormatBytes(masstree_stats.avg_file_size_bytes()) << ")\n";
-        PrintDecimalMetric("???????", masstree_stats.total_metadata_bytes());
-        std::cout << "????????=" << masstree_stats.min_file_size_bytes()
+        PrintDecimalMetric("总元数据字节数", masstree_stats.total_metadata_bytes());
+        std::cout << "最小文件大小字节=" << masstree_stats.min_file_size_bytes()
                   << " (" << FormatBytes(masstree_stats.min_file_size_bytes()) << ")\n";
-        std::cout << "????????=" << masstree_stats.max_file_size_bytes()
+        std::cout << "最大文件大小字节=" << masstree_stats.max_file_size_bytes()
                   << " (" << FormatBytes(masstree_stats.max_file_size_bytes()) << ")\n";
         return true;
     }
@@ -1380,17 +1377,6 @@ private:
             return false;
         }
         CollectTierStats(nodes_, &diagnostics->real_stats, &diagnostics->virtual_stats);
-        std::error_code ec;
-        const fs::space_info info = fs::space(fs::path(FLAGS_mount_point), ec);
-        if (!ec) {
-            diagnostics->has_host_space = true;
-            diagnostics->host_capacity_bytes = info.capacity;
-            diagnostics->host_available_bytes = info.available;
-        } else {
-            diagnostics->has_host_space = false;
-            diagnostics->host_capacity_bytes = 0;
-            diagnostics->host_available_bytes = 0;
-        }
         return true;
     }
 
@@ -1405,9 +1391,6 @@ private:
 
     void PrintTierIoDiagnostics(const TierIoOptions& options, const TierIoDiagnostics& diagnostics) {
         std::cout << "挂载点=" << FLAGS_mount_point << std::endl;
-        if (diagnostics.has_host_space) {
-            PrintByteMetric("宿主机文件系统可用字节", diagnostics.host_available_bytes);
-        }
         const TierStats& tier_stats = SelectTierStats(options.expected_tier, diagnostics);
         PrintByteMetric(DisplayTierName(options.expected_tier) + "层总容量字节", tier_stats.total_capacity_bytes);
         PrintByteMetric(DisplayTierName(options.expected_tier) + "层已用容量字节", tier_stats.used_capacity_bytes);
@@ -1418,22 +1401,17 @@ private:
                                            const TierIoDiagnostics& diagnostics) const {
         const TierStats& tier_stats = SelectTierStats(options.expected_tier, diagnostics);
         std::ostringstream oss;
-        if (diagnostics.has_host_space && diagnostics.host_available_bytes < options.file_size_bytes) {
-            oss << "宿主机挂载文件系统可用空间不足，当前可用="
-                << diagnostics.host_available_bytes << " (" << FormatBytes(diagnostics.host_available_bytes)
-                << ")，待写入=" << options.file_size_bytes << " (" << FormatBytes(options.file_size_bytes) << ")";
-            return oss.str();
-        }
         if (tier_stats.free_capacity_bytes < options.file_size_bytes) {
             oss << DisplayTierName(options.expected_tier)
                 << "层的可写剩余容量不足，当前剩余="
                 << tier_stats.free_capacity_bytes << " (" << FormatBytes(tier_stats.free_capacity_bytes)
                 << ")，待写入=" << options.file_size_bytes << " (" << FormatBytes(options.file_size_bytes)
-                << ")。这类场景通常会被 MDS/FUSE 映射成 ENOSPC，而不一定是宿主机磁盘真正写满。";
+                << ")。这类场景通常会被 MDS/FUSE 映射成 ENOSPC。";
             return oss.str();
         }
-        oss << "本次 ENOSPC 更可能来自 MDS 的放置策略拒绝。FUSE 会把 NO_SPACE_REAL_POLICY/NO_SPACE_VIRTUAL_POLICY "
-               "映射成 errno=28，因此即使宿主机磁盘还有空间，也可能返回 No space left on device。";
+        oss << DisplayTierName(options.expected_tier)
+            << "层的汇总容量看起来仍有剩余，本次 ENOSPC 更可能来自 MDS 的放置策略拒绝或底层节点写入失败。"
+               "FUSE 会把 NO_SPACE_REAL_POLICY/NO_SPACE_VIRTUAL_POLICY 映射成 errno=28。";
         return oss.str();
     }
 
