@@ -175,9 +175,10 @@ const char* NoSpaceMessageForPlacementTarget(zb::rpc::PathPlacementTarget target
 void LogRequestFailure(const char* method,
                        const std::string& path,
                        const std::string& error,
-                       zb::rpc::PathPlacementTarget target = zb::rpc::PATH_PLACEMENT_ANY) {
+                       bool has_target = false,
+                       zb::rpc::PathPlacementTarget target = zb::rpc::PATH_PLACEMENT_REAL_ONLY) {
     std::cerr << "[mds] " << method << " failed: path=" << path;
-    if (target != zb::rpc::PATH_PLACEMENT_ANY) {
+    if (has_target) {
         std::cerr << " target=" << static_cast<int>(target);
     }
     if (!error.empty()) {
@@ -615,7 +616,8 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
         LogRequestFailure("Create.SelectFilePrimaryLocation",
                           request->path(),
                           error,
-                          has_strict_tier_policy ? placement_policy.target() : zb::rpc::PATH_PLACEMENT_ANY);
+                          has_strict_tier_policy,
+                          placement_policy.target());
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
     }

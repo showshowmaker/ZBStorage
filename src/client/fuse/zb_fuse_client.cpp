@@ -93,6 +93,25 @@ void LogDataFailure(const char* op,
                     uint64_t inode_id,
                     const zb::rpc::ReplicaLocation& anchor,
                     const zb::rpc::Status& status) {
+    int mapped_errno = EIO;
+    switch (status.code()) {
+        case zb::rpc::STATUS_OK:
+            mapped_errno = 0;
+            break;
+        case zb::rpc::STATUS_INVALID_ARGUMENT:
+            mapped_errno = EINVAL;
+            break;
+        case zb::rpc::STATUS_NOT_FOUND:
+            mapped_errno = ENOENT;
+            break;
+        case zb::rpc::STATUS_IO_ERROR:
+            mapped_errno = (status.message() == "VERSION_MISMATCH") ? EAGAIN : EIO;
+            break;
+        case zb::rpc::STATUS_INTERNAL_ERROR:
+        default:
+            mapped_errno = EIO;
+            break;
+    }
     std::cerr << "[fuse] " << op
               << " failed: path=" << (path ? path : "")
               << " inode_id=" << inode_id
@@ -101,7 +120,7 @@ void LogDataFailure(const char* op,
               << " tier=" << static_cast<int>(anchor.storage_tier())
               << " code=" << static_cast<int>(status.code())
               << " msg=" << status.message()
-              << " errno=" << StatusToErrno(status)
+              << " errno=" << mapped_errno
               << std::endl;
 }
 
