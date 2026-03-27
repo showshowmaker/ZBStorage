@@ -206,28 +206,28 @@ std::string FormatDurationSeconds(uint64_t seconds) {
 const char* MasstreeJobStateName(zb::rpc::MasstreeImportJobState state) {
     switch (state) {
     case zb::rpc::MASSTREE_IMPORT_JOB_PENDING:
-        return "PENDING";
+        return "待开始";
     case zb::rpc::MASSTREE_IMPORT_JOB_RUNNING:
-        return "RUNNING";
+        return "运行中";
     case zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED:
-        return "COMPLETED";
+        return "已完成";
     case zb::rpc::MASSTREE_IMPORT_JOB_FAILED:
-        return "FAILED";
+        return "失败";
     default:
-        return "UNKNOWN";
+        return "未知";
     }
 }
 
 std::string NodeTypeName(zb::rpc::NodeType type) {
     switch (type) {
         case zb::rpc::NODE_REAL:
-            return "real";
+            return "真实";
         case zb::rpc::NODE_VIRTUAL_POOL:
-            return "virtual";
+            return "虚拟";
         case zb::rpc::NODE_OPTICAL:
-            return "optical";
+            return "光盘";
         default:
-            return "unknown";
+            return "未知";
     }
 }
 
@@ -292,6 +292,10 @@ void PrintByteMetric(const std::string& key, uint64_t value) {
 
 void PrintDecimalMetric(const std::string& key, const std::string& value) {
     std::cout << key << "=" << FormatDecimalBytes(value) << '\n';
+}
+
+void PrintBoolMetric(const std::string& key, bool value) {
+    std::cout << key << "=" << (value ? "是" : "否") << '\n';
 }
 
 void AddCheck(std::vector<CheckResult>* checks,
@@ -409,24 +413,24 @@ std::string FormatDouble(double value, int precision = 2) {
 const char* InodeTypeToString(zb::rpc::InodeType type) {
     switch (type) {
     case zb::rpc::INODE_FILE:
-        return "file";
+        return "文件";
     case zb::rpc::INODE_DIR:
-        return "dir";
+        return "目录";
     default:
-        return "unknown";
+        return "未知";
     }
 }
 
 const char* ArchiveStateToString(zb::rpc::InodeArchiveState state) {
     switch (state) {
     case zb::rpc::INODE_ARCHIVE_PENDING:
-        return "pending";
+        return "待归档";
     case zb::rpc::INODE_ARCHIVE_ARCHIVING:
-        return "archiving";
+        return "归档中";
     case zb::rpc::INODE_ARCHIVE_ARCHIVED:
-        return "archived";
+        return "已归档";
     default:
-        return "unknown";
+        return "未知";
     }
 }
 
@@ -748,16 +752,16 @@ private:
     }
 
     bool RunHealthCheck() {
-        PrintSection("Health Check");
+        PrintSection("环境健康检查");
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup("/", &attr, &status)) {
-            std::cerr << "MDS root lookup failed: " << status.message() << '\n';
+            std::cerr << "查询 MDS 根目录失败: " << status.message() << '\n';
             return false;
         }
-        std::cout << "mds_root_inode=" << attr.inode_id() << '\n';
-        std::cout << "scheduler_generation=" << cluster_generation_ << '\n';
-        std::cout << "cluster_nodes=" << nodes_.size() << '\n';
+        std::cout << "MDS根inode=" << attr.inode_id() << '\n';
+        std::cout << "调度代次=" << cluster_generation_ << '\n';
+        std::cout << "集群节点数=" << nodes_.size() << '\n';
 
         const std::string real_root = BuildTierLogicalPath(FLAGS_real_dir);
         const std::string virtual_root = BuildTierLogicalPath(FLAGS_virtual_dir);
@@ -767,9 +771,9 @@ private:
         if (!CheckTierDirectory(virtual_root)) {
             return false;
         }
-        std::cout << "mount_point=" << FLAGS_mount_point << '\n';
-        std::cout << "real_root=" << real_root << '\n';
-        std::cout << "virtual_root=" << virtual_root << '\n';
+        std::cout << "挂载点=" << FLAGS_mount_point << '\n';
+        std::cout << "真实层根目录=" << real_root << '\n';
+        std::cout << "虚拟层根目录=" << virtual_root << '\n';
         return true;
     }
 
@@ -780,7 +784,7 @@ private:
     }
 
     bool RunStatsScenario() {
-        PrintSection("TC-P1 Cluster Stats");
+        PrintSection("TC-P1 全局统计");
         if (!RefreshClusterView()) {
             return false;
         }
@@ -820,41 +824,41 @@ private:
 
         zb::rpc::GetMasstreeClusterStatsReply masstree_stats;
         if (!mds_.GetMasstreeClusterStats(&masstree_stats)) {
-            std::cerr << "GetMasstreeClusterStats failed: " << masstree_stats.status().message() << '\n';
+            std::cerr << "获取 Masstree 集群统计失败: " << masstree_stats.status().message() << '\n';
             return false;
         }
 
         const uint64_t online_logical_node_count = real_stats.logical_node_count + virtual_stats.logical_node_count;
-        std::cout << "scheduler_generation=" << cluster_generation_ << '\n';
-        std::cout << "scheduler_physical_node_count=" << nodes_.size() << '\n';
-        std::cout << "real_physical_node_count=" << real_stats.physical_node_count << '\n';
-        std::cout << "real_logical_node_count=" << real_stats.logical_node_count << '\n';
-        std::cout << "real_disk_count=" << real_stats.disk_count << '\n';
-        PrintByteMetric("real_total_capacity_bytes", real_stats.total_capacity_bytes);
-        PrintByteMetric("real_used_capacity_bytes", real_stats.used_capacity_bytes);
-        PrintByteMetric("real_free_capacity_bytes", real_stats.free_capacity_bytes);
+        std::cout << "调度代次=" << cluster_generation_ << '\n';
+        std::cout << "调度物理节点数=" << nodes_.size() << '\n';
+        std::cout << "真实层物理节点数=" << real_stats.physical_node_count << '\n';
+        std::cout << "真实层逻辑节点数=" << real_stats.logical_node_count << '\n';
+        std::cout << "真实层磁盘数=" << real_stats.disk_count << '\n';
+        PrintByteMetric("真实层总容量字节", real_stats.total_capacity_bytes);
+        PrintByteMetric("真实层已用容量字节", real_stats.used_capacity_bytes);
+        PrintByteMetric("真实层剩余容量字节", real_stats.free_capacity_bytes);
 
-        std::cout << "virtual_pool_count=" << virtual_stats.physical_node_count << '\n';
-        std::cout << "virtual_logical_node_count=" << virtual_stats.logical_node_count << '\n';
-        std::cout << "virtual_disk_count=" << virtual_stats.disk_count << '\n';
-        PrintByteMetric("virtual_total_capacity_bytes", virtual_stats.total_capacity_bytes);
-        PrintByteMetric("virtual_used_capacity_bytes", virtual_stats.used_capacity_bytes);
-        PrintByteMetric("virtual_free_capacity_bytes", virtual_stats.free_capacity_bytes);
+        std::cout << "虚拟池数=" << virtual_stats.physical_node_count << '\n';
+        std::cout << "虚拟层逻辑节点数=" << virtual_stats.logical_node_count << '\n';
+        std::cout << "虚拟层磁盘数=" << virtual_stats.disk_count << '\n';
+        PrintByteMetric("虚拟层总容量字节", virtual_stats.total_capacity_bytes);
+        PrintByteMetric("虚拟层已用容量字节", virtual_stats.used_capacity_bytes);
+        PrintByteMetric("虚拟层剩余容量字节", virtual_stats.free_capacity_bytes);
 
-        std::cout << "online_logical_node_count=" << online_logical_node_count << '\n';
-        std::cout << "optical_node_count=" << masstree_stats.optical_node_count() << '\n';
-        std::cout << "optical_device_count=" << masstree_stats.optical_device_count() << '\n';
-        PrintDecimalMetric("cold_total_capacity_bytes", masstree_stats.total_capacity_bytes());
-        PrintDecimalMetric("cold_used_capacity_bytes", masstree_stats.used_capacity_bytes());
-        PrintDecimalMetric("cold_free_capacity_bytes", masstree_stats.free_capacity_bytes());
-        std::cout << "total_file_count=" << masstree_stats.total_file_count() << '\n';
-        PrintDecimalMetric("total_file_bytes", masstree_stats.total_file_bytes());
-        std::cout << "avg_file_size_bytes=" << masstree_stats.avg_file_size_bytes()
+        std::cout << "在线逻辑节点数=" << online_logical_node_count << '\n';
+        std::cout << "光盘节点数=" << masstree_stats.optical_node_count() << '\n';
+        std::cout << "光盘设备数=" << masstree_stats.optical_device_count() << '\n';
+        PrintDecimalMetric("冷层总容量字节", masstree_stats.total_capacity_bytes());
+        PrintDecimalMetric("冷层已用容量字节", masstree_stats.used_capacity_bytes());
+        PrintDecimalMetric("冷层剩余容量字节", masstree_stats.free_capacity_bytes());
+        std::cout << "总文件数=" << masstree_stats.total_file_count() << '\n';
+        PrintDecimalMetric("总文件字节数", masstree_stats.total_file_bytes());
+        std::cout << "平均文件大小字节=" << masstree_stats.avg_file_size_bytes()
                   << " (" << FormatBytes(masstree_stats.avg_file_size_bytes()) << ")\n";
-        PrintDecimalMetric("total_metadata_bytes", masstree_stats.total_metadata_bytes());
-        std::cout << "min_file_size_bytes=" << masstree_stats.min_file_size_bytes()
+        PrintDecimalMetric("总元数据字节数", masstree_stats.total_metadata_bytes());
+        std::cout << "最小文件大小字节=" << masstree_stats.min_file_size_bytes()
                   << " (" << FormatBytes(masstree_stats.min_file_size_bytes()) << ")\n";
-        std::cout << "max_file_size_bytes=" << masstree_stats.max_file_size_bytes()
+        std::cout << "最大文件大小字节=" << masstree_stats.max_file_size_bytes()
                   << " (" << FormatBytes(masstree_stats.max_file_size_bytes()) << ")\n";
 
         std::vector<CheckResult> checks;
@@ -1026,7 +1030,7 @@ private:
 
         bool ok = true;
         for (const auto& check : checks) {
-            std::cout << "check." << check.name << "=" << (check.ok ? "PASS" : "FAIL")
+            std::cout << "校验." << check.name << "=" << (check.ok ? "通过" : "失败")
                       << " detail=\"" << check.detail << "\"\n";
             ok = ok && check.ok;
         }
@@ -1488,16 +1492,16 @@ private:
     }
 
     bool RunTierIoScenario(const TierIoOptions& options, std::string* saved_logical_path) {
-        PrintSection("POSIX " + options.expected_tier + " Demo");
-        std::cout << "target_dir=" << BuildTierLogicalPath(options.dir_name) + "/demo" << '\n';
-        std::cout << "repeat=" << options.repeat << '\n';
-        std::cout << "expected_file_size_bytes=" << options.file_size_bytes
+        PrintSection("POSIX " + options.expected_tier + " 层演示");
+        std::cout << "目标目录=" << BuildTierLogicalPath(options.dir_name) + "/demo" << '\n';
+        std::cout << "重复次数=" << options.repeat << '\n';
+        std::cout << "期望文件大小字节=" << options.file_size_bytes
                   << " (" << FormatBytes(options.file_size_bytes) << ")\n";
-        std::cout << "chunk_size_bytes=" << options.chunk_size_bytes
+        std::cout << "块大小字节=" << options.chunk_size_bytes
                   << " (" << FormatBytes(options.chunk_size_bytes) << ")\n";
-        std::cout << "verify_hash=" << (options.verify_hash ? "true" : "false") << '\n';
-        std::cout << "keep_file=" << (options.keep_file ? "true" : "false") << '\n';
-        std::cout << "sync_on_close=" << (options.sync_on_close ? "true" : "false") << '\n';
+        PrintBoolMetric("校验哈希", options.verify_hash);
+        PrintBoolMetric("保留文件", options.keep_file);
+        PrintBoolMetric("关闭前刷盘", options.sync_on_close);
 
         uint64_t total_written = 0;
         uint64_t total_read = 0;
@@ -1520,64 +1524,64 @@ private:
         const double write_throughput_mib_s = ThroughputMiBS(total_written, total_write_us);
         const double read_throughput_mib_s = ThroughputMiBS(total_read, total_read_us);
 
-        std::cout << "logical_path=" << last_result.logical_path << '\n';
-        std::cout << "mounted_path=" << last_result.mounted_path << '\n';
-        std::cout << "bytes_written=" << last_result.bytes_written << '\n';
-        std::cout << "bytes_read=" << last_result.bytes_read << '\n';
-        std::cout << "write_hash=" << FormatHex64(last_result.write_hash) << '\n';
-        std::cout << "read_hash=" << FormatHex64(last_result.read_hash) << '\n';
-        std::cout << "write_elapsed_ms=" << FormatDouble(static_cast<double>(last_result.write_elapsed_us) / 1000.0)
+        std::cout << "逻辑路径=" << last_result.logical_path << '\n';
+        std::cout << "挂载路径=" << last_result.mounted_path << '\n';
+        std::cout << "写入字节数=" << last_result.bytes_written << '\n';
+        std::cout << "读取字节数=" << last_result.bytes_read << '\n';
+        std::cout << "写入哈希=" << FormatHex64(last_result.write_hash) << '\n';
+        std::cout << "读取哈希=" << FormatHex64(last_result.read_hash) << '\n';
+        std::cout << "写入耗时毫秒=" << FormatDouble(static_cast<double>(last_result.write_elapsed_us) / 1000.0)
                   << '\n';
-        std::cout << "read_elapsed_ms=" << FormatDouble(static_cast<double>(last_result.read_elapsed_us) / 1000.0)
+        std::cout << "读取耗时毫秒=" << FormatDouble(static_cast<double>(last_result.read_elapsed_us) / 1000.0)
                   << '\n';
-        std::cout << "write_throughput_mib_s="
+        std::cout << "写入吞吐MiB每秒="
                   << FormatDouble(ThroughputMiBS(last_result.bytes_written, last_result.write_elapsed_us)) << '\n';
-        std::cout << "read_throughput_mib_s="
+        std::cout << "读取吞吐MiB每秒="
                   << FormatDouble(ThroughputMiBS(last_result.bytes_read, last_result.read_elapsed_us)) << '\n';
-        std::cout << "total_bytes_written=" << total_written << '\n';
-        std::cout << "total_bytes_read=" << total_read << '\n';
-        std::cout << "avg_write_elapsed_ms="
+        std::cout << "总写入字节数=" << total_written << '\n';
+        std::cout << "总读取字节数=" << total_read << '\n';
+        std::cout << "平均写入耗时毫秒="
                   << FormatDouble(static_cast<double>(total_write_us) / 1000.0 / options.repeat) << '\n';
-        std::cout << "avg_read_elapsed_ms="
+        std::cout << "平均读取耗时毫秒="
                   << FormatDouble(static_cast<double>(total_read_us) / 1000.0 / options.repeat) << '\n';
-        std::cout << "avg_write_throughput_mib_s=" << FormatDouble(write_throughput_mib_s) << '\n';
-        std::cout << "avg_read_throughput_mib_s=" << FormatDouble(read_throughput_mib_s) << '\n';
-        std::cout << "inode_id=" << last_result.inspection.inode_id << '\n';
-        std::cout << "attr_size_bytes=" << last_result.inspection.size_bytes << '\n';
-        std::cout << "node_id=" << last_result.inspection.node_id << '\n';
-        std::cout << "disk_id=" << last_result.inspection.disk_id << '\n';
-        std::cout << "resolved_node_type=" << last_result.inspection.actual_tier << '\n';
+        std::cout << "平均写入吞吐MiB每秒=" << FormatDouble(write_throughput_mib_s) << '\n';
+        std::cout << "平均读取吞吐MiB每秒=" << FormatDouble(read_throughput_mib_s) << '\n';
+        std::cout << "inode编号=" << last_result.inspection.inode_id << '\n';
+        std::cout << "属性大小字节=" << last_result.inspection.size_bytes << '\n';
+        std::cout << "节点编号=" << last_result.inspection.node_id << '\n';
+        std::cout << "磁盘编号=" << last_result.inspection.disk_id << '\n';
+        std::cout << "解析节点类型=" << last_result.inspection.actual_tier << '\n';
 
         std::vector<CheckResult> checks;
         AddCheck(&checks,
-                 "file_size_written",
+                 "写入文件大小",
                  last_result.bytes_written == options.file_size_bytes,
-                 "actual=" + std::to_string(last_result.bytes_written) +
-                     " expected=" + std::to_string(options.file_size_bytes));
+                 "实际值=" + std::to_string(last_result.bytes_written) +
+                     " 期望值=" + std::to_string(options.file_size_bytes));
         AddCheck(&checks,
-                 "file_size_read",
+                 "读取文件大小",
                  last_result.bytes_read == options.file_size_bytes,
-                 "actual=" + std::to_string(last_result.bytes_read) +
-                     " expected=" + std::to_string(options.file_size_bytes));
+                 "实际值=" + std::to_string(last_result.bytes_read) +
+                     " 期望值=" + std::to_string(options.file_size_bytes));
         AddCheck(&checks,
-                 "file_hash_match",
+                 "读写哈希一致",
                  !options.verify_hash || last_result.read_hash == last_result.write_hash,
-                 options.verify_hash ? ("write=" + FormatHex64(last_result.write_hash) +
-                                        " read=" + FormatHex64(last_result.read_hash))
-                                     : "hash verification disabled");
+                 options.verify_hash ? ("写入=" + FormatHex64(last_result.write_hash) +
+                                        " 读取=" + FormatHex64(last_result.read_hash))
+                                     : "已关闭哈希校验");
         AddCheck(&checks,
-                 "attr_size_match",
+                 "属性大小一致",
                  last_result.inspection.size_bytes == options.file_size_bytes,
-                 "actual=" + std::to_string(last_result.inspection.size_bytes) +
-                     " expected=" + std::to_string(options.file_size_bytes));
+                 "实际值=" + std::to_string(last_result.inspection.size_bytes) +
+                     " 期望值=" + std::to_string(options.file_size_bytes));
         AddCheck(&checks,
-                 "location_tier",
+                 "落盘层级正确",
                  last_result.inspection.actual_tier == options.expected_tier,
-                 "actual=" + last_result.inspection.actual_tier + " expected=" + options.expected_tier);
+                 "实际值=" + last_result.inspection.actual_tier + " 期望值=" + options.expected_tier);
 
         bool ok = true;
         for (const auto& check : checks) {
-            std::cout << "check." << check.name << "=" << (check.ok ? "PASS" : "FAIL")
+            std::cout << "校验." << check.name << "=" << (check.ok ? "通过" : "失败")
                       << " detail=\"" << check.detail << "\"\n";
             ok = ok && check.ok;
         }
@@ -1591,7 +1595,7 @@ private:
                                   uint32_t attempt,
                                   TierIoIterationResult* result) {
         if (!result) {
-            std::cerr << "missing tier io result output\n";
+            std::cerr << "缺少层级读写结果输出对象\n";
             return false;
         }
         const std::string token = TimestampToken() + (options.repeat > 1 ? ("_" + std::to_string(attempt + 1)) : "");
@@ -1605,7 +1609,7 @@ private:
         std::error_code ec;
         fs::create_directories(mounted_dir, ec);
         if (ec) {
-            std::cerr << "create_directories failed for " << mounted_dir << ": " << ec.message() << '\n';
+            std::cerr << "创建目录失败 " << mounted_dir << ": " << ec.message() << '\n';
             return false;
         }
 
@@ -1654,7 +1658,7 @@ private:
         if (!options.keep_file) {
             fs::remove(fs::path(mounted_path), ec);
             if (ec) {
-                std::cerr << "remove failed for " << mounted_path << ": " << ec.message() << '\n';
+                std::cerr << "删除文件失败 " << mounted_path << ": " << ec.message() << '\n';
                 return false;
             }
         }
@@ -1663,10 +1667,10 @@ private:
 
     bool InspectKnownFile(const std::string& logical_path, const std::string& label) {
         if (logical_path.empty()) {
-            std::cerr << "no " << label << " file recorded yet\n";
+            std::cerr << "当前还没有记录过" << label << "文件\n";
             return false;
         }
-        PrintSection("Inspect " + label + " File");
+        PrintSection("检查" + label + "文件");
         return InspectFile(logical_path, "", nullptr);
     }
 
@@ -1676,30 +1680,30 @@ private:
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup(logical_path, &attr, &status)) {
-            std::cerr << "Lookup failed for " << logical_path << ": " << status.message() << '\n';
+            std::cerr << "查询路径失败 " << logical_path << ": " << status.message() << '\n';
             return false;
         }
         zb::rpc::FileLocationView view;
         if (!mds_.GetFileLocation(attr.inode_id(), &view, &status)) {
-            std::cerr << "GetFileLocation failed for inode " << attr.inode_id() << ": " << status.message() << '\n';
+            std::cerr << "获取文件位置失败，inode=" << attr.inode_id() << ": " << status.message() << '\n';
             return false;
         }
         const std::string node_id = view.disk_location().node_id();
         const std::string disk_id = view.disk_location().disk_id();
         const std::string base_node_id = BaseNodeIdFromVirtual(node_id);
         auto it = node_type_by_id_.find(base_node_id);
-        std::string actual_tier = "unknown";
+        std::string actual_tier = "未知";
         if (it != node_type_by_id_.end()) {
             actual_tier = NodeTypeName(it->second);
         } else if (node_id != base_node_id) {
-            actual_tier = "virtual";
+            actual_tier = "虚拟";
         }
 
-        std::cout << "inode_id=" << attr.inode_id() << '\n';
-        std::cout << "size=" << attr.size() << " (" << FormatBytes(attr.size()) << ")\n";
-        std::cout << "node_id=" << node_id << '\n';
-        std::cout << "disk_id=" << disk_id << '\n';
-        std::cout << "resolved_node_type=" << actual_tier << '\n';
+        std::cout << "inode编号=" << attr.inode_id() << '\n';
+        std::cout << "文件大小=" << attr.size() << " (" << FormatBytes(attr.size()) << ")\n";
+        std::cout << "节点编号=" << node_id << '\n';
+        std::cout << "磁盘编号=" << disk_id << '\n';
+        std::cout << "解析节点类型=" << actual_tier << '\n';
         if (out) {
             out->inode_id = attr.inode_id();
             out->size_bytes = attr.size();
@@ -1708,7 +1712,7 @@ private:
             out->actual_tier = actual_tier;
         }
         if (!expected_tier.empty() && actual_tier != expected_tier) {
-            std::cerr << "expected tier " << expected_tier << " but got " << actual_tier << '\n';
+            std::cerr << "期望层级为" << expected_tier << "，实际为" << actual_tier << '\n';
             return false;
         }
         return true;

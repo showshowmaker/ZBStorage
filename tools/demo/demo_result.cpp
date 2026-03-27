@@ -51,18 +51,19 @@ void ParseStdout(const std::string& stdout_text,
         if (line.empty() || StartsWith(line, "====")) {
             continue;
         }
-        if (StartsWith(line, "check.")) {
+        if (StartsWith(line, "check.") || StartsWith(line, "校验.")) {
             DemoCheck check;
             const size_t eq = line.find('=');
             if (eq == std::string::npos) {
                 continue;
             }
-            check.name = line.substr(6, eq - 6);
+            const size_t prefix_len = StartsWith(line, "校验.") ? std::string("校验.").size() : 6;
+            check.name = line.substr(prefix_len, eq - prefix_len);
             const size_t detail_pos = line.find(" detail=\"", eq + 1);
             const std::string status = detail_pos == std::string::npos
                                            ? line.substr(eq + 1)
                                            : line.substr(eq + 1, detail_pos - (eq + 1));
-            check.ok = status == "PASS";
+            check.ok = status == "PASS" || status == "通过";
             if (detail_pos != std::string::npos) {
                 const size_t detail_begin = detail_pos + 9;
                 const size_t detail_end = line.size() > 0 && line.back() == '"' ? line.size() - 1 : line.size();
@@ -103,7 +104,7 @@ void PrintChecks(const std::vector<DemoCheck>& checks) {
     }
     std::cout << "\n[校验结果]\n";
     for (const auto& check : checks) {
-        std::cout << (check.ok ? "PASS " : "FAIL ") << check.name;
+        std::cout << (check.ok ? "通过 " : "失败 ") << check.name;
         if (!check.detail.empty()) {
             std::cout << "  " << check.detail;
         }
@@ -174,7 +175,7 @@ void RenderResult(const DemoRunResult& result) {
     std::cout << "\n========================================\n";
     std::cout << " " << result.title << '\n';
     std::cout << "========================================\n";
-    std::cout << "结果: " << (result.ok ? "PASS" : "FAIL") << '\n';
+    std::cout << "结果: " << (result.ok ? "通过" : "失败") << '\n';
     if (!result.summary.empty()) {
         std::cout << "摘要: " << result.summary << '\n';
     }
