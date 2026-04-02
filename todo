@@ -1,1 +1,3 @@
-pjd-fstest测posix
+抓取存在的目录树、文件名和访问
+Inode大小固定为256KB
+dentry+Inode的设计是否需要改

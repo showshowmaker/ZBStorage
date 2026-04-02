@@ -2007,6 +2007,7 @@ private:
             const auto& attr = sample.reply.attr();
             std::cout << "文件元数据={\n";
             std::cout << "  namespace_id=" << sample.reply.namespace_id() << '\n';
+            std::cout << "  full_path=" << sample.reply.full_path() << '\n';
             std::cout << "  path_prefix=" << sample.reply.path_prefix() << '\n';
             std::cout << "  generation_id=" << sample.reply.generation_id() << '\n';
             std::cout << "  inode_id=" << sample.reply.inode_id() << '\n';

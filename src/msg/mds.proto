@@ -491,6 +491,7 @@ message GetRandomMasstreeFileAttrReply {
   uint64 inode_id = 5;
   InodeAttr attr = 6;
   string file_name = 7;
+  string full_path = 8;
 }
 
 message GetMasstreeClusterStatsRequest {

@@ -99,6 +99,34 @@ std::string BuildMasstreeFileName(uint64_t file_index) {
     return oss.str();
 }
 
+std::string BuildMasstreeDirName(char prefix, uint64_t value) {
+    std::ostringstream oss;
+    oss << prefix << std::setw(6) << std::setfill('0') << value;
+    return oss.str();
+}
+
+std::string BuildMasstreeFullPath(const MasstreeNamespaceManifest& manifest, uint64_t file_index) {
+    std::string full_path = manifest.path_prefix;
+    if (full_path.empty()) {
+        full_path = "/";
+    }
+    const uint64_t max_files_per_leaf = std::max<uint64_t>(1, manifest.max_files_per_leaf_dir);
+    const uint64_t max_subdirs_per_dir = std::max<uint64_t>(1, manifest.max_subdirs_per_dir);
+    const uint64_t leaf = file_index / max_files_per_leaf;
+    const uint64_t level1 = leaf / max_subdirs_per_dir;
+    const uint64_t slot = leaf % max_subdirs_per_dir;
+    if (full_path.size() > 1 && full_path.back() == '/') {
+        full_path.pop_back();
+    }
+    full_path.append("/");
+    full_path.append(BuildMasstreeDirName('d', level1));
+    full_path.append("/");
+    full_path.append(BuildMasstreeDirName('s', slot));
+    full_path.append("/");
+    full_path.append(BuildMasstreeFileName(file_index));
+    return full_path;
+}
+
 uint32_t ComputeObjectCount(uint64_t file_size, uint64_t object_unit_size) {
     if (file_size == 0 || object_unit_size == 0) {
         return 0;
@@ -1347,7 +1375,8 @@ void MdsServiceImpl::GetRandomMasstreeFileAttr(google::protobuf::RpcController* 
     uint64_t inode_id = 0;
     zb::rpc::InodeAttr attr;
     std::string file_name;
-    if (!PickRandomMasstreeFile(route, &inode_id, &attr, &file_name, &error)) {
+    std::string full_path;
+    if (!PickRandomMasstreeFile(route, &inode_id, &attr, &file_name, &full_path, &error)) {
         FillStatus(response->mutable_status(),
                    error.empty() ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
                    error.empty() ? "masstree file not found" : error);
@@ -1359,6 +1388,7 @@ void MdsServiceImpl::GetRandomMasstreeFileAttr(google::protobuf::RpcController* 
     response->set_generation_id(route.generation_id);
     response->set_inode_id(inode_id);
     response->set_file_name(file_name);
+    response->set_full_path(full_path);
     *response->mutable_attr() = attr;
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
@@ -2357,8 +2387,9 @@ bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
                                             uint64_t* inode_id,
                                             zb::rpc::InodeAttr* attr,
                                             std::string* file_name,
+                                            std::string* full_path,
                                             std::string* error) const {
-    if (!inode_id || !attr || !file_name) {
+    if (!inode_id || !attr || !file_name || !full_path) {
         if (error) {
             *error = "masstree random file outputs are null";
         }
@@ -2407,6 +2438,7 @@ bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
     *inode_id = candidate_inode;
     *attr = std::move(candidate_attr);
     *file_name = BuildMasstreeFileName(file_index);
+    *full_path = BuildMasstreeFullPath(manifest, file_index);
     if (error) {
         error->clear();
     }

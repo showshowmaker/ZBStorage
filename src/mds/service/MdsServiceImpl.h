@@ -235,6 +235,7 @@ private:
                                 uint64_t* inode_id,
                                 zb::rpc::InodeAttr* attr,
                                 std::string* file_name,
+                                std::string* full_path,
                                 std::string* error) const;
     void RunMasstreeImportWorker();
     void TrimMasstreeImportJobsLocked();
