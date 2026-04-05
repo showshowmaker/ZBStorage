@@ -1380,34 +1380,63 @@ void MdsServiceImpl::ImportMasstreeNamespace(google::protobuf::RpcController* cn
                    "path_prefix/namespace_id/generation_id is required");
         return;
     }
-    if (request->file_count() == 0) {
+    if (request->template_id().empty()) {
         FillStatus(response->mutable_status(),
                    zb::rpc::MDS_INVALID_ARGUMENT,
-                   "file_count must be greater than zero");
+                   "template_id is required");
         return;
     }
-
-    MasstreeImportService::Request import_request;
+    MasstreeImportService::TemplateImportRequest import_request;
     import_request.masstree_root = masstree_root_;
     import_request.namespace_id = request->namespace_id();
     import_request.generation_id = request->generation_id();
     import_request.path_prefix = request->path_prefix();
-    import_request.source_mode = request->source_mode();
-    import_request.path_list_file = request->path_list_file();
-    import_request.repeat_dir_prefix = request->repeat_dir_prefix();
     import_request.template_id = request->template_id();
     import_request.template_mode = request->template_mode();
     import_request.inode_start = request->inode_start();
-    import_request.file_count = request->file_count();
-    import_request.max_files_per_leaf_dir =
-        request->max_files_per_leaf_dir() > 0 ? request->max_files_per_leaf_dir() : 2048U;
-    import_request.max_subdirs_per_dir =
-        request->max_subdirs_per_dir() > 0 ? request->max_subdirs_per_dir() : 256U;
     import_request.verify_inode_samples = request->verify_inode_samples();
     import_request.verify_dentry_samples = request->verify_dentry_samples();
     import_request.publish_route = request->publish_route();
 
-    std::shared_ptr<MasstreeImportJob> job = EnqueueMasstreeImportJob(import_request);
+    std::shared_ptr<MasstreeImportJob> job = EnqueueMasstreeNamespaceImportJob(import_request);
+    response->set_job_id(job->job_id);
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "QUEUED");
+}
+
+void MdsServiceImpl::GenerateMasstreeTemplate(google::protobuf::RpcController* cntl_base,
+                                              const zb::rpc::GenerateMasstreeTemplateRequest* request,
+                                              zb::rpc::GenerateMasstreeTemplateReply* response,
+                                              google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!store_ || !request || !response) {
+        FillStatus(response ? response->mutable_status() : nullptr,
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "Service not initialized");
+        return;
+    }
+    if (masstree_root_.empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "masstree_root is not configured");
+        return;
+    }
+    if (request->template_id().empty() || request->path_list_file().empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INVALID_ARGUMENT,
+                   "template_id/path_list_file is required");
+        return;
+    }
+
+    MasstreeImportService::TemplateGenerationRequest generate_request;
+    generate_request.masstree_root = masstree_root_;
+    generate_request.template_id = request->template_id();
+    generate_request.path_list_file = request->path_list_file();
+    generate_request.repeat_dir_prefix = request->repeat_dir_prefix();
+    generate_request.verify_inode_samples = request->verify_inode_samples();
+    generate_request.verify_dentry_samples = request->verify_dentry_samples();
+
+    std::shared_ptr<MasstreeImportJob> job = EnqueueMasstreeTemplateJob(generate_request);
     response->set_job_id(job->job_id);
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "QUEUED");
 }
@@ -2137,27 +2166,10 @@ bool MdsServiceImpl::LoadDiskFileLocation(uint64_t inode_id,
             return true;
         }
     }
-    return LoadLegacyDiskFileLocation(inode_id, location, error);
-}
-
-bool MdsServiceImpl::LoadLegacyDiskFileLocation(uint64_t inode_id,
-                                                zb::rpc::DiskFileLocation* location,
-                                                std::string* error) const {
-    std::string payload;
-    std::string local_error;
-    if (!store_->LegacyGetDiskFileLocation(inode_id, &payload, &local_error)) {
-        if (error) {
-            *error = local_error;
-        }
-        return false;
+    if (error) {
+        error->clear();
     }
-    if (!MetaCodec::DecodeDiskFileLocation(payload, location)) {
-        if (error) {
-            *error = "invalid legacy disk file location payload";
-        }
-        return false;
-    }
-    return true;
+    return false;
 }
 
 bool MdsServiceImpl::BuildDiskFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
@@ -2212,17 +2224,6 @@ bool MdsServiceImpl::SaveDiskFileLocation(uint64_t inode_id,
             batch->Put(InodeKey(inode_id), encoded);
             return true;
         }
-        zb::rpc::InodeAttr attr;
-        if (MetaCodec::DecodeInodeAttrCompat(inode_payload, &attr, nullptr, nullptr) &&
-            AttrToUnifiedInodeRecord(attr, 0, UnifiedStorageTier::kDisk, &record, nullptr)) {
-            ApplyDiskLocationToUnifiedRecord(location, &record);
-            std::string encoded;
-            if (!EncodeUnifiedInodePayload(record, &encoded, nullptr)) {
-                return false;
-            }
-            batch->Put(InodeKey(inode_id), encoded);
-            return true;
-        }
         return false;
     } else if (!local_error.empty()) {
         return false;
@@ -2254,7 +2255,10 @@ bool MdsServiceImpl::DeleteDiskFileLocation(uint64_t inode_id,
             batch->Put(InodeKey(inode_id), encoded);
         }
     }
-    return store_->LegacyBatchDeleteDiskFileLocation(batch, inode_id, error);
+    if (error) {
+        error->clear();
+    }
+    return true;
 }
 
 bool MdsServiceImpl::LoadOpticalFileLocation(uint64_t inode_id,
@@ -2293,29 +2297,10 @@ bool MdsServiceImpl::LoadOpticalFileLocation(uint64_t inode_id,
             return true;
         }
     }
-    return LoadLegacyOpticalFileLocation(inode_id, location, error);
-}
-
-bool MdsServiceImpl::LoadLegacyOpticalFileLocation(uint64_t inode_id,
-                                                   zb::rpc::OpticalFileLocation* location,
-                                                   std::string* error) const {
-    std::string payload;
-    std::string local_error;
-    if (!store_->LegacyGetOpticalFileLocation(inode_id, &payload, &local_error)) {
-        if (error) {
-            *error = local_error;
-        }
-        return false;
+    if (error) {
+        error->clear();
     }
-    if (!MetaCodec::DecodeOpticalFileLocation(payload, location)) {
-        if (error) {
-            *error = "invalid legacy optical file location payload";
-        }
-        return false;
-    } else if (!local_error.empty()) {
-        return false;
-    }
-    return true;
+    return false;
 }
 
 bool MdsServiceImpl::BuildOpticalFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
@@ -2423,17 +2408,6 @@ bool MdsServiceImpl::SaveOpticalFileLocation(uint64_t inode_id,
             batch->Put(InodeKey(inode_id), encoded);
             return true;
         }
-        zb::rpc::InodeAttr attr;
-        if (MetaCodec::DecodeInodeAttrCompat(inode_payload, &attr, nullptr, nullptr) &&
-            AttrToUnifiedInodeRecord(attr, 0, UnifiedStorageTier::kOptical, &record, nullptr)) {
-            ApplyOpticalLocationToUnifiedRecord(location, &record);
-            std::string encoded;
-            if (!EncodeUnifiedInodePayload(record, &encoded, nullptr)) {
-                return false;
-            }
-            batch->Put(InodeKey(inode_id), encoded);
-            return true;
-        }
         return false;
     }
     return true;
@@ -2463,7 +2437,10 @@ bool MdsServiceImpl::DeleteOpticalFileLocation(uint64_t inode_id,
             batch->Put(InodeKey(inode_id), encoded);
         }
     }
-    return store_->LegacyBatchDeleteOpticalFileLocation(batch, inode_id, error);
+    if (error) {
+        error->clear();
+    }
+    return true;
 }
 
 bool MdsServiceImpl::BuildFileLocationView(uint64_t inode_id,
@@ -2830,7 +2807,13 @@ void MdsServiceImpl::RunMasstreeImportWorker() {
 
         std::string error;
         MasstreeImportService::Result result;
-        if (masstree_import_service_.ImportNamespace(job->request, &result, &error)) {
+        bool ok = false;
+        if (job->kind == MasstreeImportJob::Kind::kGenerateTemplate) {
+            ok = masstree_import_service_.GenerateTemplate(job->template_request, &result, &error);
+        } else {
+            ok = masstree_import_service_.ImportTemplateNamespace(job->import_request, &result, &error);
+        }
+        if (ok) {
             std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
             job->result = std::move(result);
             job->error_message.clear();
@@ -2838,7 +2821,7 @@ void MdsServiceImpl::RunMasstreeImportWorker() {
             TrimMasstreeImportJobsLocked();
         } else {
             std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
-            job->error_message = error.empty() ? "masstree import failed" : error;
+            job->error_message = error.empty() ? "masstree job failed" : error;
             job->state = zb::rpc::MASSTREE_IMPORT_JOB_FAILED;
             TrimMasstreeImportJobsLocked();
         }
@@ -2874,14 +2857,34 @@ void MdsServiceImpl::TrimMasstreeImportJobsLocked() {
 }
 
 std::shared_ptr<MdsServiceImpl::MasstreeImportJob>
-MdsServiceImpl::EnqueueMasstreeImportJob(const MasstreeImportService::Request& request) {
+MdsServiceImpl::EnqueueMasstreeTemplateJob(const MasstreeImportService::TemplateGenerationRequest& request) {
     auto job = std::make_shared<MasstreeImportJob>();
+    job->kind = MasstreeImportJob::Kind::kGenerateTemplate;
     {
         std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
         std::ostringstream oss;
         oss << "masstree-job-" << NowMilliseconds() << "-" << masstree_import_next_job_id_++;
         job->job_id = oss.str();
-        job->request = request;
+        job->template_request = request;
+        masstree_import_jobs_[job->job_id] = job;
+        masstree_import_job_history_.push_back(job->job_id);
+        masstree_import_job_queue_.push_back(job);
+        TrimMasstreeImportJobsLocked();
+    }
+    masstree_import_job_cv_.notify_one();
+    return job;
+}
+
+std::shared_ptr<MdsServiceImpl::MasstreeImportJob>
+MdsServiceImpl::EnqueueMasstreeNamespaceImportJob(const MasstreeImportService::TemplateImportRequest& request) {
+    auto job = std::make_shared<MasstreeImportJob>();
+    job->kind = MasstreeImportJob::Kind::kImportTemplateNamespace;
+    {
+        std::lock_guard<std::mutex> lock(masstree_import_job_mu_);
+        std::ostringstream oss;
+        oss << "masstree-job-" << NowMilliseconds() << "-" << masstree_import_next_job_id_++;
+        job->job_id = oss.str();
+        job->import_request = request;
         masstree_import_jobs_[job->job_id] = job;
         masstree_import_job_history_.push_back(job->job_id);
         masstree_import_job_queue_.push_back(job);
@@ -2908,10 +2911,15 @@ void MdsServiceImpl::FillMasstreeImportJobInfo(const MasstreeImportJob& job,
     }
     info->Clear();
     info->set_job_id(job.job_id);
-    info->set_namespace_id(job.request.namespace_id);
-    info->set_generation_id(job.request.generation_id);
-    info->set_path_prefix(job.request.path_prefix);
-    info->set_file_count(job.result.file_count != 0 ? job.result.file_count : job.request.file_count);
+    info->set_template_id(job.kind == MasstreeImportJob::Kind::kGenerateTemplate
+                              ? job.template_request.template_id
+                              : job.import_request.template_id);
+    if (job.kind == MasstreeImportJob::Kind::kImportTemplateNamespace) {
+        info->set_namespace_id(job.import_request.namespace_id);
+        info->set_generation_id(job.import_request.generation_id);
+        info->set_path_prefix(job.import_request.path_prefix);
+    }
+    info->set_file_count(job.result.file_count);
     info->set_state(job.state);
     info->set_error_message(job.error_message);
     info->set_manifest_path(job.result.manifest_path);

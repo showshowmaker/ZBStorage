@@ -431,22 +431,35 @@ message ImportArchiveNamespaceReply {
   uint64 inode_max = 6;
 }
 
+message GenerateMasstreeTemplateRequest {
+  string template_id = 1;
+  string path_list_file = 2;
+  string repeat_dir_prefix = 3;
+  uint32 verify_inode_samples = 4;
+  uint32 verify_dentry_samples = 5;
+}
+
+message GenerateMasstreeTemplateReply {
+  MdsStatus status = 1;
+  string manifest_path = 2;
+  uint64 inode_count = 3;
+  uint64 dentry_count = 4;
+  uint64 inode_min = 5;
+  uint64 inode_max = 6;
+  string job_id = 7;
+}
+
 message ImportMasstreeNamespaceRequest {
+  reserved 5, 6, 7, 13, 14, 15;
   string path_prefix = 1;
   string namespace_id = 2;
   string generation_id = 3;
   uint64 inode_start = 4;
-  uint64 file_count = 5;
-  uint32 max_files_per_leaf_dir = 6;
-  uint32 max_subdirs_per_dir = 7;
   uint32 verify_inode_samples = 8;
   uint32 verify_dentry_samples = 9;
   bool publish_route = 10;
   string template_id = 11;
   string template_mode = 12;
-  string source_mode = 13;
-  string path_list_file = 14;
-  string repeat_dir_prefix = 15;
 }
 
 message ImportMasstreeNamespaceReply {
@@ -487,6 +500,7 @@ message MasstreeImportJobInfo {
   uint64 leaf_dir_count = 16;
   string total_file_bytes = 17;
   uint64 avg_file_size_bytes = 18;
+  string template_id = 19;
 }
 
 message GetMasstreeImportJobRequest {
@@ -585,6 +599,7 @@ service MdsService {
   rpc DeletePathPlacementPolicy(DeletePathPlacementPolicyRequest) returns (DeletePathPlacementPolicyReply);
   rpc GetPathPlacementPolicy(GetPathPlacementPolicyRequest) returns (GetPathPlacementPolicyReply);
   rpc ImportArchiveNamespace(ImportArchiveNamespaceRequest) returns (ImportArchiveNamespaceReply);
+  rpc GenerateMasstreeTemplate(GenerateMasstreeTemplateRequest) returns (GenerateMasstreeTemplateReply);
   rpc ImportMasstreeNamespace(ImportMasstreeNamespaceRequest) returns (ImportMasstreeNamespaceReply);
   rpc GetMasstreeImportJob(GetMasstreeImportJobRequest) returns (GetMasstreeImportJobReply);
   rpc GetRandomMasstreeFileAttr(GetRandomMasstreeFileAttrRequest) returns (GetRandomMasstreeFileAttrReply);

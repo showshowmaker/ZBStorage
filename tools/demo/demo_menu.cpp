@@ -17,7 +17,7 @@ void RenderMenu(const std::string& title, const std::vector<MenuActionSpec>& act
         std::cout << '\n';
     }
     std::cout << "\n输入格式: <序号> key=value key=value\n";
-    std::cout << "示例: 5 namespace=demo-ns generation=gen-001 file_count=100000000\n";
+    std::cout << "示例: 10 template_id=template-pathlist-100m path_list_file=examples/masstree_path_list_sample.txt\n";
 }
 
 const MenuActionSpec* FindAction(const std::vector<MenuActionSpec>& actions, const std::string& token) {

@@ -510,7 +510,7 @@ bool ArchiveDataFile::FindInodeLegacy(uint64_t inode_id,
         }
         if (current_inode == inode_id) {
             std::string decode_error;
-            if (!MetaCodec::DecodeInodeAttrCompat(payload, attr, nullptr, &decode_error)) {
+            if (!MetaCodec::DecodeUnifiedInodeAttr(payload, attr, &decode_error)) {
                 if (error) {
                     *error = decode_error.empty()
                                  ? "invalid archive inode payload: " + data_path_
@@ -760,7 +760,7 @@ bool ArchiveDataFile::FindInodePaged(uint64_t inode_id,
     }
     const std::string payload(view.payload, view.payload_len);
     std::string decode_error;
-    if (!MetaCodec::DecodeInodeAttrCompat(payload, attr, nullptr, &decode_error)) {
+    if (!MetaCodec::DecodeUnifiedInodeAttr(payload, attr, &decode_error)) {
         if (error) {
             *error = decode_error.empty()
                          ? "invalid archive inode payload: " + data_path_

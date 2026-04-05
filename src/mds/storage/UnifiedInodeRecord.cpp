@@ -12,36 +12,6 @@ namespace {
 
 using namespace unified_inode_layout;
 
-namespace unified_inode_layout_v2 {
-constexpr uint8_t kVersion = 2;
-constexpr size_t kVersionOffset = 0;
-constexpr size_t kInodeTypeOffset = 1;
-constexpr size_t kStorageTierOffset = 2;
-constexpr size_t kFlagsOffset = 3;
-constexpr size_t kFileNameLenOffset = 4;
-constexpr size_t kInodeIdOffset = 8;
-constexpr size_t kParentInodeIdOffset = 16;
-constexpr size_t kSizeBytesOffset = 24;
-constexpr size_t kAtimeOffset = 32;
-constexpr size_t kMtimeOffset = 40;
-constexpr size_t kCtimeOffset = 48;
-constexpr size_t kVersionNoOffset = 56;
-constexpr size_t kObjectUnitSizeOffset = 64;
-constexpr size_t kModeOffset = 72;
-constexpr size_t kUidOffset = 76;
-constexpr size_t kGidOffset = 80;
-constexpr size_t kNlinkOffset = 84;
-constexpr size_t kReplicaOffset = 88;
-constexpr size_t kFileArchiveStateOffset = 92;
-constexpr size_t kDiskNodeIdOffset = 96;
-constexpr size_t kDiskIdOffset = 104;
-constexpr size_t kOpticalNodeIdOffset = 112;
-constexpr size_t kOpticalDiskIdOffset = 120;
-constexpr size_t kOpticalImageIdOffset = 128;
-constexpr size_t kFileNameOffset = 136;
-constexpr size_t kFileNameSize = 64;
-} // namespace unified_inode_layout_v2
-
 constexpr uint32_t kDefaultBlockSize = 4096;
 constexpr uint64_t kBlocksUnitBytes = 512;
 
@@ -208,79 +178,6 @@ void FillDerivedPosixFields(UnifiedInodeRecord* record, bool normalize_dir_size)
     record->blksize = NormalizeBlockSize(record->blksize);
     record->blocks_512 = NormalizeBlocks512(record->blocks_512, record->size_bytes);
     record->file_name_len = static_cast<uint16_t>(record->file_name.size());
-}
-
-bool DecodeV2UnifiedInodeRecord(std::string_view data, UnifiedInodeRecord* out, std::string* error) {
-    if (data.size() != kRecordSize) {
-        if (error) {
-            *error = "invalid unified inode size";
-        }
-        return false;
-    }
-    const uint8_t inode_type = static_cast<uint8_t>(data[unified_inode_layout_v2::kInodeTypeOffset]);
-    const uint8_t storage_tier = static_cast<uint8_t>(data[unified_inode_layout_v2::kStorageTierOffset]);
-    if (!IsValidInodeType(inode_type)) {
-        if (error) {
-            *error = "invalid unified inode_type";
-        }
-        return false;
-    }
-    if (!IsValidStorageTier(storage_tier)) {
-        if (error) {
-            *error = "invalid unified storage_tier";
-        }
-        return false;
-    }
-    const uint16_t file_name_len = ReadU16(data, unified_inode_layout_v2::kFileNameLenOffset);
-    if (file_name_len > unified_inode_layout_v2::kFileNameSize) {
-        if (error) {
-            *error = "invalid unified file_name_len";
-        }
-        return false;
-    }
-    const uint32_t archive_state = ReadU32(data, unified_inode_layout_v2::kFileArchiveStateOffset);
-    if (!IsValidArchiveState(archive_state)) {
-        if (error) {
-            *error = "invalid unified file_archive_state";
-        }
-        return false;
-    }
-
-    UnifiedInodeRecord record;
-    record.version = unified_inode_layout_v2::kVersion;
-    record.inode_type = inode_type;
-    record.storage_tier = storage_tier;
-    record.flags = static_cast<uint8_t>(data[unified_inode_layout_v2::kFlagsOffset]);
-    record.file_name_len = file_name_len;
-    record.inode_id = ReadU64(data, unified_inode_layout_v2::kInodeIdOffset);
-    record.parent_inode_id = ReadU64(data, unified_inode_layout_v2::kParentInodeIdOffset);
-    record.size_bytes = ReadU64(data, unified_inode_layout_v2::kSizeBytesOffset);
-    record.atime = ReadU64(data, unified_inode_layout_v2::kAtimeOffset);
-    record.mtime = ReadU64(data, unified_inode_layout_v2::kMtimeOffset);
-    record.ctime = ReadU64(data, unified_inode_layout_v2::kCtimeOffset);
-    record.version_no = ReadU64(data, unified_inode_layout_v2::kVersionNoOffset);
-    record.object_unit_size = ReadU64(data, unified_inode_layout_v2::kObjectUnitSizeOffset);
-    record.mode = ReadU32(data, unified_inode_layout_v2::kModeOffset);
-    record.uid = ReadU32(data, unified_inode_layout_v2::kUidOffset);
-    record.gid = ReadU32(data, unified_inode_layout_v2::kGidOffset);
-    record.nlink = ReadU32(data, unified_inode_layout_v2::kNlinkOffset);
-    record.replica = ReadU32(data, unified_inode_layout_v2::kReplicaOffset);
-    record.file_archive_state = archive_state;
-    record.disk_node_id = ReadU64(data, unified_inode_layout_v2::kDiskNodeIdOffset);
-    record.disk_id = ReadU32(data, unified_inode_layout_v2::kDiskIdOffset);
-    record.optical_node_id = ReadU64(data, unified_inode_layout_v2::kOpticalNodeIdOffset);
-    record.optical_disk_id = ReadU64(data, unified_inode_layout_v2::kOpticalDiskIdOffset);
-    record.optical_image_id = ReadU32(data, unified_inode_layout_v2::kOpticalImageIdOffset);
-    record.file_name.assign(data.data() + unified_inode_layout_v2::kFileNameOffset, file_name_len);
-    FillDerivedPosixFields(&record, false);
-    if (!NormalizePackedLocation(&record, error)) {
-        return false;
-    }
-    *out = std::move(record);
-    if (error) {
-        error->clear();
-    }
-    return true;
 }
 
 bool DecodeV3UnifiedInodeRecord(std::string_view data, UnifiedInodeRecord* out, std::string* error) {
@@ -470,9 +367,6 @@ bool DecodeUnifiedInodeRecord(std::string_view data, UnifiedInodeRecord* out, st
     const uint8_t version = static_cast<uint8_t>(data[kVersionOffset]);
     if (version == kVersion) {
         return DecodeV3UnifiedInodeRecord(data, out, error);
-    }
-    if (version == unified_inode_layout_v2::kVersion) {
-        return DecodeV2UnifiedInodeRecord(data, out, error);
     }
     if (error) {
         *error = "unified inode version mismatch";

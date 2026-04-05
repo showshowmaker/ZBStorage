@@ -115,6 +115,8 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
             parsed.dentry_sparse_index_path = value;
         } else if (key == "verify_manifest_path") {
             parsed.verify_manifest_path = value;
+        } else if (key == "structure_stats_path") {
+            parsed.structure_stats_path = value;
         } else if (key == "cluster_stats_path") {
             parsed.cluster_stats_path = value;
         } else if (key == "allocation_summary_path") {
@@ -198,6 +200,20 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
                 }
                 return false;
             }
+        } else if (key == "template_base_dir_count") {
+            if (!ParseU64Field(value, &parsed.template_base_dir_count)) {
+                if (error) {
+                    *error = "invalid template_base_dir_count in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+        } else if (key == "dir_count") {
+            if (!ParseU64Field(value, &parsed.dir_count)) {
+                if (error) {
+                    *error = "invalid dir_count in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
         } else if (key == "template_repeat_count") {
             if (!ParseU64Field(value, &parsed.template_repeat_count)) {
                 if (error) {
@@ -216,6 +232,20 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
             if (!ParseU64Field(value, &parsed.leaf_dir_count)) {
                 if (error) {
                     *error = "invalid leaf_dir_count in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+        } else if (key == "template_base_max_depth") {
+            if (!ParseU64Field(value, &parsed.template_base_max_depth)) {
+                if (error) {
+                    *error = "invalid template_base_max_depth in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+        } else if (key == "max_depth") {
+            if (!ParseU64Field(value, &parsed.max_depth)) {
+                if (error) {
+                    *error = "invalid max_depth in masstree namespace manifest: " + manifest_path;
                 }
                 return false;
             }
@@ -427,6 +457,7 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     out << "dentry_pages_path=" << dentry_pages_path << "\n";
     out << "dentry_sparse_index_path=" << dentry_sparse_index_path << "\n";
     out << "verify_manifest_path=" << verify_manifest_path << "\n";
+    out << "structure_stats_path=" << structure_stats_path << "\n";
     out << "cluster_stats_path=" << cluster_stats_path << "\n";
     out << "allocation_summary_path=" << allocation_summary_path << "\n";
     out << "optical_layout_path=" << optical_layout_path << "\n";
@@ -441,9 +472,13 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     out << "target_file_count=" << target_file_count << "\n";
     out << "file_count=" << file_count << "\n";
     out << "template_base_file_count=" << template_base_file_count << "\n";
+    out << "template_base_dir_count=" << template_base_dir_count << "\n";
+    out << "dir_count=" << dir_count << "\n";
     out << "template_repeat_count=" << template_repeat_count << "\n";
     out << "level1_dir_count=" << level1_dir_count << "\n";
     out << "leaf_dir_count=" << leaf_dir_count << "\n";
+    out << "template_base_max_depth=" << template_base_max_depth << "\n";
+    out << "max_depth=" << max_depth << "\n";
     out << "max_files_per_leaf_dir=" << max_files_per_leaf_dir << "\n";
     out << "max_subdirs_per_dir=" << max_subdirs_per_dir << "\n";
     out << "min_file_size_bytes=" << min_file_size_bytes << "\n";

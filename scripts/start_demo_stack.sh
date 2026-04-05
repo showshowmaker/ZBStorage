@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/common_demo_env.sh"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
-RUN_DIR="${RUN_DIR:-${ROOT_DIR}/.demo_run}"
+DEMO_ROOT="${DEMO_ROOT:-$(resolve_demo_root "${ROOT_DIR}")}"
+RUN_DIR="${RUN_DIR:-${DEMO_ROOT}}"
 CFG_DIR="${RUN_DIR}/config"
 LOG_DIR="${RUN_DIR}/logs"
 PID_DIR="${RUN_DIR}/pids"

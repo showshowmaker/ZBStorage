@@ -26,7 +26,11 @@ public:
         uint64_t inode_count{0};
         uint64_t dentry_count{0};
         uint64_t base_file_count{0};
+        uint64_t base_dir_count{0};
+        uint64_t dir_count{0};
         uint64_t repeat_count{0};
+        uint64_t base_max_depth{0};
+        uint64_t max_depth{0};
         std::string fingerprint;
         std::string repeat_dir_prefix;
     };
@@ -37,6 +41,7 @@ public:
         std::string inode_records_path;
         std::string dentry_records_path;
         std::string verify_manifest_path;
+        std::string structure_stats_path;
         std::string source_mode;
         uint64_t root_inode_id{0};
         uint64_t inode_min{0};
@@ -45,9 +50,13 @@ public:
         uint64_t inode_count{0};
         uint64_t dentry_count{0};
         uint64_t base_file_count{0};
+        uint64_t base_dir_count{0};
+        uint64_t dir_count{0};
         uint64_t repeat_count{0};
         uint64_t level1_dir_count{0};
         uint64_t leaf_dir_count{0};
+        uint64_t base_max_depth{0};
+        uint64_t max_depth{0};
         uint64_t avg_file_size_bytes{0};
         std::string total_file_bytes;
     };

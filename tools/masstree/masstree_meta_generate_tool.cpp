@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
     std::cout << "inode_records_path=" << result.inode_records_path << "\n";
     std::cout << "dentry_records_path=" << result.dentry_records_path << "\n";
     std::cout << "verify_manifest_path=" << result.verify_manifest_path << "\n";
+    std::cout << "structure_stats_path=" << result.structure_stats_path << "\n";
     std::cout << "source_mode=" << result.source_mode << "\n";
     std::cout << "root_inode_id=" << result.root_inode_id << "\n";
     std::cout << "inode_min=" << result.inode_min << "\n";
@@ -129,8 +130,12 @@ int main(int argc, char** argv) {
     std::cout << "inode_count=" << result.inode_count << "\n";
     std::cout << "dentry_count=" << result.dentry_count << "\n";
     std::cout << "base_file_count=" << result.base_file_count << "\n";
+    std::cout << "base_dir_count=" << result.base_dir_count << "\n";
+    std::cout << "dir_count=" << result.dir_count << "\n";
     std::cout << "repeat_count=" << result.repeat_count << "\n";
     std::cout << "level1_dir_count=" << result.level1_dir_count << "\n";
     std::cout << "leaf_dir_count=" << result.leaf_dir_count << "\n";
+    std::cout << "base_max_depth=" << result.base_max_depth << "\n";
+    std::cout << "max_depth=" << result.max_depth << "\n";
     return 0;
 }

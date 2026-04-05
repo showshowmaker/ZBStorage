@@ -35,16 +35,7 @@ public:
 
     static bool EncodeUnifiedInodeRecord(const UnifiedInodeRecord& record, std::string* out, std::string* error);
     static bool DecodeUnifiedInodeRecord(const std::string& data, UnifiedInodeRecord* record, std::string* error);
-    static bool DecodeInodeAttrCompat(const std::string& data,
-                                      zb::rpc::InodeAttr* attr,
-                                      bool* decoded_from_unified,
-                                      std::string* error);
-
-    static std::string EncodeDiskFileLocation(const zb::rpc::DiskFileLocation& location);
-    static bool DecodeDiskFileLocation(const std::string& data, zb::rpc::DiskFileLocation* location);
-
-    static std::string EncodeOpticalFileLocation(const zb::rpc::OpticalFileLocation& location);
-    static bool DecodeOpticalFileLocation(const std::string& data, zb::rpc::OpticalFileLocation* location);
+    static bool DecodeUnifiedInodeAttr(const std::string& data, zb::rpc::InodeAttr* attr, std::string* error);
 
     static std::string EncodePgView(const PgViewRecord& view);
     static bool DecodePgView(const std::string& data, PgViewRecord* view);

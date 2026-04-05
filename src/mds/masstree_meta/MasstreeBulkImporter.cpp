@@ -229,6 +229,7 @@ bool BuildUnifiedRecordFromRawPayload(const std::string& payload,
                                       uint64_t parent_inode_id,
                                       UnifiedInodeRecord* record,
                                       std::string* error) {
+    (void)parent_inode_id;
     if (!record) {
         if (error) {
             *error = "unified inode output is null";
@@ -241,14 +242,10 @@ bool BuildUnifiedRecordFromRawPayload(const std::string& payload,
         }
         return true;
     }
-    zb::rpc::InodeAttr attr;
-    if (!attr.ParseFromString(payload)) {
-        if (error) {
-            *error = "failed to parse inode record payload";
-        }
-        return false;
+    if (error) {
+        *error = "failed to decode unified inode record payload";
     }
-    return AttrToUnifiedInodeRecord(attr, parent_inode_id, UnifiedStorageTier::kNone, record, error);
+    return false;
 }
 
 void ApplyOpticalLocation(const MasstreeOpticalProfile& profile,

@@ -2,14 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN_DIR="${RUN_DIR:-${ROOT_DIR}/.demo_run}"
+source "${ROOT_DIR}/scripts/common_demo_env.sh"
+DEMO_ROOT="${DEMO_ROOT:-$(resolve_demo_root "${ROOT_DIR}")}"
+RUN_DIR="${RUN_DIR:-${DEMO_ROOT}}"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 LOG_DIR="${RUN_DIR}/logs"
 
 NAMESPACE_COUNT="${1:-1000}"
 TEMPLATE_ID="${MASSTREE_TEMPLATE_ID:-template-100m-v1}"
-TEMPLATE_MODE="${MASSTREE_TEMPLATE_MODE:-legacy_records}"
+TEMPLATE_MODE="${MASSTREE_TEMPLATE_MODE:-page_fast}"
 NAMESPACE_PREFIX="${NAMESPACE_PREFIX:-demo-ns}"
+PATH_LIST_FILE="${MASSTREE_PATH_LIST_FILE:-}"
+REPEAT_DIR_PREFIX="${MASSTREE_REPEAT_DIR_PREFIX:-copy}"
 
 mkdir -p "${LOG_DIR}"
 
@@ -51,19 +55,34 @@ log "[INFO] build_dir=${BUILD_DIR}"
 log "[INFO] namespace_count=${NAMESPACE_COUNT}"
 log "[INFO] template_id=${TEMPLATE_ID}"
 log "[INFO] template_mode=${TEMPLATE_MODE}"
+if [[ -n "${PATH_LIST_FILE}" ]]; then
+  log "[INFO] path_list_file=${PATH_LIST_FILE}"
+fi
 log "[INFO] import_log=${IMPORT_LOG}"
 
 log "[INFO] starting demo stack"
 RUN_DIR="${RUN_DIR}" BUILD_DIR="${BUILD_DIR}" bash "${ROOT_DIR}/scripts/start_demo_stack.sh" start
 
-log "[INFO] importing ${NAMESPACE_COUNT} namespaces (${NAMESPACE_COUNT} * 1e8 = $((NAMESPACE_COUNT * 100)) 亿 files)"
+if [[ -n "${PATH_LIST_FILE}" ]]; then
+  log "[INFO] generating template from txt path list"
+  RUN_DIR="${RUN_DIR}" \
+    BUILD_DIR="${BUILD_DIR}" \
+    MOUNT_POINT="${RUN_DIR}/mnt" \
+    MASSTREE_TEMPLATE_ID="${TEMPLATE_ID}" \
+    MASSTREE_PATH_LIST_FILE="${PATH_LIST_FILE}" \
+    MASSTREE_REPEAT_DIR_PREFIX="${REPEAT_DIR_PREFIX}" \
+    bash "${ROOT_DIR}/scripts/generate_masstree_template.sh" \
+    "${TEMPLATE_ID}" "${PATH_LIST_FILE}" "${REPEAT_DIR_PREFIX}" | tee "${IMPORT_LOG}"
+fi
+
+log "[INFO] importing ${NAMESPACE_COUNT} namespaces (~${NAMESPACE_COUNT} * 1e8 files)"
 if ! RUN_DIR="${RUN_DIR}" \
      BUILD_DIR="${BUILD_DIR}" \
      MOUNT_POINT="${RUN_DIR}/mnt" \
      NAMESPACE_PREFIX="${NAMESPACE_PREFIX}" \
      MASSTREE_TEMPLATE_ID="${TEMPLATE_ID}" \
      MASSTREE_TEMPLATE_MODE="${TEMPLATE_MODE}" \
-     bash "${ROOT_DIR}/scripts/import_masstree_demo.sh" "${NAMESPACE_COUNT}" | tee "${IMPORT_LOG}"; then
+     bash "${ROOT_DIR}/scripts/import_masstree_demo.sh" "${NAMESPACE_COUNT}" | tee -a "${IMPORT_LOG}"; then
   STATUS=$?
   exit "${STATUS}"
 fi

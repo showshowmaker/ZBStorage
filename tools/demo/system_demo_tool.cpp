@@ -40,7 +40,7 @@ DEFINE_string(real_dir, "real", "Top-level mounted directory for real-node files
 DEFINE_string(virtual_dir, "virtual", "Top-level mounted directory for virtual-node files");
 DEFINE_string(scenario,
               "interactive",
-              "Scenario: interactive|health|stats|posix|masstree|masstree_import|masstree_query|all");
+              "Scenario: interactive|health|stats|posix|masstree|masstree_template|masstree_import|masstree_query|all");
 DEFINE_string(masstree_namespace_id, "demo-ns", "Masstree demo namespace id");
 DEFINE_string(masstree_generation_id, "", "Masstree demo generation id; auto-generated if empty");
 DEFINE_string(masstree_path_prefix, "", "Masstree demo path prefix; defaults to /masstree_demo/<namespace>");
@@ -48,7 +48,13 @@ DEFINE_string(masstree_template_id, "", "Masstree import template id; empty disa
 DEFINE_string(masstree_template_mode,
               "",
               "Masstree import template mode: empty|page_fast|legacy_records; empty preserves the current fast path");
-DEFINE_uint64(masstree_file_count, 100000000, "Masstree demo file count");
+DEFINE_string(masstree_source_mode,
+              "",
+              "Masstree import source mode: empty|synthetic|path_list; empty keeps the server default");
+DEFINE_string(masstree_path_list_file, "", "Masstree path_list source file");
+DEFINE_string(masstree_repeat_dir_prefix,
+              "",
+              "Masstree path_list wrapper directory prefix; empty keeps the server default");
 DEFINE_uint32(masstree_max_files_per_leaf_dir, 2048, "Masstree max files per leaf dir");
 DEFINE_uint32(masstree_max_subdirs_per_dir, 256, "Masstree max subdirs per dir");
 DEFINE_uint32(masstree_verify_inode_samples, 32, "Masstree import inode verify sample count");
@@ -721,6 +727,21 @@ public:
         return !cntl.Failed() && reply.status().code() == zb::rpc::MDS_OK;
     }
 
+    bool GenerateMasstreeTemplate(const zb::rpc::GenerateMasstreeTemplateRequest& request,
+                                  zb::rpc::GenerateMasstreeTemplateReply* reply_out) {
+        zb::rpc::GenerateMasstreeTemplateReply reply;
+        brpc::Controller cntl;
+        stub_.GenerateMasstreeTemplate(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            reply.mutable_status()->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+            reply.mutable_status()->set_message(cntl.ErrorText());
+        }
+        if (reply_out) {
+            *reply_out = reply;
+        }
+        return !cntl.Failed() && reply.status().code() == zb::rpc::MDS_OK;
+    }
+
     bool GetRandomMasstreeFileAttr(const zb::rpc::GetRandomMasstreeFileAttrRequest& request,
                                    zb::rpc::GetRandomMasstreeFileAttrReply* reply_out) {
         zb::rpc::GetRandomMasstreeFileAttrReply reply;
@@ -886,6 +907,13 @@ public:
                                       "Masstree 导入失败",
                                       [&]() { return RunMasstreeImportDemo(); });
         }
+        if (scenario == "masstree_template") {
+            return RunScenarioCommand("masstree_template",
+                                      "TC-P4A Masstree 妯℃澘鐢熸垚",
+                                      "Masstree 妯℃澘鐢熸垚瀹屾垚",
+                                      "Masstree 妯℃澘鐢熸垚澶辫触",
+                                      [&]() { return RunMasstreeTemplateGenerateDemo(); });
+        }
         if (scenario == "masstree_query") {
             return RunScenarioCommand("masstree_query",
                                       "TC-P5 Masstree 查询",
@@ -1002,7 +1030,8 @@ private:
     }
 
     bool RunMasstreeSuite() {
-        return RunMasstreeImportDemo() && RunMasstreeQueryDemo();
+        return (FLAGS_masstree_path_list_file.empty() || RunMasstreeTemplateGenerateDemo()) &&
+               RunMasstreeImportDemo() && RunMasstreeQueryDemo();
     }
 
     void InitializeMenuActions() {
@@ -1016,8 +1045,13 @@ private:
         actions_.push_back({"5",
                             "TC-P4 Masstree 导入",
                             "执行 Masstree namespace 批量导入",
-	                            "5 namespace=<id> generation=<id> file_count=<n> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
+	                            "5 namespace=<id> generation=<id> template_id=<id> [template_mode=<mode>] [key=value ...]",
                             {"import", "p4"}});
+        actions_.push_back({"10",
+                            "TC-P4A Masstree 妯℃澘鐢熸垚",
+                            "鏍规嵁 txt 璺緞鏂囦欢鐢熸垚 Masstree 妯℃澘",
+                            "10 template_id=<id> path_list_file=<path> [repeat_dir_prefix=<prefix>] [key=value ...]",
+                            {"template", "template_generate", "p4a"}});
         actions_.push_back({"6",
                             "TC-P5 Masstree 查询",
                             "执行随机元数据查询并输出统计",
@@ -1122,7 +1156,8 @@ private:
         }
         out << "\n示例:\n";
         out << "  2 tc_p1_expected_real_node_count=1 tc_p1_expected_virtual_node_count=99\n";
-	        out << "  5 namespace=demo-ns generation=gen-report-001 file_count=100000000 template_id=template-100m-v1 template_mode=legacy_records\n";
+	        out << "  10 template_id=template-pathlist-100m path_list_file=examples/masstree_path_list_sample.txt repeat_dir_prefix=copy\n";
+	        out << "  5 namespace=demo-ns generation=gen-report-001 template_id=template-pathlist-100m template_mode=page_fast\n";
         out << "  6 n=1\n";
         out << "  6 n=1000 log_file=logs/p5_run.log\n";
         return out.str();
@@ -1171,12 +1206,13 @@ private:
 	                FLAGS_masstree_template_id = value;
 	            } else if (key == "template_mode" || key == "masstree_template_mode") {
 	                FLAGS_masstree_template_mode = value;
-	            } else if (key == "file_count" || key == "masstree_file_count") {
-                if (!ParseUint64Value(key, value, &parsed_u64, error)) {
-                    return false;
-                }
-                FLAGS_masstree_file_count = parsed_u64;
-            } else if (key == "max_files_per_leaf_dir" || key == "masstree_max_files_per_leaf_dir") {
+	            } else if (key == "source_mode" || key == "masstree_source_mode") {
+	                FLAGS_masstree_source_mode = value;
+	            } else if (key == "path_list_file" || key == "masstree_path_list_file") {
+	                FLAGS_masstree_path_list_file = value;
+	            } else if (key == "repeat_dir_prefix" || key == "masstree_repeat_dir_prefix") {
+	                FLAGS_masstree_repeat_dir_prefix = value;
+	            } else if (key == "max_files_per_leaf_dir" || key == "masstree_max_files_per_leaf_dir") {
                 if (!ParseUint32Value(key, value, &parsed_u32, error)) {
                     return false;
                 }
@@ -1380,6 +1416,13 @@ private:
                                          "Masstree 导入完成",
                                          "Masstree 导入失败",
                                          [&]() { return RunMasstreeImportDemo(); });
+        }
+        if (action->id == "10") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "Masstree 妯℃澘鐢熸垚瀹屾垚",
+                                         "Masstree 妯℃澘鐢熸垚澶辫触",
+                                         [&]() { return RunMasstreeTemplateGenerateDemo(); });
         }
         if (action->id == "6") {
             return ExecuteCapturedAction(*action,
@@ -1740,6 +1783,108 @@ private:
         return true;
     }
 
+    bool RunMasstreeTemplateGenerateDemo() {
+        PrintSection("Masstree Template Generate Demo");
+        if (FLAGS_masstree_template_id.empty()) {
+            std::cerr << "template_id is required for template generation\n";
+            return false;
+        }
+        if (FLAGS_masstree_path_list_file.empty()) {
+            std::cerr << "path_list_file is required for template generation\n";
+            return false;
+        }
+
+        zb::rpc::GenerateMasstreeTemplateRequest request;
+        request.set_template_id(FLAGS_masstree_template_id);
+        request.set_path_list_file(FLAGS_masstree_path_list_file);
+        if (!FLAGS_masstree_repeat_dir_prefix.empty()) {
+            request.set_repeat_dir_prefix(FLAGS_masstree_repeat_dir_prefix);
+        }
+        request.set_verify_inode_samples(FLAGS_masstree_verify_inode_samples);
+        request.set_verify_dentry_samples(FLAGS_masstree_verify_dentry_samples);
+
+        zb::rpc::GenerateMasstreeTemplateReply reply;
+        if (!mds_.GenerateMasstreeTemplate(request, &reply)) {
+            std::cerr << "GenerateMasstreeTemplate failed: " << reply.status().message() << '\n';
+            return false;
+        }
+
+        std::cout << "template_id=" << FLAGS_masstree_template_id << '\n';
+        std::cout << "path_list_file=" << FLAGS_masstree_path_list_file << '\n';
+        if (!FLAGS_masstree_repeat_dir_prefix.empty()) {
+            std::cout << "repeat_dir_prefix=" << FLAGS_masstree_repeat_dir_prefix << '\n';
+        }
+        std::cout << "job_id=" << reply.job_id() << '\n';
+
+        const auto poll_started_at = std::chrono::steady_clock::now();
+        zb::rpc::MasstreeImportJobState last_state = zb::rpc::MASSTREE_IMPORT_JOB_PENDING;
+        bool has_last_state = false;
+        uint64_t last_printed_elapsed_bucket = std::numeric_limits<uint64_t>::max();
+
+        while (true) {
+            zb::rpc::GetMasstreeImportJobReply job_reply;
+            if (!mds_.GetMasstreeImportJob(reply.job_id(), &job_reply)) {
+                std::cerr << "GetMasstreeImportJob failed: " << job_reply.status().message() << '\n';
+                return false;
+            }
+            if (!job_reply.found()) {
+                std::cerr << "Masstree template job disappeared: " << reply.job_id() << '\n';
+                return false;
+            }
+
+            const auto& job = job_reply.job();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - poll_started_at);
+            const uint64_t elapsed_seconds = static_cast<uint64_t>(elapsed.count());
+            const uint64_t elapsed_bucket = elapsed_seconds / 10ULL;
+            if (!has_last_state || job.state() != last_state || elapsed_bucket != last_printed_elapsed_bucket) {
+                std::cout << "job_status=" << MasstreeJobStateName(job.state())
+                          << " elapsed=" << FormatDurationSeconds(elapsed_seconds) << '\n';
+                last_state = job.state();
+                has_last_state = true;
+                last_printed_elapsed_bucket = elapsed_bucket;
+            }
+
+            if (job.state() == zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED) {
+                std::cout << "manifest_path=" << job.manifest_path() << '\n';
+                std::cout << "root_inode_id=" << job.root_inode_id() << '\n';
+                std::cout << "inode_count=" << job.inode_count() << '\n';
+                std::cout << "dentry_count=" << job.dentry_count() << '\n';
+                std::cout << "file_count=" << job.file_count() << '\n';
+                std::cout << "inode_range=[" << job.inode_min() << ", " << job.inode_max() << "]\n";
+                std::cout << "inode_pages_bytes=" << job.inode_pages_bytes() << '\n';
+                PrintDecimalMetric("template_total_file_bytes", job.total_file_bytes());
+                std::cout << "template_avg_file_size_bytes=" << job.avg_file_size_bytes() << '\n';
+
+                std::vector<CheckResult> checks;
+                AddCheck(&checks,
+                         "template.template_id",
+                         job.template_id() == FLAGS_masstree_template_id,
+                         "actual=" + job.template_id() + " expected=" + FLAGS_masstree_template_id);
+                AddCheck(&checks,
+                         "template.manifest_path",
+                         !job.manifest_path().empty(),
+                         "manifest_path=" + job.manifest_path());
+                AddCheck(&checks,
+                         "template.file_count",
+                         job.file_count() > 0,
+                         "actual=" + std::to_string(job.file_count()));
+
+                bool ok = true;
+                for (const auto& check : checks) {
+                    ok = ok && check.ok;
+                }
+                return ok;
+            }
+            if (job.state() == zb::rpc::MASSTREE_IMPORT_JOB_FAILED) {
+                std::cerr << "Masstree template job failed: " << job.error_message() << '\n';
+                return false;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(std::max<uint32_t>(1, FLAGS_masstree_job_poll_interval_ms)));
+        }
+    }
+
     bool RunMasstreeImportDemo() {
         PrintSection("Masstree Import Demo");
         const std::string namespace_id = FLAGS_masstree_namespace_id.empty()
@@ -1773,15 +1918,17 @@ private:
             return false;
         }
 
+        if (FLAGS_masstree_template_id.empty()) {
+            std::cerr << "template_id is required for template import\n";
+            return false;
+        }
+
         zb::rpc::ImportMasstreeNamespaceRequest request;
 	        request.set_namespace_id(namespace_id);
 	        request.set_generation_id(generation_id);
 	        request.set_path_prefix(path_prefix);
 	        request.set_template_id(FLAGS_masstree_template_id);
 	        request.set_template_mode(FLAGS_masstree_template_mode);
-	        request.set_file_count(FLAGS_masstree_file_count);
-        request.set_max_files_per_leaf_dir(FLAGS_masstree_max_files_per_leaf_dir);
-        request.set_max_subdirs_per_dir(FLAGS_masstree_max_subdirs_per_dir);
         request.set_verify_inode_samples(FLAGS_masstree_verify_inode_samples);
         request.set_verify_dentry_samples(FLAGS_masstree_verify_dentry_samples);
         request.set_publish_route(true);
@@ -1926,11 +2073,6 @@ private:
                                                       cluster_before.free_capacity_bytes()) << '\n';
 
                 std::vector<CheckResult> checks;
-                AddCheck(&checks,
-                         "import.job_file_count",
-                         job.file_count() == request.file_count(),
-                         "actual=" + std::to_string(job.file_count()) +
-                             " expected=" + std::to_string(request.file_count()));
                 AddCheck(&checks,
                          "import.namespace_id",
                          job.namespace_id() == namespace_id,

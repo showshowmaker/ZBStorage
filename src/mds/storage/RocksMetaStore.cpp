@@ -5,6 +5,17 @@
 
 namespace zb::mds {
 
+namespace {
+
+constexpr const char* kLegacyDiskFileLocationColumnFamily = "disk_file_locations";
+constexpr const char* kLegacyOpticalFileLocationColumnFamily = "optical_file_locations";
+
+bool IsLegacyLocationColumnFamily(const std::string& name) {
+    return name == kLegacyDiskFileLocationColumnFamily || name == kLegacyOpticalFileLocationColumnFamily;
+}
+
+} // namespace
+
 RocksMetaStore::~RocksMetaStore() {
     for (auto& item : column_families_) {
         delete item.second;
@@ -47,6 +58,22 @@ bool RocksMetaStore::Open(const std::string& path, std::string* error) {
     }
 
     for (size_t i = 0; i < descriptors.size() && i < handles.size(); ++i) {
+        if (IsLegacyLocationColumnFamily(descriptors[i].name)) {
+            rocksdb::Status drop_status = db->DropColumnFamily(handles[i]);
+            if (!drop_status.ok()) {
+                if (error) {
+                    *error = drop_status.ToString();
+                }
+                for (auto* handle : handles) {
+                    delete handle;
+                }
+                delete db;
+                return false;
+            }
+            delete handles[i];
+            handles[i] = nullptr;
+            continue;
+        }
         column_families_[descriptors[i].name] = handles[i];
     }
     db_ = db;
@@ -109,162 +136,6 @@ bool RocksMetaStore::WriteBatch(rocksdb::WriteBatch* batch, std::string* error) 
         return false;
     }
     rocksdb::Status status = db_->Write(rocksdb::WriteOptions(), batch);
-    if (!status.ok()) {
-        if (error) {
-            *error = status.ToString();
-        }
-        return false;
-    }
-    return true;
-}
-
-bool RocksMetaStore::LegacyGetDiskFileLocation(uint64_t inode_id, std::string* value, std::string* error) const {
-    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kDiskFileLocationColumnFamily);
-    if (!cf) {
-        if (value) {
-            value->clear();
-        }
-        if (error) {
-            error->clear();
-        }
-        return false;
-    }
-    return GetFromColumnFamily(cf, LocationKey(inode_id), value, error);
-}
-
-bool RocksMetaStore::LegacyDeleteDiskFileLocation(uint64_t inode_id, std::string* error) {
-    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kDiskFileLocationColumnFamily);
-    if (!cf) {
-        if (error) {
-            error->clear();
-        }
-        return true;
-    }
-    return DeleteFromColumnFamily(cf, LocationKey(inode_id), error);
-}
-
-bool RocksMetaStore::LegacyGetOpticalFileLocation(uint64_t inode_id, std::string* value, std::string* error) const {
-    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kOpticalFileLocationColumnFamily);
-    if (!cf) {
-        if (value) {
-            value->clear();
-        }
-        if (error) {
-            error->clear();
-        }
-        return false;
-    }
-    return GetFromColumnFamily(cf, LocationKey(inode_id), value, error);
-}
-
-bool RocksMetaStore::LegacyDeleteOpticalFileLocation(uint64_t inode_id, std::string* error) {
-    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kOpticalFileLocationColumnFamily);
-    if (!cf) {
-        if (error) {
-            error->clear();
-        }
-        return true;
-    }
-    return DeleteFromColumnFamily(cf, LocationKey(inode_id), error);
-}
-
-bool RocksMetaStore::LegacyBatchDeleteDiskFileLocation(rocksdb::WriteBatch* batch,
-                                                       uint64_t inode_id,
-                                                       std::string* error) const {
-    if (!batch) {
-        if (error) {
-            *error = "WriteBatch is null";
-        }
-        return false;
-    }
-    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kDiskFileLocationColumnFamily);
-    if (!cf) {
-        if (error) {
-            error->clear();
-        }
-        return true;
-    }
-    batch->Delete(cf, LocationKey(inode_id));
-    return true;
-}
-
-bool RocksMetaStore::LegacyBatchDeleteOpticalFileLocation(rocksdb::WriteBatch* batch,
-                                                          uint64_t inode_id,
-                                                          std::string* error) const {
-    if (!batch) {
-        if (error) {
-            *error = "WriteBatch is null";
-        }
-        return false;
-    }
-    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kOpticalFileLocationColumnFamily);
-    if (!cf) {
-        if (error) {
-            error->clear();
-        }
-        return true;
-    }
-    batch->Delete(cf, LocationKey(inode_id));
-    return true;
-}
-
-std::string RocksMetaStore::LocationKey(uint64_t inode_id) {
-    return std::to_string(inode_id);
-}
-
-rocksdb::ColumnFamilyHandle* RocksMetaStore::GetColumnFamily(const std::string& name) const {
-    auto it = column_families_.find(name);
-    if (it == column_families_.end()) {
-        return nullptr;
-    }
-    return it->second;
-}
-
-bool RocksMetaStore::GetFromColumnFamily(rocksdb::ColumnFamilyHandle* cf,
-                                         const std::string& key,
-                                         std::string* value,
-                                         std::string* error) const {
-    if (!db_) {
-        if (error) {
-            *error = "DB not opened";
-        }
-        return false;
-    }
-    if (!cf) {
-        if (error) {
-            *error = "column family is unavailable";
-        }
-        return false;
-    }
-    rocksdb::Status status = db_->Get(rocksdb::ReadOptions(), cf, key, value);
-    if (!status.ok()) {
-        if (status.IsNotFound()) {
-            return false;
-        }
-        if (error) {
-            *error = status.ToString();
-        }
-        return false;
-    }
-    return true;
-}
-
-bool RocksMetaStore::DeleteFromColumnFamily(rocksdb::ColumnFamilyHandle* cf,
-                                            const std::string& key,
-                                            std::string* error) {
-    if (!db_) {
-        if (error) {
-            *error = "DB not opened";
-        }
-        return false;
-    }
-    if (!cf) {
-        if (error) {
-            *error = "column family is unavailable";
-        }
-        return false;
-    }
-    rocksdb::Status status = db_->Delete(rocksdb::WriteOptions(), cf, key);
     if (!status.ok()) {
         if (error) {
             *error = status.ToString();

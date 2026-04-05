@@ -15,20 +15,23 @@ namespace zb::mds {
 
 class MasstreeImportService {
 public:
-    struct Request {
+    struct TemplateGenerationRequest {
+        std::string masstree_root;
+        std::string template_id;
+        std::string path_list_file;
+        std::string repeat_dir_prefix;
+        uint32_t verify_inode_samples{16};
+        uint32_t verify_dentry_samples{16};
+    };
+
+    struct TemplateImportRequest {
         std::string masstree_root;
         std::string namespace_id;
         std::string generation_id;
         std::string path_prefix;
-        std::string source_mode;
-        std::string path_list_file;
-        std::string repeat_dir_prefix;
         std::string template_id;
         std::string template_mode;
         uint64_t inode_start{0};
-        uint64_t file_count{100000000ULL};
-        uint32_t max_files_per_leaf_dir{2048};
-        uint32_t max_subdirs_per_dir{256};
         uint32_t verify_inode_samples{16};
         uint32_t verify_dentry_samples{16};
         bool publish_route{true};
@@ -53,9 +56,13 @@ public:
     MasstreeImportService(RocksMetaStore* meta_store,
                           MasstreeNamespaceCatalog* catalog);
 
-    bool ImportNamespace(const Request& request,
-                         Result* result,
-                         std::string* error) const;
+    bool GenerateTemplate(const TemplateGenerationRequest& request,
+                          Result* result,
+                          std::string* error) const;
+
+    bool ImportTemplateNamespace(const TemplateImportRequest& request,
+                                 Result* result,
+                                 std::string* error) const;
 
 private:
     bool ReserveInodeRange(uint64_t inode_count,

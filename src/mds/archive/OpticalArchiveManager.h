@@ -50,13 +50,7 @@ private:
                                           zb::rpc::OpticalFileLocation* location,
                                           std::string* error) const;
     bool LoadDiskFileLocation(uint64_t inode_id, zb::rpc::DiskFileLocation* location, std::string* error) const;
-    bool LoadLegacyDiskFileLocation(uint64_t inode_id,
-                                    zb::rpc::DiskFileLocation* location,
-                                    std::string* error) const;
     bool LoadOpticalFileLocation(uint64_t inode_id, zb::rpc::OpticalFileLocation* location, std::string* error) const;
-    bool LoadLegacyOpticalFileLocation(uint64_t inode_id,
-                                       zb::rpc::OpticalFileLocation* location,
-                                       std::string* error) const;
     bool SaveOpticalFileLocation(uint64_t inode_id,
                                  const zb::rpc::OpticalFileLocation& location,
                                  rocksdb::WriteBatch* batch,

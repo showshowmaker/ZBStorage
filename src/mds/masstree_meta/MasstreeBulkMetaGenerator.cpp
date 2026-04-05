@@ -38,6 +38,7 @@ struct PathListNode {
     std::string name;
     std::string relative_path;
     size_t parent{kInvalidNodeIndex};
+    uint32_t depth{0};
     std::vector<size_t> children;
     bool explicit_entry{false};
     bool explicit_dir{false};
@@ -47,11 +48,18 @@ struct PathListPlan {
     std::vector<PathListNode> nodes;
     uint64_t base_file_count{0};
     uint64_t base_dir_count{0};
+    uint64_t dir_count{0};
     uint64_t repeat_count{0};
     uint64_t actual_file_count{0};
     uint64_t actual_inode_count{0};
     uint64_t actual_dentry_count{0};
+    uint64_t base_max_depth{0};
+    uint64_t max_depth{0};
     uint64_t wrapper_name_width{kMinRepeatWidth};
+    std::vector<uint64_t> base_dir_count_by_depth;
+    std::vector<uint64_t> base_file_count_by_depth;
+    std::vector<uint64_t> dir_count_by_depth;
+    std::vector<uint64_t> file_count_by_depth;
     std::string fingerprint;
     std::string repeat_dir_prefix;
 };
@@ -465,6 +473,15 @@ uint64_t GenerateFileSizeBytes(uint64_t namespace_seed,
     return profile.min_file_size_bytes + (seed % (span + 1ULL));
 }
 
+void EnsureDepthVectorSize(std::vector<uint64_t>* counts, size_t depth) {
+    if (!counts) {
+        return;
+    }
+    if (counts->size() <= depth) {
+        counts->resize(depth + 1U, 0);
+    }
+}
+
 bool WriteVerifyManifest(const fs::path& path,
                          const MasstreeNamespaceManifest& manifest,
                          std::string* error) {
@@ -488,11 +505,15 @@ bool WriteVerifyManifest(const fs::path& path,
     out << "target_file_count=" << manifest.target_file_count << "\n";
     out << "file_count=" << manifest.file_count << "\n";
     out << "template_base_file_count=" << manifest.template_base_file_count << "\n";
+    out << "template_base_dir_count=" << manifest.template_base_dir_count << "\n";
+    out << "dir_count=" << manifest.dir_count << "\n";
     out << "template_repeat_count=" << manifest.template_repeat_count << "\n";
     out << "repeat_dir_prefix=" << manifest.repeat_dir_prefix << "\n";
     out << "path_list_fingerprint=" << manifest.path_list_fingerprint << "\n";
     out << "level1_dir_count=" << manifest.level1_dir_count << "\n";
     out << "leaf_dir_count=" << manifest.leaf_dir_count << "\n";
+    out << "template_base_max_depth=" << manifest.template_base_max_depth << "\n";
+    out << "max_depth=" << manifest.max_depth << "\n";
     out << "max_files_per_leaf_dir=" << manifest.max_files_per_leaf_dir << "\n";
     out << "max_subdirs_per_dir=" << manifest.max_subdirs_per_dir << "\n";
     out << "min_file_size_bytes=" << manifest.min_file_size_bytes << "\n";
@@ -503,6 +524,57 @@ bool WriteVerifyManifest(const fs::path& path,
     if (!out.good()) {
         if (error) {
             *error = "failed to write verify manifest: " + path.string();
+        }
+        return false;
+    }
+    return true;
+}
+
+bool WriteStructureStats(const fs::path& path,
+                         const MasstreeNamespaceManifest& manifest,
+                         const std::vector<uint64_t>& dir_count_by_depth,
+                         const std::vector<uint64_t>& file_count_by_depth,
+                         const std::vector<uint64_t>& base_dir_count_by_depth,
+                         const std::vector<uint64_t>& base_file_count_by_depth,
+                         std::string* error) {
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) {
+        if (error) {
+            *error = "failed to open structure stats: " + path.string();
+        }
+        return false;
+    }
+    out << "masstree_namespace_structure_v1\n";
+    out << "namespace_id=" << manifest.namespace_id << "\n";
+    out << "generation_id=" << manifest.generation_id << "\n";
+    out << "source_mode=" << manifest.source_mode << "\n";
+    out << "path_prefix=" << manifest.path_prefix << "\n";
+    out << "target_file_count=" << manifest.target_file_count << "\n";
+    out << "file_count=" << manifest.file_count << "\n";
+    out << "dir_count=" << manifest.dir_count << "\n";
+    out << "inode_count=" << manifest.inode_count << "\n";
+    out << "dentry_count=" << manifest.dentry_count << "\n";
+    out << "template_base_file_count=" << manifest.template_base_file_count << "\n";
+    out << "template_base_dir_count=" << manifest.template_base_dir_count << "\n";
+    out << "template_repeat_count=" << manifest.template_repeat_count << "\n";
+    out << "template_base_max_depth=" << manifest.template_base_max_depth << "\n";
+    out << "max_depth=" << manifest.max_depth << "\n";
+    out << "actual_level_count=" << dir_count_by_depth.size() << "\n";
+    for (size_t depth = 0; depth < dir_count_by_depth.size(); ++depth) {
+        const uint64_t file_count = depth < file_count_by_depth.size() ? file_count_by_depth[depth] : 0;
+        out << "actual_level[" << depth << "]=dirs:" << dir_count_by_depth[depth]
+            << ",files:" << file_count << "\n";
+    }
+    out << "base_level_count=" << base_dir_count_by_depth.size() << "\n";
+    for (size_t depth = 0; depth < base_dir_count_by_depth.size(); ++depth) {
+        const uint64_t file_count = depth < base_file_count_by_depth.size() ? base_file_count_by_depth[depth] : 0;
+        out << "base_level[" << depth << "]=dirs:" << base_dir_count_by_depth[depth]
+            << ",files:" << file_count << "\n";
+    }
+    out.flush();
+    if (!out.good()) {
+        if (error) {
+            *error = "failed to write structure stats: " + path.string();
         }
         return false;
     }
@@ -582,6 +654,7 @@ bool BuildPathListPlan(const MasstreeBulkMetaGenerator::Request& request,
                 node.name = parts[i];
                 node.relative_path = current_path;
                 node.parent = current;
+                node.depth = local_plan.nodes[current].depth + 1U;
                 local_plan.nodes.push_back(std::move(node));
                 local_plan.nodes[current].children.push_back(new_index);
                 node_index_by_path.emplace(current_path, new_index);
@@ -619,10 +692,20 @@ bool BuildPathListPlan(const MasstreeBulkMetaGenerator::Request& request,
     fingerprint_order.reserve(local_plan.nodes.size() - 1U);
     for (size_t i = 1; i < local_plan.nodes.size(); ++i) {
         fingerprint_order.push_back(i);
-        if (NodeIsDirectory(local_plan.nodes[i])) {
+        const PathListNode& node = local_plan.nodes[i];
+        const bool is_dir = NodeIsDirectory(node);
+        const size_t depth = static_cast<size_t>(node.depth);
+        if (is_dir) {
             ++local_plan.base_dir_count;
+            EnsureDepthVectorSize(&local_plan.base_dir_count_by_depth, depth);
+            ++local_plan.base_dir_count_by_depth[depth];
         } else {
             ++local_plan.base_file_count;
+            EnsureDepthVectorSize(&local_plan.base_file_count_by_depth, depth);
+            ++local_plan.base_file_count_by_depth[depth];
+        }
+        if (node.depth > local_plan.base_max_depth) {
+            local_plan.base_max_depth = node.depth;
         }
     }
     if (local_plan.base_file_count == 0) {
@@ -646,9 +729,23 @@ bool BuildPathListPlan(const MasstreeBulkMetaGenerator::Request& request,
     local_plan.repeat_dir_prefix = repeat_dir_prefix;
     local_plan.repeat_count = CeilDiv(request.file_count, local_plan.base_file_count);
     local_plan.actual_file_count = local_plan.repeat_count * local_plan.base_file_count;
+    local_plan.dir_count = 1ULL + local_plan.repeat_count * (1ULL + local_plan.base_dir_count);
     const uint64_t base_non_root_node_count = static_cast<uint64_t>(local_plan.nodes.size() - 1U);
     local_plan.actual_inode_count = 1ULL + local_plan.repeat_count * (1ULL + base_non_root_node_count);
     local_plan.actual_dentry_count = local_plan.repeat_count * (1ULL + base_non_root_node_count);
+    local_plan.max_depth = local_plan.base_max_depth + 1ULL;
+    local_plan.dir_count_by_depth.assign(static_cast<size_t>(local_plan.max_depth + 1ULL), 0);
+    local_plan.file_count_by_depth.assign(static_cast<size_t>(local_plan.max_depth + 1ULL), 0);
+    local_plan.dir_count_by_depth[0] = 1;
+    local_plan.dir_count_by_depth[1] = local_plan.repeat_count;
+    for (size_t depth = 1; depth < local_plan.base_dir_count_by_depth.size(); ++depth) {
+        local_plan.dir_count_by_depth[depth + 1U] +=
+            local_plan.repeat_count * local_plan.base_dir_count_by_depth[depth];
+    }
+    for (size_t depth = 1; depth < local_plan.base_file_count_by_depth.size(); ++depth) {
+        local_plan.file_count_by_depth[depth + 1U] +=
+            local_plan.repeat_count * local_plan.base_file_count_by_depth[depth];
+    }
     local_plan.wrapper_name_width =
         std::max<size_t>(kMinRepeatWidth,
                          DecimalDigits(local_plan.repeat_count == 0 ? 0 : (local_plan.repeat_count - 1ULL)));
@@ -760,7 +857,11 @@ bool MasstreeBulkMetaGenerator::SummarizePathList(const Request& request,
         summary->inode_count = plan.actual_inode_count;
         summary->dentry_count = plan.actual_dentry_count;
         summary->base_file_count = plan.base_file_count;
+        summary->base_dir_count = plan.base_dir_count;
+        summary->dir_count = plan.dir_count;
         summary->repeat_count = plan.repeat_count;
+        summary->base_max_depth = plan.base_max_depth;
+        summary->max_depth = plan.max_depth;
         summary->fingerprint = plan.fingerprint;
         summary->repeat_dir_prefix = plan.repeat_dir_prefix;
     }
@@ -826,6 +927,7 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
     const fs::path dentry_records_path = staging_dir / "dentry.records";
     const fs::path manifest_path = staging_dir / "manifest.txt";
     const fs::path verify_manifest_path = staging_dir / "verify_manifest.txt";
+    const fs::path structure_stats_path = staging_dir / "structure_stats.txt";
 
     std::ofstream inode_out;
     std::ofstream dentry_out;
@@ -850,11 +952,19 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
     uint64_t target_file_count = request.file_count;
     uint64_t actual_file_count = 0;
     uint64_t base_file_count = 0;
+    uint64_t base_dir_count = 0;
+    uint64_t dir_count = 0;
     uint64_t repeat_count = 1;
     uint64_t level1_dir_count = 0;
     uint64_t leaf_dir_count = 0;
+    uint64_t base_max_depth = 0;
+    uint64_t max_depth = 0;
     std::string repeat_dir_prefix;
     std::string path_list_fingerprint;
+    std::vector<uint64_t> base_dir_count_by_depth;
+    std::vector<uint64_t> base_file_count_by_depth;
+    std::vector<uint64_t> dir_count_by_depth;
+    std::vector<uint64_t> file_count_by_depth;
     MasstreeDecimalAccumulator total_file_bytes_accumulator;
 
     if (IsPathListMode(source_mode)) {
@@ -868,11 +978,19 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
         dentry_count = plan.actual_dentry_count;
         inode_max = request.inode_start + inode_count - 1ULL;
         base_file_count = plan.base_file_count;
+        base_dir_count = plan.base_dir_count;
+        dir_count = plan.dir_count;
         repeat_count = plan.repeat_count;
         repeat_dir_prefix = plan.repeat_dir_prefix;
         path_list_fingerprint = plan.fingerprint;
         level1_dir_count = plan.repeat_count;
         leaf_dir_count = plan.repeat_count * plan.base_dir_count;
+        base_max_depth = plan.base_max_depth;
+        max_depth = plan.max_depth;
+        base_dir_count_by_depth = plan.base_dir_count_by_depth;
+        base_file_count_by_depth = plan.base_file_count_by_depth;
+        dir_count_by_depth = plan.dir_count_by_depth;
+        file_count_by_depth = plan.file_count_by_depth;
 
         const uint32_t root_nlink = static_cast<uint32_t>(2U + plan.repeat_count);
         if (!WriteInodeRecord(&inode_out,
@@ -942,11 +1060,21 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
         const uint64_t leaf_inode_count = leaf_dir_count_synthetic;
         actual_file_count = request.file_count;
         base_file_count = request.file_count;
+        base_dir_count = 0;
+        dir_count = 1ULL + level1_inode_count + leaf_inode_count;
         inode_count = 1 + level1_inode_count + leaf_inode_count + request.file_count;
         dentry_count = level1_dir_count_synthetic + leaf_dir_count_synthetic + request.file_count;
         inode_max = request.inode_start + inode_count - 1ULL;
         level1_dir_count = level1_dir_count_synthetic;
         leaf_dir_count = leaf_dir_count_synthetic;
+        base_max_depth = 0;
+        max_depth = 3;
+        dir_count_by_depth.assign(static_cast<size_t>(max_depth + 1ULL), 0);
+        file_count_by_depth.assign(static_cast<size_t>(max_depth + 1ULL), 0);
+        dir_count_by_depth[0] = 1;
+        dir_count_by_depth[1] = level1_dir_count_synthetic;
+        dir_count_by_depth[2] = leaf_dir_count_synthetic;
+        file_count_by_depth[3] = request.file_count;
 
         uint64_t next_inode = request.inode_start;
         root_inode_id = next_inode++;
@@ -1074,6 +1202,7 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
     manifest.dentry_pages_path = (staging_dir / "dentry_pages.seg").string();
     manifest.dentry_sparse_index_path = (staging_dir / "dentry_sparse.idx").string();
     manifest.verify_manifest_path = verify_manifest_path.string();
+    manifest.structure_stats_path = structure_stats_path.string();
     manifest.page_size_bytes = kMasstreeDefaultPageSizeBytes;
     manifest.root_inode_id = root_inode_id;
     manifest.inode_min = inode_min;
@@ -1083,9 +1212,13 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
     manifest.target_file_count = target_file_count;
     manifest.file_count = actual_file_count;
     manifest.template_base_file_count = base_file_count;
+    manifest.template_base_dir_count = base_dir_count;
+    manifest.dir_count = dir_count;
     manifest.template_repeat_count = repeat_count;
     manifest.level1_dir_count = level1_dir_count;
     manifest.leaf_dir_count = leaf_dir_count;
+    manifest.template_base_max_depth = base_max_depth;
+    manifest.max_depth = max_depth;
     manifest.max_files_per_leaf_dir = request.max_files_per_leaf_dir;
     manifest.max_subdirs_per_dir = request.max_subdirs_per_dir;
     manifest.min_file_size_bytes = optical_profile.min_file_size_bytes;
@@ -1095,7 +1228,14 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
                                    total_file_bytes_accumulator.DivideBy(actual_file_count);
 
     if (!manifest.SaveToFile(manifest_path.string(), error) ||
-        !WriteVerifyManifest(verify_manifest_path, manifest, error)) {
+        !WriteVerifyManifest(verify_manifest_path, manifest, error) ||
+        !WriteStructureStats(structure_stats_path,
+                             manifest,
+                             dir_count_by_depth,
+                             file_count_by_depth,
+                             base_dir_count_by_depth,
+                             base_file_count_by_depth,
+                             error)) {
         return false;
     }
 
@@ -1105,6 +1245,7 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
         result->inode_records_path = inode_records_path.string();
         result->dentry_records_path = dentry_records_path.string();
         result->verify_manifest_path = verify_manifest_path.string();
+        result->structure_stats_path = structure_stats_path.string();
         result->source_mode = source_mode;
         result->root_inode_id = root_inode_id;
         result->inode_min = inode_min;
@@ -1113,9 +1254,13 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
         result->inode_count = inode_count;
         result->dentry_count = dentry_count;
         result->base_file_count = base_file_count;
+        result->base_dir_count = base_dir_count;
+        result->dir_count = dir_count;
         result->repeat_count = repeat_count;
         result->level1_dir_count = level1_dir_count;
         result->leaf_dir_count = leaf_dir_count;
+        result->base_max_depth = base_max_depth;
+        result->max_depth = max_depth;
         result->avg_file_size_bytes = manifest.avg_file_size_bytes;
         result->total_file_bytes = manifest.total_file_bytes;
     }

@@ -21,6 +21,7 @@ struct MasstreeNamespaceManifest {
     std::string dentry_pages_path;
     std::string dentry_sparse_index_path;
     std::string verify_manifest_path;
+    std::string structure_stats_path;
     std::string cluster_stats_path;
     std::string allocation_summary_path;
     std::string optical_layout_path;
@@ -35,9 +36,13 @@ struct MasstreeNamespaceManifest {
     uint64_t target_file_count{0};
     uint64_t file_count{0};
     uint64_t template_base_file_count{0};
+    uint64_t template_base_dir_count{0};
+    uint64_t dir_count{0};
     uint64_t template_repeat_count{0};
     uint64_t level1_dir_count{0};
     uint64_t leaf_dir_count{0};
+    uint64_t template_base_max_depth{0};
+    uint64_t max_depth{0};
     uint64_t max_files_per_leaf_dir{0};
     uint64_t max_subdirs_per_dir{0};
     uint64_t min_file_size_bytes{0};

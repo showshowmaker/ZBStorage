@@ -2,8 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/common_demo_env.sh"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
-RUN_DIR="${RUN_DIR:-${ROOT_DIR}/.demo_run}"
+DEMO_ROOT="${DEMO_ROOT:-$(resolve_demo_root "${ROOT_DIR}")}"
+RUN_DIR="${RUN_DIR:-${DEMO_ROOT}}"
 MDS_ADDR="${MDS_ADDR:-127.0.0.1:9000}"
 SCHEDULER_ADDR="${SCHEDULER_ADDR:-127.0.0.1:9100}"
 MOUNT_POINT="${MOUNT_POINT:-${RUN_DIR}/mnt}"

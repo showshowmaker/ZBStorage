@@ -2,14 +2,15 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/common_demo_env.sh"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
+DEMO_ROOT="${DEMO_ROOT:-$(resolve_demo_root "${ROOT_DIR}")}"
 MDS_ADDR="${MDS_ADDR:-127.0.0.1:9000}"
 SCHEDULER_ADDR="${SCHEDULER_ADDR:-127.0.0.1:9100}"
-MOUNT_POINT="${MOUNT_POINT:-${ROOT_DIR}/.demo_run/mnt}"
+MOUNT_POINT="${MOUNT_POINT:-${DEMO_ROOT}/mnt}"
 NAMESPACE_PREFIX="${NAMESPACE_PREFIX:-demo-ns}"
-FILES_PER_NAMESPACE=100000000
 TEMPLATE_ID="${MASSTREE_TEMPLATE_ID:-template-100m-v1}"
-TEMPLATE_MODE="${MASSTREE_TEMPLATE_MODE:-legacy_records}"
+TEMPLATE_MODE="${MASSTREE_TEMPLATE_MODE:-page_fast}"
 VERIFY_INODE_SAMPLES="${MASSTREE_VERIFY_INODE_SAMPLES:-32}"
 VERIFY_DENTRY_SAMPLES="${MASSTREE_VERIFY_DENTRY_SAMPLES:-32}"
 
@@ -32,7 +33,7 @@ fi
 
 for ((i=1; i<=NAMESPACE_COUNT; ++i)); do
   NAMESPACE_ID="$(printf "%s-%06d" "${NAMESPACE_PREFIX}" "${i}")"
-  echo "==== importing namespace ${i}/${NAMESPACE_COUNT}: ${NAMESPACE_ID} (${FILES_PER_NAMESPACE} files) ===="
+  echo "==== importing namespace ${i}/${NAMESPACE_COUNT}: ${NAMESPACE_ID} (template=${TEMPLATE_ID}) ===="
 
   "${BUILD_DIR}/system_demo_tool" \
     --mds="${MDS_ADDR}" \
@@ -40,7 +41,6 @@ for ((i=1; i<=NAMESPACE_COUNT; ++i)); do
     --mount_point="${MOUNT_POINT}" \
     --scenario=masstree_import \
     --masstree_namespace_id="${NAMESPACE_ID}" \
-    --masstree_file_count="${FILES_PER_NAMESPACE}" \
     --masstree_template_id="${TEMPLATE_ID}" \
     --masstree_template_mode="${TEMPLATE_MODE}" \
     --masstree_verify_inode_samples="${VERIFY_INODE_SAMPLES}" \

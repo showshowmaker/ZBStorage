@@ -138,6 +138,10 @@ public:
                                 const zb::rpc::ImportArchiveNamespaceRequest* request,
                                 zb::rpc::ImportArchiveNamespaceReply* response,
                                 google::protobuf::Closure* done) override;
+    void GenerateMasstreeTemplate(google::protobuf::RpcController* cntl_base,
+                                  const zb::rpc::GenerateMasstreeTemplateRequest* request,
+                                  zb::rpc::GenerateMasstreeTemplateReply* response,
+                                  google::protobuf::Closure* done) override;
     void ImportMasstreeNamespace(google::protobuf::RpcController* cntl_base,
                                  const zb::rpc::ImportMasstreeNamespaceRequest* request,
                                  zb::rpc::ImportMasstreeNamespaceReply* response,
@@ -161,8 +165,15 @@ public:
 
 private:
     struct MasstreeImportJob {
+        enum class Kind {
+            kGenerateTemplate,
+            kImportTemplateNamespace,
+        };
+
         std::string job_id;
-        MasstreeImportService::Request request;
+        Kind kind{Kind::kImportTemplateNamespace};
+        MasstreeImportService::TemplateGenerationRequest template_request;
+        MasstreeImportService::TemplateImportRequest import_request;
         MasstreeImportService::Result result;
         zb::rpc::MasstreeImportJobState state{zb::rpc::MASSTREE_IMPORT_JOB_PENDING};
         std::string error_message;
@@ -200,9 +211,6 @@ private:
     bool SavePathPlacementPolicy(const zb::rpc::PathPlacementPolicyRecord& policy, std::string* error);
     bool DeletePathPlacementPolicyByPrefix(const std::string& path_prefix, std::string* error);
     bool LoadDiskFileLocation(uint64_t inode_id, zb::rpc::DiskFileLocation* location, std::string* error) const;
-    bool LoadLegacyDiskFileLocation(uint64_t inode_id,
-                                    zb::rpc::DiskFileLocation* location,
-                                    std::string* error) const;
     bool BuildDiskFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
                                        zb::rpc::DiskFileLocation* location,
                                        std::string* error) const;
@@ -211,9 +219,6 @@ private:
                               rocksdb::WriteBatch* batch) const;
     bool DeleteDiskFileLocation(uint64_t inode_id, rocksdb::WriteBatch* batch, std::string* error) const;
     bool LoadOpticalFileLocation(uint64_t inode_id, zb::rpc::OpticalFileLocation* location, std::string* error) const;
-    bool LoadLegacyOpticalFileLocation(uint64_t inode_id,
-                                       zb::rpc::OpticalFileLocation* location,
-                                       std::string* error) const;
     bool BuildOpticalFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
                                           uint64_t inode_id,
                                           zb::rpc::OpticalFileLocation* location,
@@ -252,7 +257,10 @@ private:
                                 std::string* error) const;
     void RunMasstreeImportWorker();
     void TrimMasstreeImportJobsLocked();
-    std::shared_ptr<MasstreeImportJob> EnqueueMasstreeImportJob(const MasstreeImportService::Request& request);
+    std::shared_ptr<MasstreeImportJob> EnqueueMasstreeTemplateJob(
+        const MasstreeImportService::TemplateGenerationRequest& request);
+    std::shared_ptr<MasstreeImportJob> EnqueueMasstreeNamespaceImportJob(
+        const MasstreeImportService::TemplateImportRequest& request);
     std::shared_ptr<MasstreeImportJob> FindMasstreeImportJob(const std::string& job_id) const;
     static void FillMasstreeImportJobInfo(const MasstreeImportJob& job, zb::rpc::MasstreeImportJobInfo* info);
     brpc::Channel* GetDataChannel(const std::string& address, std::string* error);

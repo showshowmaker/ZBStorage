@@ -285,7 +285,7 @@ bool GetInode(RocksMetaStore* store,
         return false;
     }
     std::string decode_error;
-    if (!MetaCodec::DecodeInodeAttrCompat(*payload, attr, nullptr, &decode_error)) {
+    if (!MetaCodec::DecodeUnifiedInodeAttr(*payload, attr, &decode_error)) {
         if (error) {
             *error = decode_error.empty() ? "invalid inode payload" : decode_error;
         }
