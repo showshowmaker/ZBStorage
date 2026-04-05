@@ -29,7 +29,6 @@
 #include "demo_params.h"
 #include "demo_result.h"
 #include "mds/masstree_meta/MasstreeDecimalUtils.h"
-#include "mds/masstree_meta/MasstreeManifest.h"
 #include "mds.pb.h"
 #include "scheduler.pb.h"
 
@@ -167,6 +166,88 @@ std::string TrimCopy(std::string value) {
     }).base(), value.end());
     return value;
 }
+
+struct LocalMasstreeNamespaceManifest {
+    std::string namespace_id;
+    std::string path_prefix;
+    std::string generation_id;
+    std::string repeat_dir_prefix;
+    uint64_t template_repeat_count{0};
+
+    static bool LoadFromFile(const std::string& manifest_path,
+                             LocalMasstreeNamespaceManifest* manifest,
+                             std::string* error) {
+        if (!manifest) {
+            if (error) {
+                *error = "manifest output is null";
+            }
+            return false;
+        }
+
+        std::ifstream input(manifest_path);
+        if (!input) {
+            if (error) {
+                *error = "failed to open masstree namespace manifest: " + manifest_path;
+            }
+            return false;
+        }
+
+        LocalMasstreeNamespaceManifest parsed;
+        std::string line;
+        bool header_checked = false;
+        size_t line_no = 0;
+        while (std::getline(input, line)) {
+            ++line_no;
+            const std::string trimmed = TrimCopy(line);
+            if (trimmed.empty() || trimmed[0] == '#') {
+                continue;
+            }
+            if (!header_checked) {
+                header_checked = true;
+                if (trimmed != "masstree_namespace_manifest_v1") {
+                    if (error) {
+                        *error = "invalid masstree namespace manifest header: " + manifest_path;
+                    }
+                    return false;
+                }
+                continue;
+            }
+            const size_t eq = trimmed.find('=');
+            if (eq == std::string::npos) {
+                if (error) {
+                    *error = "invalid masstree namespace manifest line " + std::to_string(line_no);
+                }
+                return false;
+            }
+            const std::string key = TrimCopy(trimmed.substr(0, eq));
+            const std::string value = TrimCopy(trimmed.substr(eq + 1));
+            if (key == "namespace_id") {
+                parsed.namespace_id = value;
+            } else if (key == "path_prefix") {
+                parsed.path_prefix = value;
+            } else if (key == "generation_id") {
+                parsed.generation_id = value;
+            } else if (key == "repeat_dir_prefix") {
+                parsed.repeat_dir_prefix = value;
+            } else if (key == "template_repeat_count") {
+                try {
+                    parsed.template_repeat_count = static_cast<uint64_t>(std::stoull(value));
+                } catch (...) {
+                    if (error) {
+                        *error = "invalid template_repeat_count in masstree namespace manifest: " + manifest_path;
+                    }
+                    return false;
+                }
+            }
+        }
+
+        *manifest = std::move(parsed);
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+};
 
 std::string JoinMountedPath(const std::string& mount_point, const std::string& logical_path) {
     fs::path mounted = fs::path(mount_point);
@@ -2292,7 +2373,7 @@ private:
         }
     }
 
-    bool LoadLastMasstreeManifest(zb::mds::MasstreeNamespaceManifest* manifest, std::string* error) const {
+    bool LoadLastMasstreeManifest(LocalMasstreeNamespaceManifest* manifest, std::string* error) const {
         if (!manifest) {
             if (error) {
                 *error = "manifest output is null";
@@ -2305,7 +2386,7 @@ private:
             }
             return false;
         }
-        return zb::mds::MasstreeNamespaceManifest::LoadFromFile(last_masstree_manifest_path_, manifest, error);
+        return LocalMasstreeNamespaceManifest::LoadFromFile(last_masstree_manifest_path_, manifest, error);
     }
 
     bool ReadNextNormalizedPathListLine(std::ifstream* input,
@@ -2441,7 +2522,7 @@ private:
 
     bool BuildRandomLookupPath(std::string* full_path,
                                std::string* relative_file_path,
-                               zb::mds::MasstreeNamespaceManifest* manifest_out,
+                               LocalMasstreeNamespaceManifest* manifest_out,
                                std::string* error) const {
         if (!full_path || !relative_file_path) {
             if (error) {
@@ -2450,7 +2531,7 @@ private:
             return false;
         }
 
-        zb::mds::MasstreeNamespaceManifest manifest;
+        LocalMasstreeNamespaceManifest manifest;
         if (!LoadLastMasstreeManifest(&manifest, error)) {
             return false;
         }
@@ -2516,7 +2597,7 @@ private:
             QuerySample sample;
             sample.index = i + 1;
             if (query_mode == "random_path_lookup") {
-                zb::mds::MasstreeNamespaceManifest manifest;
+                LocalMasstreeNamespaceManifest manifest;
                 std::string relative_file_path;
                 if (!BuildRandomLookupPath(&sample.full_path, &relative_file_path, &manifest, &sample.error_message)) {
                     sample.ok = false;
