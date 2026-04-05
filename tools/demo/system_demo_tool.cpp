@@ -17,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -28,6 +29,7 @@
 #include "demo_params.h"
 #include "demo_result.h"
 #include "mds/masstree_meta/MasstreeDecimalUtils.h"
+#include "mds/masstree_meta/MasstreeManifest.h"
 #include "mds.pb.h"
 #include "scheduler.pb.h"
 
@@ -61,6 +63,9 @@ DEFINE_uint32(masstree_verify_inode_samples, 32, "Masstree import inode verify s
 DEFINE_uint32(masstree_verify_dentry_samples, 32, "Masstree import dentry verify sample count");
 DEFINE_uint32(masstree_job_poll_interval_ms, 1000, "Masstree import job poll interval in ms");
 DEFINE_uint32(masstree_query_samples, 1, "Masstree query sample count");
+DEFINE_string(masstree_query_mode,
+              "random_path_lookup",
+              "Masstree query mode: random_path_lookup|random_inode");
 DEFINE_uint64(posix_file_size_mb, 100, "POSIX tier demo file size in MiB");
 DEFINE_uint32(posix_chunk_size_kb, 1024, "POSIX tier demo chunk size in KiB");
 DEFINE_uint32(posix_repeat, 1, "POSIX tier demo repeat count");
@@ -151,6 +156,16 @@ std::string NormalizeLogicalPath(const std::string& path) {
         out.pop_back();
     }
     return out.empty() ? "/" : out;
+}
+
+std::string TrimCopy(std::string value) {
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }));
+    value.erase(std::find_if(value.rbegin(), value.rend(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }).base(), value.end());
+    return value;
 }
 
 std::string JoinMountedPath(const std::string& mount_point, const std::string& logical_path) {
@@ -544,6 +559,149 @@ std::string FormatDouble(double value, int precision = 2) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(precision) << value;
     return oss.str();
+}
+
+bool NormalizePathListRelativePath(std::string raw,
+                                   std::string* normalized,
+                                   bool* explicit_dir,
+                                   std::string* error) {
+    if (!normalized || !explicit_dir) {
+        if (error) {
+            *error = "path_list normalization output is null";
+        }
+        return false;
+    }
+    raw = TrimCopy(std::move(raw));
+    *explicit_dir = false;
+    if (raw.empty()) {
+        normalized->clear();
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    std::replace(raw.begin(), raw.end(), '\\', '/');
+    while (raw.size() >= 2U && raw[0] == '.' && raw[1] == '/') {
+        raw.erase(0, 2U);
+    }
+    while (!raw.empty() && raw.front() == '/') {
+        raw.erase(raw.begin());
+    }
+    while (!raw.empty() && raw.back() == '/') {
+        raw.pop_back();
+        *explicit_dir = true;
+    }
+    if (raw.empty() || raw == ".") {
+        normalized->clear();
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    std::string out;
+    out.reserve(raw.size());
+    bool prev_slash = false;
+    for (char ch : raw) {
+        if (ch == '/') {
+            if (!prev_slash) {
+                out.push_back(ch);
+            }
+            prev_slash = true;
+            continue;
+        }
+        prev_slash = false;
+        out.push_back(ch);
+    }
+    if (out.empty()) {
+        normalized->clear();
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    std::ostringstream rebuilt;
+    size_t start = 0;
+    bool first = true;
+    while (start < out.size()) {
+        const size_t slash = out.find('/', start);
+        const std::string part = slash == std::string::npos ? out.substr(start) : out.substr(start, slash - start);
+        start = slash == std::string::npos ? out.size() : slash + 1U;
+        if (part.empty() || part == ".") {
+            continue;
+        }
+        if (part == "..") {
+            if (error) {
+                *error = "path_list contains parent traversal";
+            }
+            return false;
+        }
+        if (!first) {
+            rebuilt << '/';
+        }
+        rebuilt << part;
+        first = false;
+    }
+    *normalized = rebuilt.str();
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+std::string PathBaseName(const std::string& path) {
+    const size_t slash = path.rfind('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1U);
+}
+
+bool PathListEntryIsDirectory(const std::string& normalized_path, bool explicit_dir) {
+    if (normalized_path.empty() || explicit_dir) {
+        return true;
+    }
+    return PathBaseName(normalized_path).find('.') == std::string::npos;
+}
+
+bool IsDescendantRelativePath(const std::string& parent, const std::string& candidate) {
+    if (candidate.empty()) {
+        return false;
+    }
+    if (parent.empty()) {
+        return true;
+    }
+    return candidate.size() > parent.size() && candidate.compare(0, parent.size(), parent) == 0 &&
+           candidate[parent.size()] == '/';
+}
+
+size_t DecimalDigits(uint64_t value) {
+    size_t digits = 1;
+    while (value >= 10U) {
+        value /= 10U;
+        ++digits;
+    }
+    return digits;
+}
+
+std::string FixedWidthDecimal(uint64_t value, size_t width) {
+    std::ostringstream out;
+    out.width(static_cast<std::streamsize>(width));
+    out.fill('0');
+    out << value;
+    return out.str();
+}
+
+std::string RepeatDirName(const std::string& prefix, uint64_t repeat_index, size_t width) {
+    return prefix + "_" + FixedWidthDecimal(repeat_index, width);
+}
+
+uint64_t RandomUint64Exclusive(uint64_t upper_bound) {
+    if (upper_bound <= 1U) {
+        return 0;
+    }
+    static thread_local std::mt19937_64 generator(std::random_device{}());
+    std::uniform_int_distribution<uint64_t> distribution(0, upper_bound - 1U);
+    return distribution(generator);
 }
 
 std::string FormatLatencyHuman(uint64_t latency_us) {
@@ -1055,7 +1213,7 @@ private:
         actions_.push_back({"6",
                             "TC-P5 Masstree 查询",
                             "执行随机元数据查询并输出统计",
-                            "6 [n=<count>]",
+                            "6 [n=<count>] [query_mode=random_path_lookup|random_inode]",
                             {"query", "p5"}});
         actions_.push_back({"7", "执行完整测试集", "按顺序执行健康检查、P1、P2、P3、P4、P5", "7", {"all"}});
         actions_.push_back({"8", "查看上次结果", "重新展示最近一次测试结果", "8", {"last"}});
@@ -1159,7 +1317,8 @@ private:
 	        out << "  10 template_id=template-pathlist-100m path_list_file=examples/masstree_path_list_sample.txt repeat_dir_prefix=copy\n";
 	        out << "  5 namespace=demo-ns generation=gen-report-001 template_id=template-pathlist-100m template_mode=page_fast\n";
         out << "  6 n=1\n";
-        out << "  6 n=1000 log_file=logs/p5_run.log\n";
+        out << "  6 n=1000 query_mode=random_path_lookup log_file=logs/p5_run.log\n";
+        out << "  6 n=1000 query_mode=random_inode log_file=logs/p5_inode_run.log\n";
         return out.str();
     }
 
@@ -1242,6 +1401,8 @@ private:
                     return false;
                 }
                 FLAGS_masstree_query_samples = parsed_u32;
+            } else if (key == "query_mode" || key == "masstree_query_mode") {
+                FLAGS_masstree_query_mode = value;
             } else if (key == "file_size_mb" || key == "posix_file_size_mb") {
                 if (!ParseUint64Value(key, value, &parsed_u64, error)) {
                     return false;
@@ -1981,6 +2142,7 @@ private:
                 last_printed_elapsed_bucket = elapsed_bucket;
             }
             if (job.state() == zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED) {
+                last_masstree_manifest_path_ = job.manifest_path();
                 zb::rpc::GetMasstreeClusterStatsReply cluster_after;
                 if (!mds_.GetMasstreeClusterStats(&cluster_after)) {
                     std::cerr << "GetMasstreeClusterStats(after) failed: " << cluster_after.status().message() << '\n';
@@ -2130,14 +2292,215 @@ private:
         }
     }
 
+    bool LoadLastMasstreeManifest(zb::mds::MasstreeNamespaceManifest* manifest, std::string* error) const {
+        if (!manifest) {
+            if (error) {
+                *error = "manifest output is null";
+            }
+            return false;
+        }
+        if (last_masstree_manifest_path_.empty()) {
+            if (error) {
+                *error = "random_path_lookup requires a namespace imported in the current demo process";
+            }
+            return false;
+        }
+        return zb::mds::MasstreeNamespaceManifest::LoadFromFile(last_masstree_manifest_path_, manifest, error);
+    }
+
+    bool ReadNextNormalizedPathListLine(std::ifstream* input,
+                                        std::string* normalized_path,
+                                        bool* explicit_dir,
+                                        std::string* error) const {
+        if (!input || !normalized_path || !explicit_dir) {
+            if (error) {
+                *error = "path_list reader output is null";
+            }
+            return false;
+        }
+        std::string raw_line;
+        while (std::getline(*input, raw_line)) {
+            const std::string trimmed = TrimCopy(raw_line);
+            if (trimmed.empty()) {
+                continue;
+            }
+            return NormalizePathListRelativePath(trimmed, normalized_path, explicit_dir, error);
+        }
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+
+    bool FindFirstDescendantFilePath(std::ifstream* input,
+                                     const std::string& directory_path,
+                                     std::string* relative_file_path,
+                                     std::string* error) const {
+        if (!input || !relative_file_path) {
+            if (error) {
+                *error = "relative_file_path output is null";
+            }
+            return false;
+        }
+        std::string candidate_path;
+        bool explicit_dir = false;
+        while (ReadNextNormalizedPathListLine(input, &candidate_path, &explicit_dir, error)) {
+            if (!PathListEntryIsDirectory(candidate_path, explicit_dir) &&
+                IsDescendantRelativePath(directory_path, candidate_path)) {
+                *relative_file_path = candidate_path;
+                if (error) {
+                    error->clear();
+                }
+                return true;
+            }
+        }
+        if (error && error->empty()) {
+            *error = "failed to find a file under selected directory";
+        }
+        return false;
+    }
+
+    bool PickRandomPathListRelativeFilePath(std::string* relative_file_path, std::string* error) const {
+        if (!relative_file_path) {
+            if (error) {
+                *error = "relative_file_path output is null";
+            }
+            return false;
+        }
+        if (FLAGS_masstree_path_list_file.empty()) {
+            if (error) {
+                *error = "random_path_lookup requires masstree_path_list_file";
+            }
+            return false;
+        }
+
+        std::error_code stat_error;
+        const uint64_t file_size = fs::file_size(FLAGS_masstree_path_list_file, stat_error);
+        if (stat_error || file_size == 0) {
+            if (error) {
+                *error = "failed to stat path_list_file: " + FLAGS_masstree_path_list_file;
+            }
+            return false;
+        }
+
+        constexpr uint32_t kMaxSelectionAttempts = 64;
+        for (uint32_t attempt = 0; attempt < kMaxSelectionAttempts; ++attempt) {
+            std::ifstream input(FLAGS_masstree_path_list_file, std::ios::binary);
+            if (!input) {
+                if (error) {
+                    *error = "failed to open path_list_file: " + FLAGS_masstree_path_list_file;
+                }
+                return false;
+            }
+
+            const uint64_t offset = RandomUint64Exclusive(file_size);
+            input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+            if (!input.good()) {
+                input.clear();
+                input.seekg(0, std::ios::beg);
+            } else if (offset != 0) {
+                std::string discard;
+                std::getline(input, discard);
+            }
+
+            std::string selected_path;
+            bool explicit_dir = false;
+            std::string read_error;
+            if (!ReadNextNormalizedPathListLine(&input, &selected_path, &explicit_dir, &read_error)) {
+                input.clear();
+                input.seekg(0, std::ios::beg);
+                if (!ReadNextNormalizedPathListLine(&input, &selected_path, &explicit_dir, &read_error)) {
+                    if (error) {
+                        *error = read_error.empty() ? "path_list_file has no usable entries" : read_error;
+                    }
+                    return false;
+                }
+            }
+
+            if (!PathListEntryIsDirectory(selected_path, explicit_dir)) {
+                *relative_file_path = selected_path;
+                if (error) {
+                    error->clear();
+                }
+                return true;
+            }
+
+            if (FindFirstDescendantFilePath(&input, selected_path, relative_file_path, &read_error)) {
+                if (error) {
+                    error->clear();
+                }
+                return true;
+            }
+        }
+
+        if (error) {
+            *error = "failed to sample a queryable file path from path_list_file";
+        }
+        return false;
+    }
+
+    bool BuildRandomLookupPath(std::string* full_path,
+                               std::string* relative_file_path,
+                               zb::mds::MasstreeNamespaceManifest* manifest_out,
+                               std::string* error) const {
+        if (!full_path || !relative_file_path) {
+            if (error) {
+                *error = "lookup path output is null";
+            }
+            return false;
+        }
+
+        zb::mds::MasstreeNamespaceManifest manifest;
+        if (!LoadLastMasstreeManifest(&manifest, error)) {
+            return false;
+        }
+        if (!PickRandomPathListRelativeFilePath(relative_file_path, error)) {
+            return false;
+        }
+
+        const uint64_t repeat_count = std::max<uint64_t>(1, manifest.template_repeat_count);
+        const std::string repeat_dir_prefix = manifest.repeat_dir_prefix.empty()
+                                                  ? (FLAGS_masstree_repeat_dir_prefix.empty()
+                                                         ? std::string("copy")
+                                                         : FLAGS_masstree_repeat_dir_prefix)
+                                                  : manifest.repeat_dir_prefix;
+        const std::string path_prefix = manifest.path_prefix.empty()
+                                            ? (last_masstree_path_prefix_.empty()
+                                                   ? NormalizeLogicalPath(FLAGS_masstree_path_prefix)
+                                                   : last_masstree_path_prefix_)
+                                            : NormalizeLogicalPath(manifest.path_prefix);
+        const size_t repeat_width = std::max<size_t>(6, DecimalDigits(repeat_count - 1U));
+        const std::string repeat_dir =
+            RepeatDirName(repeat_dir_prefix, RandomUint64Exclusive(repeat_count), repeat_width);
+        *full_path = NormalizeLogicalPath(path_prefix + "/" + repeat_dir + "/" + *relative_file_path);
+        if (manifest_out) {
+            *manifest_out = manifest;
+        }
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
     bool RunMasstreeQueryDemo() {
         PrintSection("Masstree Query Demo");
-        zb::rpc::GetRandomMasstreeFileAttrRequest attr_request;
+        const std::string query_mode = [&]() {
+            const std::string normalized = ToLowerCopy(TrimCopy(FLAGS_masstree_query_mode));
+            return normalized.empty() ? std::string("random_path_lookup") : normalized;
+        }();
         const uint32_t sample_count = std::max<uint32_t>(1, FLAGS_masstree_query_samples);
         struct QuerySample {
             uint32_t index{0};
             bool ok{false};
             uint64_t latency_us{0};
+            std::string namespace_id;
+            std::string path_prefix;
+            std::string generation_id;
+            std::string full_path;
+            std::string file_name;
+            uint64_t inode_id{0};
+            zb::rpc::InodeAttr attr;
+            zb::rpc::MdsStatus status;
             zb::rpc::GetRandomMasstreeFileAttrReply reply;
             std::string error_message;
         };
@@ -2150,15 +2513,56 @@ private:
         uint64_t max_latency_us = 0;
 
         for (uint32_t i = 0; i < sample_count; ++i) {
-            const auto started_at = std::chrono::steady_clock::now();
             QuerySample sample;
             sample.index = i + 1;
-            sample.ok = mds_.GetRandomMasstreeFileAttr(attr_request, &sample.reply);
-            sample.latency_us = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_at)
-                    .count());
-            if (!sample.ok) {
-                sample.error_message = sample.reply.status().message();
+            if (query_mode == "random_path_lookup") {
+                zb::mds::MasstreeNamespaceManifest manifest;
+                std::string relative_file_path;
+                if (!BuildRandomLookupPath(&sample.full_path, &relative_file_path, &manifest, &sample.error_message)) {
+                    sample.ok = false;
+                    sample.status.set_code(zb::rpc::MDS_INVALID_ARGUMENT);
+                    sample.status.set_message(sample.error_message);
+                } else {
+                    sample.file_name = PathBaseName(relative_file_path);
+                    sample.namespace_id = manifest.namespace_id.empty() ? last_masstree_namespace_id_ : manifest.namespace_id;
+                    sample.path_prefix = manifest.path_prefix.empty() ? last_masstree_path_prefix_ : manifest.path_prefix;
+                    sample.generation_id =
+                        manifest.generation_id.empty() ? last_masstree_generation_id_ : manifest.generation_id;
+                    const auto started_at = std::chrono::steady_clock::now();
+                    sample.ok = mds_.Lookup(sample.full_path, &sample.attr, &sample.status);
+                    sample.latency_us = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                              started_at)
+                            .count());
+                    sample.inode_id = sample.attr.inode_id();
+                    if (!sample.ok) {
+                        sample.error_message = sample.status.message();
+                    }
+                }
+            } else if (query_mode == "random_inode") {
+                zb::rpc::GetRandomMasstreeFileAttrRequest attr_request;
+                attr_request.set_query_mode(query_mode);
+                const auto started_at = std::chrono::steady_clock::now();
+                sample.ok = mds_.GetRandomMasstreeFileAttr(attr_request, &sample.reply);
+                sample.latency_us = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                          started_at)
+                        .count());
+                sample.status = sample.reply.status();
+                if (!sample.ok) {
+                    sample.error_message = sample.reply.status().message();
+                } else {
+                    sample.namespace_id = sample.reply.namespace_id();
+                    sample.path_prefix = sample.reply.path_prefix();
+                    sample.generation_id = sample.reply.generation_id();
+                    sample.full_path = sample.reply.full_path();
+                    sample.file_name = sample.reply.file_name();
+                    sample.inode_id = sample.reply.inode_id();
+                    sample.attr = sample.reply.attr();
+                }
+            } else {
+                std::cerr << "Unsupported query_mode: " << query_mode << '\n';
+                return false;
             }
             total_latency_us += sample.latency_us;
             min_latency_us = std::min<uint64_t>(min_latency_us, sample.latency_us);
@@ -2172,6 +2576,7 @@ private:
         }
 
         std::cout << "query_samples=" << sample_count << '\n';
+        std::cout << "query_mode=" << query_mode << '\n';
         std::cout << "query_success_count=" << success_count << '\n';
         std::cout << "query_failure_count=" << failure_count << '\n';
         std::cout << "query_success_rate="
@@ -2188,19 +2593,19 @@ private:
             std::cout << "样本序号=" << sample.index << '\n';
             std::cout << "查询成功=" << (sample.ok ? "true" : "false") << '\n';
             std::cout << "查询耗时=" << FormatLatencyHuman(sample.latency_us) << '\n';
-            std::cout << "状态码=" << static_cast<int>(sample.reply.status().code()) << '\n';
+            std::cout << "状态码=" << static_cast<int>(sample.status.code()) << '\n';
             std::cout << "状态信息=" << (sample.ok ? "OK" : sample.error_message) << '\n';
             if (!sample.ok) {
                 continue;
             }
-            const auto& attr = sample.reply.attr();
+            const auto& attr = sample.attr;
             std::cout << "文件元数据={\n";
-            std::cout << "  namespace_id=" << sample.reply.namespace_id() << '\n';
-            std::cout << "  full_path=" << sample.reply.full_path() << '\n';
-            std::cout << "  path_prefix=" << sample.reply.path_prefix() << '\n';
-            std::cout << "  generation_id=" << sample.reply.generation_id() << '\n';
-            std::cout << "  inode_id=" << sample.reply.inode_id() << '\n';
-            std::cout << "  file_name=" << sample.reply.file_name() << '\n';
+            std::cout << "  namespace_id=" << sample.namespace_id << '\n';
+            std::cout << "  full_path=" << sample.full_path << '\n';
+            std::cout << "  path_prefix=" << sample.path_prefix << '\n';
+            std::cout << "  generation_id=" << sample.generation_id << '\n';
+            std::cout << "  inode_id=" << sample.inode_id << '\n';
+            std::cout << "  file_name=" << sample.file_name << '\n';
             std::cout << "  type=" << InodeTypeToEnglishString(attr.type()) << '\n';
             std::cout << "  mode=" << attr.mode() << '\n';
             std::cout << "  uid=" << attr.uid() << '\n';
@@ -2392,6 +2797,7 @@ private:
     std::string last_masstree_namespace_id_;
     std::string last_masstree_generation_id_;
     std::string last_masstree_path_prefix_;
+    std::string last_masstree_manifest_path_;
     std::optional<zb::demo::DemoRunResult> last_result_;
 };
 

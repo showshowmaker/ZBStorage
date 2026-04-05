@@ -516,6 +516,7 @@ message GetMasstreeImportJobReply {
 message GetRandomMasstreeFileAttrRequest {
   string namespace_id = 1;
   string path_prefix = 2;
+  string query_mode = 3;
 }
 
 message GetRandomMasstreeFileAttrReply {

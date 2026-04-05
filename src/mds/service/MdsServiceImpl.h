@@ -250,11 +250,16 @@ private:
                               MasstreeNamespaceRoute* route,
                               std::string* error) const;
     bool PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
+                                const std::string& query_mode,
                                 uint64_t* inode_id,
                                 zb::rpc::InodeAttr* attr,
                                 std::string* file_name,
                                 std::string* full_path,
                                 std::string* error) const;
+    bool PickRandomMasstreeFileInode(const MasstreeNamespaceRoute& route,
+                                     uint64_t* inode_id,
+                                     zb::rpc::InodeAttr* attr,
+                                     std::string* error) const;
     void RunMasstreeImportWorker();
     void TrimMasstreeImportJobsLocked();
     std::shared_ptr<MasstreeImportJob> EnqueueMasstreeTemplateJob(

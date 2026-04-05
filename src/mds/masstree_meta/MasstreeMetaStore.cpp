@@ -403,6 +403,84 @@ bool MasstreeMetaStore::GetInode(const MasstreeNamespaceRoute& route,
     return ReadInodeAttr(*generation, inode_id, attr, error);
 }
 
+bool MasstreeMetaStore::BuildFullPath(const MasstreeNamespaceRoute& route,
+                                      uint64_t inode_id,
+                                      std::string* full_path,
+                                      std::string* file_name,
+                                      std::string* error) const {
+    if (!full_path || !file_name || inode_id == 0) {
+        if (error) {
+            *error = "invalid masstree full path lookup args";
+        }
+        return false;
+    }
+
+    std::shared_ptr<LoadedGeneration> generation;
+    if (!EnsureGenerationLoaded(route, &generation, error)) {
+        return false;
+    }
+
+    std::vector<std::string> components;
+    uint64_t current = inode_id;
+    while (current != 0) {
+        UnifiedInodeRecord inode;
+        if (!ReadUnifiedInode(*generation, current, &inode, error)) {
+            return false;
+        }
+        if (current == generation->manifest->root_inode_id) {
+            break;
+        }
+        if (inode.file_name.empty() || inode.file_name == "/") {
+            if (error) {
+                *error = "masstree inode missing file name";
+            }
+            return false;
+        }
+        components.push_back(inode.file_name);
+        if (inode.parent_inode_id == 0) {
+            if (error) {
+                *error = "masstree inode parent chain is broken";
+            }
+            return false;
+        }
+        current = inode.parent_inode_id;
+    }
+
+    if (current != generation->manifest->root_inode_id) {
+        if (error) {
+            *error = "masstree inode is outside generation root";
+        }
+        return false;
+    }
+
+    std::string normalized_prefix;
+    if (!NormalizePath(route.path_prefix, &normalized_prefix)) {
+        if (error) {
+            *error = "invalid masstree route prefix";
+        }
+        return false;
+    }
+    if (normalized_prefix.size() > 1 && normalized_prefix.back() == '/') {
+        normalized_prefix.pop_back();
+    }
+
+    *file_name = components.empty() ? "/" : components.front();
+    *full_path = normalized_prefix;
+    for (auto it = components.rbegin(); it != components.rend(); ++it) {
+        if (full_path->empty() || full_path->back() != '/') {
+            full_path->push_back('/');
+        }
+        full_path->append(*it);
+    }
+    if (full_path->empty()) {
+        *full_path = "/";
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
 bool MasstreeMetaStore::GetOpticalFileLocation(const MasstreeNamespaceRoute& route,
                                                uint64_t inode_id,
                                                zb::rpc::OpticalFileLocation* location,

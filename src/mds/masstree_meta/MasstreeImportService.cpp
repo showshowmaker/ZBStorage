@@ -340,7 +340,13 @@ bool MasstreeImportService::GenerateTemplate(const TemplateGenerationRequest& re
         result->file_count = template_manifest.file_count;
         result->level1_dir_count = template_manifest.level1_dir_count;
         result->leaf_dir_count = template_manifest.leaf_dir_count;
-        result->inode_pages_bytes = template_manifest.inode_pages_bytes;
+        if (!template_manifest.inode_pages_path.empty() && fs::exists(template_manifest.inode_pages_path)) {
+            std::error_code size_ec;
+            const uint64_t inode_pages_bytes = fs::file_size(template_manifest.inode_pages_path, size_ec);
+            result->inode_pages_bytes = size_ec ? 0 : inode_pages_bytes;
+        } else {
+            result->inode_pages_bytes = 0;
+        }
         result->avg_file_size_bytes = template_manifest.avg_file_size_bytes;
         result->total_file_bytes = template_manifest.total_file_bytes;
     }

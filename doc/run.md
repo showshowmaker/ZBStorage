@@ -257,6 +257,16 @@ bash scripts/run_system_demo.sh
 
 该脚本会启动交互式 `system_demo_tool`，进入菜单界面。
 
+补充说明：
+
+- `Masstree Query Demo` 默认使用 `query_mode=random_path_lookup`
+- `random_path_lookup` 会在客户端按需读取 `MASSTREE_PATH_LIST_FILE`
+- 每次查询会随机取一行；如果该行是目录，则继续向下扫描到该目录下第一个文件
+- 然后拼出真实查询路径：`<path_prefix>/<copy_xxxxxx>/<relative_file_path>`
+- 统计时延时，只计算 `Lookup(path)` RPC，从发送文件路径开始，到收到 inode 信息结束
+- 不计算客户端解析 `txt` 的时间
+- 因为查询要读取当前导入得到的 `manifest_path`，所以在同一个 demo 进程里应先执行一次 `5`，再执行 `6`
+
 ## 8. 一键展示 demo 程序的各个功能
 
 使用 [scripts/run_demo_showcase.sh](../scripts/run_demo_showcase.sh)。
@@ -313,8 +323,16 @@ bash scripts/run_demo_showcase.sh template-pathlist-100m examples/masstree_path_
 10 template_id=template-pathlist-100m path_list_file=examples/masstree_path_list_sample.txt repeat_dir_prefix=copy
 5 namespace=demo-ns generation=gen-001 template_id=template-pathlist-100m template_mode=page_fast
 6 n=10
+6 n=1000 query_mode=random_path_lookup
+6 n=1000 query_mode=random_inode
 7
 ```
+
+其中：
+
+- `6 n=10` 等价于 `6 n=10 query_mode=random_path_lookup`
+- `random_path_lookup` 是默认模式，适合测真实路径逐层查找时延
+- `random_inode` 直接走随机 inode 查询，不走客户端路径拼接
 
 ## 10. 推荐完整流程
 

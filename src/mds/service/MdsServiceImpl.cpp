@@ -29,6 +29,8 @@ constexpr const char* kCrossTierRenameMessage = "CROSS_TIER_RENAME";
 constexpr size_t kMaxRetainedMasstreeImportJobs = 1000;
 constexpr uint32_t kDefaultPosixBlockSize = 4096;
 constexpr uint64_t kDefaultDirectorySizeBytes = 4096;
+constexpr const char* kMasstreeQueryModeRandomInode = "random_inode";
+constexpr const char* kMasstreeQueryModeRandomPathLookup = "random_path_lookup";
 
 bool IsLocationMetadataMissing(const std::string& error) {
     return error.empty();
@@ -96,38 +98,15 @@ bool IsWriteOpenFlags(uint32_t flags) {
     return false;
 }
 
-std::string BuildMasstreeFileName(uint64_t file_index) {
-    std::ostringstream oss;
-    oss << 'f' << std::setw(9) << std::setfill('0') << file_index;
-    return oss.str();
+std::string NormalizeMasstreeQueryMode(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return mode.empty() ? std::string(kMasstreeQueryModeRandomPathLookup) : mode;
 }
 
-std::string BuildMasstreeDirName(char prefix, uint64_t value) {
-    std::ostringstream oss;
-    oss << prefix << std::setw(6) << std::setfill('0') << value;
-    return oss.str();
-}
-
-std::string BuildMasstreeFullPath(const MasstreeNamespaceManifest& manifest, uint64_t file_index) {
-    std::string full_path = manifest.path_prefix;
-    if (full_path.empty()) {
-        full_path = "/";
-    }
-    const uint64_t max_files_per_leaf = std::max<uint64_t>(1, manifest.max_files_per_leaf_dir);
-    const uint64_t max_subdirs_per_dir = std::max<uint64_t>(1, manifest.max_subdirs_per_dir);
-    const uint64_t leaf = file_index / max_files_per_leaf;
-    const uint64_t level1 = leaf / max_subdirs_per_dir;
-    const uint64_t slot = leaf % max_subdirs_per_dir;
-    if (full_path.size() > 1 && full_path.back() == '/') {
-        full_path.pop_back();
-    }
-    full_path.append("/");
-    full_path.append(BuildMasstreeDirName('d', level1));
-    full_path.append("/");
-    full_path.append(BuildMasstreeDirName('s', slot));
-    full_path.append("/");
-    full_path.append(BuildMasstreeFileName(file_index));
-    return full_path;
+bool IsMasstreeQueryModeValid(const std::string& mode) {
+    return mode == kMasstreeQueryModeRandomInode || mode == kMasstreeQueryModeRandomPathLookup;
 }
 
 uint32_t ComputeObjectCount(uint64_t file_size, uint64_t object_unit_size) {
@@ -1490,12 +1469,19 @@ void MdsServiceImpl::GetRandomMasstreeFileAttr(google::protobuf::RpcController* 
                    error.empty() ? "masstree namespace not found" : error);
         return;
     }
+    const std::string query_mode = NormalizeMasstreeQueryMode(request->query_mode());
+    if (!IsMasstreeQueryModeValid(query_mode)) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INVALID_ARGUMENT,
+                   "unsupported masstree query_mode: " + request->query_mode());
+        return;
+    }
 
     uint64_t inode_id = 0;
     zb::rpc::InodeAttr attr;
     std::string file_name;
     std::string full_path;
-    if (!PickRandomMasstreeFile(route, &inode_id, &attr, &file_name, &full_path, &error)) {
+    if (!PickRandomMasstreeFile(route, query_mode, &inode_id, &attr, &file_name, &full_path, &error)) {
         FillStatus(response->mutable_status(),
                    error.empty() ? zb::rpc::MDS_NOT_FOUND : zb::rpc::MDS_INTERNAL_ERROR,
                    error.empty() ? "masstree file not found" : error);
@@ -2727,13 +2713,11 @@ bool MdsServiceImpl::ResolveMasstreeRoute(const std::string& namespace_id,
     return false;
 }
 
-bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
-                                            uint64_t* inode_id,
-                                            zb::rpc::InodeAttr* attr,
-                                            std::string* file_name,
-                                            std::string* full_path,
-                                            std::string* error) const {
-    if (!inode_id || !attr || !file_name || !full_path) {
+bool MdsServiceImpl::PickRandomMasstreeFileInode(const MasstreeNamespaceRoute& route,
+                                                 uint64_t* inode_id,
+                                                 zb::rpc::InodeAttr* attr,
+                                                 std::string* error) const {
+    if (!inode_id || !attr) {
         if (error) {
             *error = "masstree random file outputs are null";
         }
@@ -2751,10 +2735,7 @@ bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
         }
         return false;
     }
-
-    const uint64_t first_file_inode =
-        manifest.inode_min + 1ULL + manifest.level1_dir_count + manifest.leaf_dir_count;
-    if (first_file_inode == 0 || first_file_inode > manifest.inode_max) {
+    if (manifest.inode_min == 0 || manifest.inode_min > manifest.inode_max) {
         if (error) {
             *error = "invalid masstree file inode range";
         }
@@ -2762,27 +2743,84 @@ bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
     }
 
     static thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<uint64_t> dist(0ULL, manifest.file_count - 1ULL);
-    const uint64_t file_index = dist(rng);
-    const uint64_t candidate_inode = first_file_inode + file_index;
-    zb::rpc::InodeAttr candidate_attr;
-    std::string local_error;
-    if (!masstree_meta_store_.GetInode(route, candidate_inode, &candidate_attr, &local_error)) {
+    std::uniform_int_distribution<uint64_t> dist(manifest.inode_min, manifest.inode_max);
+    const uint64_t random_attempts =
+        std::min<uint64_t>(std::max<uint64_t>(32ULL, manifest.file_count == 0 ? 32ULL : 64ULL),
+                           manifest.inode_max - manifest.inode_min + 1ULL);
+    for (uint64_t attempt = 0; attempt < random_attempts; ++attempt) {
+        const uint64_t candidate_inode = dist(rng);
+        zb::rpc::InodeAttr candidate_attr;
+        std::string local_error;
+        if (!masstree_meta_store_.GetInode(route, candidate_inode, &candidate_attr, &local_error)) {
+            continue;
+        }
+        if (candidate_attr.type() != zb::rpc::INODE_FILE) {
+            continue;
+        }
+        *inode_id = candidate_inode;
+        *attr = std::move(candidate_attr);
         if (error) {
-            *error = local_error.empty() ? "masstree file not found" : local_error;
+            error->clear();
+        }
+        return true;
+    }
+
+    for (uint64_t candidate_inode = manifest.inode_min; candidate_inode <= manifest.inode_max; ++candidate_inode) {
+        zb::rpc::InodeAttr candidate_attr;
+        std::string local_error;
+        if (!masstree_meta_store_.GetInode(route, candidate_inode, &candidate_attr, &local_error)) {
+            continue;
+        }
+        if (candidate_attr.type() != zb::rpc::INODE_FILE) {
+            continue;
+        }
+        *inode_id = candidate_inode;
+        *attr = std::move(candidate_attr);
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    if (error) {
+        *error = "masstree file not found";
+    }
+    return false;
+}
+
+bool MdsServiceImpl::PickRandomMasstreeFile(const MasstreeNamespaceRoute& route,
+                                            const std::string& query_mode,
+                                            uint64_t* inode_id,
+                                            zb::rpc::InodeAttr* attr,
+                                            std::string* file_name,
+                                            std::string* full_path,
+                                            std::string* error) const {
+    if (!inode_id || !attr || !file_name || !full_path) {
+        if (error) {
+            *error = "masstree random file outputs are null";
         }
         return false;
     }
-    if (candidate_attr.type() != zb::rpc::INODE_FILE) {
-        if (error) {
-            *error = "masstree inode is not a file";
-        }
+    if (!PickRandomMasstreeFileInode(route, inode_id, attr, error)) {
         return false;
     }
-    *inode_id = candidate_inode;
-    *attr = std::move(candidate_attr);
-    *file_name = BuildMasstreeFileName(file_index);
-    *full_path = BuildMasstreeFullPath(manifest, file_index);
+    if (!masstree_meta_store_.BuildFullPath(route, *inode_id, full_path, file_name, error)) {
+        return false;
+    }
+    if (query_mode == kMasstreeQueryModeRandomPathLookup) {
+        uint64_t resolved_inode = 0;
+        zb::rpc::InodeAttr resolved_attr;
+        if (!masstree_meta_store_.ResolvePath(route, *full_path, &resolved_inode, &resolved_attr, error)) {
+            return false;
+        }
+        if (resolved_inode != *inode_id) {
+            if (error) {
+                *error = "masstree path lookup returned unexpected inode";
+            }
+            return false;
+        }
+        *attr = std::move(resolved_attr);
+    }
     if (error) {
         error->clear();
     }

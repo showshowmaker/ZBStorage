@@ -28,6 +28,11 @@ public:
                   uint64_t inode_id,
                   zb::rpc::InodeAttr* attr,
                   std::string* error) const;
+    bool BuildFullPath(const MasstreeNamespaceRoute& route,
+                       uint64_t inode_id,
+                       std::string* full_path,
+                       std::string* file_name,
+                       std::string* error) const;
     bool GetOpticalFileLocation(const MasstreeNamespaceRoute& route,
                                 uint64_t inode_id,
                                 zb::rpc::OpticalFileLocation* location,
