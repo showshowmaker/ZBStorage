@@ -1,6 +1,10 @@
 #include "NodeStateCache.h"
 
 #include <algorithm>
+#include <cctype>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 #include <unordered_set>
 
 namespace zb::mds {
@@ -9,6 +13,51 @@ namespace {
 
 bool IsVirtualizedNodeType(NodeType type) {
     return type == NodeType::kVirtual || type == NodeType::kOptical;
+}
+
+bool TryParseTrailingUint32(const std::string& text, uint32_t* value) {
+    if (!value || text.empty()) {
+        return false;
+    }
+    size_t end = text.size();
+    size_t begin = end;
+    while (begin > 0 && std::isdigit(static_cast<unsigned char>(text[begin - 1])) != 0) {
+        --begin;
+    }
+    if (begin == end) {
+        return false;
+    }
+    try {
+        const uint64_t parsed = static_cast<uint64_t>(std::stoull(text.substr(begin, end - begin)));
+        if (parsed > std::numeric_limits<uint32_t>::max()) {
+            return false;
+        }
+        *value = static_cast<uint32_t>(parsed);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+const NodeInfo* MatchNodeForLocationLocked(const std::vector<NodeInfo>& nodes, const std::string& node_id) {
+    for (const auto& node : nodes) {
+        if (node.node_id == node_id) {
+            return &node;
+        }
+    }
+    for (const auto& node : nodes) {
+        const std::string prefix = node.node_id + "-v";
+        if (node_id.size() > prefix.size() && node_id.rfind(prefix, 0) == 0) {
+            return &node;
+        }
+    }
+    return nullptr;
+}
+
+std::string FormatLegacyPaddedDiskId(uint32_t numeric_disk_id) {
+    std::ostringstream oss;
+    oss << "disk-" << std::setw(2) << std::setfill('0') << numeric_disk_id;
+    return oss.str();
 }
 
 } // namespace
@@ -41,6 +90,44 @@ bool NodeStateCache::ResolveNodeAddress(const std::string& node_id, std::string*
                 return false;
             }
             *address = node.address;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool NodeStateCache::ResolveDiskId(const std::string& node_id,
+                                   uint32_t numeric_disk_id,
+                                   std::string* disk_id) const {
+    if (node_id.empty() || numeric_disk_id == 0 || !disk_id) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    const NodeInfo* node = MatchNodeForLocationLocked(nodes_, node_id);
+    if (!node) {
+        return false;
+    }
+
+    for (const auto& disk : node->disks) {
+        uint32_t parsed = 0;
+        if (TryParseTrailingUint32(disk.disk_id, &parsed) && parsed == numeric_disk_id) {
+            *disk_id = disk.disk_id;
+            return true;
+        }
+    }
+
+    const std::string compact = "disk" + std::to_string(numeric_disk_id);
+    for (const auto& disk : node->disks) {
+        if (disk.disk_id == compact) {
+            *disk_id = disk.disk_id;
+            return true;
+        }
+    }
+
+    const std::string padded = FormatLegacyPaddedDiskId(numeric_disk_id);
+    for (const auto& disk : node->disks) {
+        if (disk.disk_id == padded) {
+            *disk_id = disk.disk_id;
             return true;
         }
     }

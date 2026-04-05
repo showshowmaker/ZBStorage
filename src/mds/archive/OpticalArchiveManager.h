@@ -42,8 +42,21 @@ public:
 private:
     bool ShouldArchiveNow(const std::vector<NodeInfo>& nodes);
     bool LoadInodeAttr(uint64_t inode_id, zb::rpc::InodeAttr* attr, std::string* error) const;
+    bool BuildDiskFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
+                                       zb::rpc::DiskFileLocation* location,
+                                       std::string* error) const;
+    bool BuildOpticalFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
+                                          uint64_t inode_id,
+                                          zb::rpc::OpticalFileLocation* location,
+                                          std::string* error) const;
     bool LoadDiskFileLocation(uint64_t inode_id, zb::rpc::DiskFileLocation* location, std::string* error) const;
+    bool LoadLegacyDiskFileLocation(uint64_t inode_id,
+                                    zb::rpc::DiskFileLocation* location,
+                                    std::string* error) const;
     bool LoadOpticalFileLocation(uint64_t inode_id, zb::rpc::OpticalFileLocation* location, std::string* error) const;
+    bool LoadLegacyOpticalFileLocation(uint64_t inode_id,
+                                       zb::rpc::OpticalFileLocation* location,
+                                       std::string* error) const;
     bool SaveOpticalFileLocation(uint64_t inode_id,
                                  const zb::rpc::OpticalFileLocation& location,
                                  rocksdb::WriteBatch* batch,

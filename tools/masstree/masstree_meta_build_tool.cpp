@@ -13,7 +13,8 @@ void PrintUsage() {
         << "Usage:\n"
         << "  masstree_meta_build_tool --db_path=<path> --masstree_root=<dir>"
            " --namespace_id=<id> --generation_id=<id> --path_prefix=<prefix>"
-           " [--template_id=<id>] [--template_mode=<mode>] [--inode_start=<id>] [--file_count=<n>] [--max_files_per_leaf_dir=<n>]"
+           " [--template_id=<id>] [--template_mode=<mode>] [--source_mode=<mode>] [--path_list_file=<path>]"
+           " [--repeat_dir_prefix=<prefix>] [--inode_start=<id>] [--file_count=<n>] [--max_files_per_leaf_dir=<n>]"
            " [--max_subdirs_per_dir=<n>] [--verify_inode_samples=<n>]"
            " [--verify_dentry_samples=<n>] [--publish_route=0|1]\n";
 }
@@ -82,6 +83,9 @@ int main(int argc, char* argv[]) {
     const std::string path_prefix = GetArg(args, "path_prefix");
     const std::string template_id = GetArg(args, "template_id");
     const std::string template_mode = GetArg(args, "template_mode");
+    const std::string source_mode = GetArg(args, "source_mode");
+    const std::string path_list_file = GetArg(args, "path_list_file");
+    const std::string repeat_dir_prefix = GetArg(args, "repeat_dir_prefix");
     if (db_path.empty() || masstree_root.empty() || namespace_id.empty() ||
         generation_id.empty() || path_prefix.empty()) {
         PrintUsage();
@@ -102,6 +106,9 @@ int main(int argc, char* argv[]) {
     request.namespace_id = namespace_id;
     request.generation_id = generation_id;
     request.path_prefix = path_prefix;
+    request.source_mode = source_mode;
+    request.path_list_file = path_list_file;
+    request.repeat_dir_prefix = repeat_dir_prefix;
     request.template_id = template_id;
     request.template_mode = template_mode;
 
@@ -156,6 +163,7 @@ int main(int argc, char* argv[]) {
     std::cout << "inode_max=" << result.inode_max << "\n";
     std::cout << "inode_count=" << result.inode_count << "\n";
     std::cout << "dentry_count=" << result.dentry_count << "\n";
+    std::cout << "file_count=" << result.file_count << "\n";
     std::cout << "inode_pages_bytes=" << result.inode_pages_bytes << "\n";
     return 0;
 }

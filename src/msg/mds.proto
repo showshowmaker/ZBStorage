@@ -45,12 +45,30 @@ message InodeAttr {
   uint32 replica = 12;
   uint64 version = 13;
   InodeArchiveState file_archive_state = 14;
+  string file_name = 15;
+  InodeStorageTier storage_tier = 16;
+  uint64 disk_node_id = 17;
+  uint32 disk_id = 18;
+  uint64 optical_node_id = 19;
+  uint64 optical_disk_id = 20;
+  uint32 optical_image_id = 21;
+  bool disk_node_is_virtual = 22;
+  uint32 blksize = 23;
+  uint64 blocks_512 = 24;
+  uint32 rdev_major = 25;
+  uint32 rdev_minor = 26;
 }
 
 message Dentry {
   string name = 1;
   uint64 inode_id = 2;
   InodeType type = 3;
+}
+
+enum InodeStorageTier {
+  INODE_STORAGE_NONE = 0;
+  INODE_STORAGE_DISK = 1;
+  INODE_STORAGE_OPTICAL = 2;
 }
 
 enum StorageTier {
@@ -426,6 +444,9 @@ message ImportMasstreeNamespaceRequest {
   bool publish_route = 10;
   string template_id = 11;
   string template_mode = 12;
+  string source_mode = 13;
+  string path_list_file = 14;
+  string repeat_dir_prefix = 15;
 }
 
 message ImportMasstreeNamespaceReply {

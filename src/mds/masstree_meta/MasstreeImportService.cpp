@@ -17,6 +17,8 @@ namespace fs = std::filesystem;
 constexpr const char* kMasstreeTemplateGenerationId = "template";
 constexpr const char* kMasstreeTemplateModePageFast = "page_fast";
 constexpr const char* kMasstreeTemplateModeLegacyRecords = "legacy_records";
+constexpr const char* kMasstreeSourceModeSynthetic = "synthetic";
+constexpr const char* kMasstreeSourceModePathList = "path_list";
 
 bool NormalizePath(std::string path, std::string* normalized) {
     if (!normalized || path.empty()) {
@@ -72,6 +74,21 @@ std::string NormalizeTemplateMode(std::string mode) {
     return mode;
 }
 
+std::string NormalizeSourceMode(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return mode.empty() ? std::string(kMasstreeSourceModeSynthetic) : mode;
+}
+
+bool IsSourceModeValid(const std::string& mode) {
+    return mode == kMasstreeSourceModeSynthetic || mode == kMasstreeSourceModePathList;
+}
+
+bool IsPathListSourceMode(const std::string& mode) {
+    return NormalizeSourceMode(mode) == kMasstreeSourceModePathList;
+}
+
 bool IsTemplateModeValid(const std::string& mode) {
     return mode.empty() || mode == kMasstreeTemplateModePageFast || mode == kMasstreeTemplateModeLegacyRecords;
 }
@@ -83,6 +100,43 @@ bool UseLegacyTemplateRecordsMode(const std::string& mode) {
 bool ValidateTemplateManifest(const MasstreeImportService::Request& request,
                               const MasstreeNamespaceManifest& manifest,
                               std::string* error) {
+    const std::string source_mode = NormalizeSourceMode(request.source_mode);
+    const uint64_t manifest_target_file_count =
+        manifest.target_file_count == 0 ? manifest.file_count : manifest.target_file_count;
+    if (NormalizeSourceMode(manifest.source_mode) != source_mode) {
+        if (error) {
+            *error = "existing masstree template parameters do not match import request";
+        }
+        return false;
+    }
+    if (manifest_target_file_count != request.file_count) {
+        if (error) {
+            *error = "existing masstree template target file_count does not match import request";
+        }
+        return false;
+    }
+    if (source_mode == kMasstreeSourceModePathList) {
+        MasstreeBulkMetaGenerator generator;
+        MasstreeBulkMetaGenerator::Request summary_request;
+        summary_request.file_count = request.file_count;
+        summary_request.path_list_file = request.path_list_file;
+        summary_request.repeat_dir_prefix = request.repeat_dir_prefix;
+        MasstreeBulkMetaGenerator::PathListSummary summary;
+        if (!generator.SummarizePathList(summary_request, &summary, error)) {
+            return false;
+        }
+        if (manifest.path_list_fingerprint != summary.fingerprint ||
+            manifest.repeat_dir_prefix != summary.repeat_dir_prefix ||
+            manifest.template_base_file_count != summary.base_file_count ||
+            manifest.template_repeat_count != summary.repeat_count ||
+            manifest.file_count != summary.actual_file_count) {
+            if (error) {
+                *error = "existing masstree path_list template does not match import request";
+            }
+            return false;
+        }
+        return true;
+    }
     if (manifest.file_count != request.file_count ||
         manifest.max_files_per_leaf_dir != request.max_files_per_leaf_dir ||
         manifest.max_subdirs_per_dir != request.max_subdirs_per_dir) {
@@ -148,6 +202,9 @@ bool EnsureTemplateManifest(const MasstreeImportService::Request& request,
     template_request.namespace_id = request.template_id;
     template_request.generation_id = kMasstreeTemplateGenerationId;
     template_request.path_prefix = TemplatePathPrefix(request.template_id);
+    template_request.source_mode = request.source_mode;
+    template_request.path_list_file = request.path_list_file;
+    template_request.repeat_dir_prefix = request.repeat_dir_prefix;
     template_request.inode_start = 1;
     template_request.file_count = request.file_count;
     template_request.max_files_per_leaf_dir = request.max_files_per_leaf_dir;
@@ -243,8 +300,7 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     }
     if (!meta_store_ || !catalog_ || request.masstree_root.empty() ||
         request.namespace_id.empty() || request.generation_id.empty() ||
-        request.path_prefix.empty() || request.file_count == 0 ||
-        request.max_files_per_leaf_dir == 0 || request.max_subdirs_per_dir == 0) {
+        request.path_prefix.empty() || request.file_count == 0) {
         if (error) {
             *error = "invalid masstree import request";
         }
@@ -255,30 +311,32 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     if (!NormalizePathPrefix(request.path_prefix, &normalized.path_prefix, error)) {
         return false;
     }
+    normalized.source_mode = NormalizeSourceMode(request.source_mode);
     normalized.template_mode = NormalizeTemplateMode(request.template_mode);
+    if (!IsSourceModeValid(normalized.source_mode)) {
+        if (error) {
+            *error = "unsupported masstree source_mode: " + normalized.source_mode;
+        }
+        return false;
+    }
     if (!IsTemplateModeValid(normalized.template_mode)) {
         if (error) {
             *error = "unsupported masstree template_mode: " + normalized.template_mode;
         }
         return false;
     }
-
-    const uint64_t leaf_dir_count =
-        (normalized.file_count + normalized.max_files_per_leaf_dir - 1ULL) / normalized.max_files_per_leaf_dir;
-    const uint64_t level1_dir_count =
-        std::max<uint64_t>(1, (leaf_dir_count + normalized.max_subdirs_per_dir - 1ULL) / normalized.max_subdirs_per_dir);
-    const uint64_t required_inode_count = 1ULL + level1_dir_count + leaf_dir_count + normalized.file_count;
-    if (required_inode_count == 0) {
+    if (IsPathListSourceMode(normalized.source_mode) && normalized.template_id.empty()) {
         if (error) {
-            *error = "invalid masstree inode reservation size";
+            *error = "path_list source_mode requires template_id";
         }
         return false;
     }
-
-    if (normalized.inode_start == 0) {
-        if (!ReserveInodeRange(required_inode_count, &normalized.inode_start, error)) {
-            return false;
+    if (!IsPathListSourceMode(normalized.source_mode) &&
+        (normalized.max_files_per_leaf_dir == 0 || normalized.max_subdirs_per_dir == 0)) {
+        if (error) {
+            *error = "invalid masstree import request";
         }
+        return false;
     }
 
     MasstreeStatsStore stats_store(meta_store_);
@@ -302,12 +360,33 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
     uint64_t leaf_dir_count_for_result = 0;
 
     if (normalized.template_id.empty()) {
+        const uint64_t leaf_dir_count =
+            (normalized.file_count + normalized.max_files_per_leaf_dir - 1ULL) / normalized.max_files_per_leaf_dir;
+        const uint64_t level1_dir_count =
+            std::max<uint64_t>(1,
+                               (leaf_dir_count + normalized.max_subdirs_per_dir - 1ULL) /
+                                   normalized.max_subdirs_per_dir);
+        const uint64_t required_inode_count = 1ULL + level1_dir_count + leaf_dir_count + normalized.file_count;
+        if (required_inode_count == 0) {
+            if (error) {
+                *error = "invalid masstree inode reservation size";
+            }
+            return false;
+        }
+        if (normalized.inode_start == 0 &&
+            !ReserveInodeRange(required_inode_count, &normalized.inode_start, error)) {
+            return false;
+        }
+
         MasstreeBulkMetaGenerator generator;
         MasstreeBulkMetaGenerator::Request generate_request;
         generate_request.output_root = (fs::path(normalized.masstree_root) / "staging").string();
         generate_request.namespace_id = normalized.namespace_id;
         generate_request.generation_id = normalized.generation_id;
         generate_request.path_prefix = normalized.path_prefix;
+        generate_request.source_mode = normalized.source_mode;
+        generate_request.path_list_file = normalized.path_list_file;
+        generate_request.repeat_dir_prefix = normalized.repeat_dir_prefix;
         generate_request.inode_start = normalized.inode_start;
         generate_request.file_count = normalized.file_count;
         generate_request.max_files_per_leaf_dir = normalized.max_files_per_leaf_dir;
@@ -328,6 +407,10 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
         leaf_dir_count_for_result = generate_result.leaf_dir_count;
     } else {
         if (!EnsureTemplateManifest(normalized, &template_manifest, error)) {
+            return false;
+        }
+        if (normalized.inode_start == 0 &&
+            !ReserveInodeRange(template_manifest.inode_count, &normalized.inode_start, error)) {
             return false;
         }
         MasstreeNamespaceManifest working_manifest;
@@ -476,6 +559,7 @@ bool MasstreeImportService::ImportNamespace(const Request& request,
         result->inode_max = inode_max;
         result->inode_count = inode_count;
         result->dentry_count = dentry_count;
+        result->file_count = import_result.file_count;
         result->level1_dir_count = level1_dir_count_for_result;
         result->leaf_dir_count = leaf_dir_count_for_result;
         result->inode_pages_bytes = import_result.inode_pages_bytes;

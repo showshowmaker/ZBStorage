@@ -58,9 +58,10 @@ bool MetaStoreRouter::GetInode(uint64_t inode_id,
         }
         return GetMasstreeInode(inode_id, attr, error);
     }
-    if (!MetaCodec::DecodeInodeAttr(data, attr)) {
+    std::string decode_error;
+    if (!MetaCodec::DecodeInodeAttrCompat(data, attr, nullptr, &decode_error)) {
         if (error) {
-            *error = "invalid inode data";
+            *error = decode_error.empty() ? "invalid inode data" : decode_error;
         }
         return false;
     }

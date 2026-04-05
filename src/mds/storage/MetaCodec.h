@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "UnifiedInodeRecord.h"
 #include "mds.pb.h"
 
 namespace zb::mds {
@@ -32,8 +33,12 @@ public:
     static std::string EncodeUInt64(uint64_t value);
     static bool DecodeUInt64(const std::string& data, uint64_t* value);
 
-    static std::string EncodeInodeAttr(const zb::rpc::InodeAttr& attr);
-    static bool DecodeInodeAttr(const std::string& data, zb::rpc::InodeAttr* attr);
+    static bool EncodeUnifiedInodeRecord(const UnifiedInodeRecord& record, std::string* out, std::string* error);
+    static bool DecodeUnifiedInodeRecord(const std::string& data, UnifiedInodeRecord* record, std::string* error);
+    static bool DecodeInodeAttrCompat(const std::string& data,
+                                      zb::rpc::InodeAttr* attr,
+                                      bool* decoded_from_unified,
+                                      std::string* error);
 
     static std::string EncodeDiskFileLocation(const zb::rpc::DiskFileLocation& location);
     static bool DecodeDiskFileLocation(const std::string& data, zb::rpc::DiskFileLocation* location);

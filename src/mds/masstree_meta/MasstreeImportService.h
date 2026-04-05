@@ -20,6 +20,9 @@ public:
         std::string namespace_id;
         std::string generation_id;
         std::string path_prefix;
+        std::string source_mode;
+        std::string path_list_file;
+        std::string repeat_dir_prefix;
         std::string template_id;
         std::string template_mode;
         uint64_t inode_start{0};
@@ -39,6 +42,7 @@ public:
         uint64_t inode_max{0};
         uint64_t inode_count{0};
         uint64_t dentry_count{0};
+        uint64_t file_count{0};
         uint64_t level1_dir_count{0};
         uint64_t leaf_dir_count{0};
         uint64_t inode_pages_bytes{0};

@@ -3,14 +3,12 @@
 #include <cstdint>
 #include <string>
 
-#include "mds.pb.h"
+#include "../storage/UnifiedInodeRecord.h"
 
 namespace zb::mds {
 
 struct MasstreeInodeRecord {
-    zb::rpc::InodeAttr attr;
-    bool has_optical_image{false};
-    uint64_t optical_image_global_id{0};
+    UnifiedInodeRecord inode;
 };
 
 class MasstreeInodeRecordCodec {

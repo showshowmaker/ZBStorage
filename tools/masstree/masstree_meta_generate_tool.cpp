@@ -44,6 +44,9 @@ void PrintUsage() {
         << " --generation_id=<id>"
         << " --path_prefix=<path>"
         << " --inode_start=<u64>"
+        << " [--source_mode=synthetic|path_list]"
+        << " [--path_list_file=<path>]"
+        << " [--repeat_dir_prefix=<prefix>]"
         << " [--file_count=<u64>]"
         << " [--max_files_per_leaf_dir=<u32>]"
         << " [--max_subdirs_per_dir=<u32>]\n";
@@ -63,6 +66,12 @@ int main(int argc, char** argv) {
             request.generation_id = value;
         } else if (const std::string value = GetFlagValue(arg, "path_prefix"); !value.empty()) {
             request.path_prefix = value;
+        } else if (const std::string value = GetFlagValue(arg, "source_mode"); !value.empty()) {
+            request.source_mode = value;
+        } else if (const std::string value = GetFlagValue(arg, "path_list_file"); !value.empty()) {
+            request.path_list_file = value;
+        } else if (const std::string value = GetFlagValue(arg, "repeat_dir_prefix"); !value.empty()) {
+            request.repeat_dir_prefix = value;
         } else if (const std::string value = GetFlagValue(arg, "inode_start"); !value.empty()) {
             if (!ParseU64(value, &request.inode_start)) {
                 std::cerr << "invalid --inode_start\n";
@@ -112,11 +121,15 @@ int main(int argc, char** argv) {
     std::cout << "inode_records_path=" << result.inode_records_path << "\n";
     std::cout << "dentry_records_path=" << result.dentry_records_path << "\n";
     std::cout << "verify_manifest_path=" << result.verify_manifest_path << "\n";
+    std::cout << "source_mode=" << result.source_mode << "\n";
     std::cout << "root_inode_id=" << result.root_inode_id << "\n";
     std::cout << "inode_min=" << result.inode_min << "\n";
     std::cout << "inode_max=" << result.inode_max << "\n";
+    std::cout << "target_file_count=" << result.target_file_count << "\n";
     std::cout << "inode_count=" << result.inode_count << "\n";
     std::cout << "dentry_count=" << result.dentry_count << "\n";
+    std::cout << "base_file_count=" << result.base_file_count << "\n";
+    std::cout << "repeat_count=" << result.repeat_count << "\n";
     std::cout << "level1_dir_count=" << result.level1_dir_count << "\n";
     std::cout << "leaf_dir_count=" << result.leaf_dir_count << "\n";
     return 0;

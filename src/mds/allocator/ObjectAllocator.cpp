@@ -212,6 +212,15 @@ bool ObjectAllocator::ResolveNodeAddress(const std::string& node_id, std::string
     return cache_->ResolveNodeAddress(node_id, address);
 }
 
+bool ObjectAllocator::ResolveDiskId(const std::string& node_id,
+                                    uint32_t numeric_disk_id,
+                                    std::string* disk_id) const {
+    if (!cache_ || node_id.empty() || numeric_disk_id == 0 || !disk_id) {
+        return false;
+    }
+    return cache_->ResolveDiskId(node_id, numeric_disk_id, disk_id);
+}
+
 void ObjectAllocator::SetPgManager(PGManager* pg_manager) {
     pg_manager_ = pg_manager;
 }

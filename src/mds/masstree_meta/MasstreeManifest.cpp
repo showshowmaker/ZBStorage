@@ -91,6 +91,12 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
                 return false;
             }
             parsed.layout_version = static_cast<uint32_t>(parsed_value);
+        } else if (key == "source_mode") {
+            parsed.source_mode = value;
+        } else if (key == "path_list_fingerprint") {
+            parsed.path_list_fingerprint = value;
+        } else if (key == "repeat_dir_prefix") {
+            parsed.repeat_dir_prefix = value;
         } else if (key == "path_prefix") {
             parsed.path_prefix = value;
         } else if (key == "generation_id") {
@@ -171,10 +177,31 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
                 }
                 return false;
             }
+        } else if (key == "target_file_count") {
+            if (!ParseU64Field(value, &parsed.target_file_count)) {
+                if (error) {
+                    *error = "invalid target_file_count in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
         } else if (key == "file_count") {
             if (!ParseU64Field(value, &parsed.file_count)) {
                 if (error) {
                     *error = "invalid file_count in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+        } else if (key == "template_base_file_count") {
+            if (!ParseU64Field(value, &parsed.template_base_file_count)) {
+                if (error) {
+                    *error = "invalid template_base_file_count in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+        } else if (key == "template_repeat_count") {
+            if (!ParseU64Field(value, &parsed.template_repeat_count)) {
+                if (error) {
+                    *error = "invalid template_repeat_count in masstree namespace manifest: " + manifest_path;
                 }
                 return false;
             }
@@ -388,6 +415,9 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     out << "masstree_namespace_manifest_v1\n";
     out << "layout_version=" << layout_version << "\n";
     out << "namespace_id=" << namespace_id << "\n";
+    out << "source_mode=" << source_mode << "\n";
+    out << "path_list_fingerprint=" << path_list_fingerprint << "\n";
+    out << "repeat_dir_prefix=" << repeat_dir_prefix << "\n";
     out << "path_prefix=" << path_prefix << "\n";
     out << "generation_id=" << generation_id << "\n";
     out << "inode_records_path=" << inode_records_path << "\n";
@@ -408,7 +438,10 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     out << "inode_page_count=" << inode_page_count << "\n";
     out << "page_size_bytes=" << page_size_bytes << "\n";
     out << "dentry_page_count=" << dentry_page_count << "\n";
+    out << "target_file_count=" << target_file_count << "\n";
     out << "file_count=" << file_count << "\n";
+    out << "template_base_file_count=" << template_base_file_count << "\n";
+    out << "template_repeat_count=" << template_repeat_count << "\n";
     out << "level1_dir_count=" << level1_dir_count << "\n";
     out << "leaf_dir_count=" << leaf_dir_count << "\n";
     out << "max_files_per_leaf_dir=" << max_files_per_leaf_dir << "\n";

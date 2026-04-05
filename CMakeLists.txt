@@ -336,6 +336,7 @@ add_executable(mds_sst_gen_tool
     tools/meta_gen/file_size_sampler.cpp
     tools/meta_gen/mds_sst_generator.cpp
     tools/meta_gen/mds_sst_gen_tool.cpp
+    src/mds/storage/UnifiedInodeRecord.cpp
 )
 set_target_properties(mds_sst_gen_tool PROPERTIES
     CXX_STANDARD 20
@@ -402,6 +403,7 @@ add_executable(archive_meta_build_tool
     src/mds/archive_meta/ArchiveManifest.cpp
     src/mds/archive_meta/ArchiveNamespaceCatalog.cpp
     src/mds/storage/MetaCodec.cpp
+    src/mds/storage/UnifiedInodeRecord.cpp
     src/mds/storage/RocksMetaStore.cpp
 )
 set_target_properties(archive_meta_build_tool PROPERTIES
@@ -425,6 +427,7 @@ add_executable(masstree_meta_generate_tool
     tools/masstree/masstree_meta_generate_tool.cpp
     src/mds/masstree_meta/MasstreeBulkMetaGenerator.cpp
     src/mds/masstree_meta/MasstreeManifest.cpp
+    src/mds/storage/UnifiedInodeRecord.cpp
 )
 set_target_properties(masstree_meta_generate_tool PROPERTIES
     CXX_STANDARD 20
@@ -453,6 +456,7 @@ add_executable(masstree_meta_import_tool
     src/mds/masstree_meta/MasstreeOpticalAllocator.cpp
     src/mds/masstree_meta/MasstreePageLayout.cpp
     src/mds/masstree_meta/MasstreePageReader.cpp
+    src/mds/storage/UnifiedInodeRecord.cpp
 )
 set_target_properties(masstree_meta_import_tool PROPERTIES
     CXX_STANDARD 20
@@ -500,6 +504,7 @@ add_executable(masstree_meta_build_tool
     src/mds/masstree_meta/MasstreePageReader.cpp
     src/mds/masstree_meta/MasstreeStatsStore.cpp
     src/mds/storage/MetaCodec.cpp
+    src/mds/storage/UnifiedInodeRecord.cpp
     src/mds/storage/RocksMetaStore.cpp
 )
 set_target_properties(masstree_meta_build_tool PROPERTIES
@@ -639,6 +644,7 @@ add_executable(mds_server
     src/mds/masstree_meta/MasstreePageReader.cpp
     src/mds/masstree_meta/MasstreeStatsStore.cpp
     src/mds/storage/MetaCodec.cpp
+    src/mds/storage/UnifiedInodeRecord.cpp
     src/mds/storage/MetaStoreRouter.cpp
     src/mds/storage/RocksMetaStore.cpp
     src/mds/allocator/NodeStateCache.cpp

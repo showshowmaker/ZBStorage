@@ -10,6 +10,9 @@ struct MasstreeNamespaceManifest {
     std::string namespace_id;
     std::string path_prefix;
     std::string generation_id;
+    std::string source_mode;
+    std::string path_list_fingerprint;
+    std::string repeat_dir_prefix;
     std::string manifest_path;
     std::string inode_records_path;
     std::string dentry_records_path;
@@ -29,7 +32,10 @@ struct MasstreeNamespaceManifest {
     uint64_t dentry_count{0};
     uint64_t inode_page_count{0};
     uint64_t dentry_page_count{0};
+    uint64_t target_file_count{0};
     uint64_t file_count{0};
+    uint64_t template_base_file_count{0};
+    uint64_t template_repeat_count{0};
     uint64_t level1_dir_count{0};
     uint64_t leaf_dir_count{0};
     uint64_t max_files_per_leaf_dir{0};

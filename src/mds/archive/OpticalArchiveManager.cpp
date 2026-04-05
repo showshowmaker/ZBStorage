@@ -16,6 +16,8 @@
 
 #include "../storage/MetaCodec.h"
 #include "../storage/MetaSchema.h"
+#include "../storage/UnifiedInodeLocation.h"
+#include "../storage/UnifiedInodeRecord.h"
 #include "mds.pb.h"
 #include "real_node.pb.h"
 
@@ -237,14 +239,22 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
             }
             zb::rpc::DiskFileLocation disk_location;
             std::string disk_error;
-            if (!LoadDiskFileLocation(file_candidate.inode_id, &disk_location, &disk_error)) {
-                if (disk_error.empty()) {
-                    return true;
+            if (!BuildDiskFileLocationFromAttr(inode, &disk_location, &disk_error)) {
+                if (!disk_error.empty()) {
+                    if (local_error) {
+                        *local_error = disk_error;
+                    }
+                    return false;
                 }
-                if (local_error) {
-                    *local_error = disk_error;
+                if (!LoadDiskFileLocation(file_candidate.inode_id, &disk_location, &disk_error)) {
+                    if (disk_error.empty()) {
+                        return true;
+                    }
+                    if (local_error) {
+                        *local_error = disk_error;
+                    }
+                    return false;
                 }
-                return false;
             }
             uint64_t object_unit_size = inode.object_unit_size();
             if (object_unit_size == 0) {
@@ -672,7 +682,9 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
         }
 
         zb::rpc::InodeAttr inode;
-        if (!MetaCodec::DecodeInodeAttr(it->value().ToString(), &inode) || inode.type() != zb::rpc::INODE_FILE) {
+        std::string decode_error;
+        if (!MetaCodec::DecodeInodeAttrCompat(it->value().ToString(), &inode, nullptr, &decode_error) ||
+            inode.type() != zb::rpc::INODE_FILE) {
             continue;
         }
         if (inode.file_archive_state() != zb::rpc::INODE_ARCHIVE_ARCHIVED) {
@@ -686,18 +698,34 @@ bool OpticalArchiveManager::RunOnce(std::string* error) {
 
         zb::rpc::DiskFileLocation disk_location;
         std::string local_error;
-        if (!LoadDiskFileLocation(inode.inode_id(), &disk_location, &local_error)) {
-            if (error && error->empty() && !local_error.empty()) {
-                *error = local_error;
+        if (!BuildDiskFileLocationFromAttr(inode, &disk_location, &local_error)) {
+            if (!local_error.empty()) {
+                if (error && error->empty()) {
+                    *error = local_error;
+                }
+                continue;
             }
-            continue;
+            if (!LoadDiskFileLocation(inode.inode_id(), &disk_location, &local_error)) {
+                if (error && error->empty() && !local_error.empty()) {
+                    *error = local_error;
+                }
+                continue;
+            }
         }
         zb::rpc::OpticalFileLocation optical_location;
-        if (!LoadOpticalFileLocation(inode.inode_id(), &optical_location, &local_error)) {
-            if (error && error->empty() && !local_error.empty()) {
-                *error = local_error;
+        if (!BuildOpticalFileLocationFromAttr(inode, inode.inode_id(), &optical_location, &local_error)) {
+            if (!local_error.empty()) {
+                if (error && error->empty()) {
+                    *error = local_error;
+                }
+                continue;
             }
-            continue;
+            if (!LoadOpticalFileLocation(inode.inode_id(), &optical_location, &local_error)) {
+                if (error && error->empty() && !local_error.empty()) {
+                    *error = local_error;
+                }
+                continue;
+            }
         }
         if (!DeleteDiskFile(inode.inode_id(), disk_location, &local_error)) {
             if (error && error->empty() && !local_error.empty()) {
@@ -1083,7 +1111,44 @@ bool OpticalArchiveManager::UpdateInodeArchiveState(uint64_t inode_id,
         return true;
     }
     inode.set_file_archive_state(archive_state);
-    if (!store_->Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(inode), &local_error)) {
+    std::string current_payload;
+    if (store_->Get(InodeKey(inode_id), &current_payload, &local_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(current_payload, &record, nullptr)) {
+            ApplyAttrToUnifiedRecord(inode, &record);
+            std::string encoded;
+            if (!MetaCodec::EncodeUnifiedInodeRecord(record, &encoded, &local_error) ||
+                !store_->Put(InodeKey(inode_id), encoded, &local_error)) {
+                if (error) {
+                    *error = local_error.empty() ? "failed to persist inode archive state" : local_error;
+                }
+                return false;
+            }
+            return true;
+        }
+        if (MetaCodec::DecodeInodeAttrCompat(current_payload, &inode, nullptr, nullptr) &&
+            AttrToUnifiedInodeRecord(inode, 0, UnifiedStorageTier::kNone, &record, nullptr)) {
+            std::string encoded;
+            if (!MetaCodec::EncodeUnifiedInodeRecord(record, &encoded, &local_error) ||
+                !store_->Put(InodeKey(inode_id), encoded, &local_error)) {
+                if (error) {
+                    *error = local_error.empty() ? "failed to persist inode archive state" : local_error;
+                }
+                return false;
+            }
+            return true;
+        }
+    }
+    UnifiedInodeRecord fallback_record;
+    if (!AttrToUnifiedInodeRecord(inode, 0, UnifiedStorageTier::kNone, &fallback_record, &local_error)) {
+        if (error) {
+            *error = local_error.empty() ? "failed to normalize inode archive state" : local_error;
+        }
+        return false;
+    }
+    std::string encoded;
+    if (!MetaCodec::EncodeUnifiedInodeRecord(fallback_record, &encoded, &local_error) ||
+        !store_->Put(InodeKey(inode_id), encoded, &local_error)) {
         if (error) {
             *error = local_error.empty() ? "failed to persist inode archive state" : local_error;
         }
@@ -1156,14 +1221,22 @@ bool OpticalArchiveManager::HasUsableOpticalLocation(uint64_t inode_id,
     }
     zb::rpc::OpticalFileLocation location;
     std::string local_error;
-    if (!LoadOpticalFileLocation(inode_id, &location, &local_error)) {
-        if (local_error.empty()) {
-            return true;
+    if (!BuildOpticalFileLocationFromAttr(inode, inode_id, &location, &local_error)) {
+        if (!local_error.empty()) {
+            if (error) {
+                *error = local_error;
+            }
+            return false;
         }
-        if (error) {
-            *error = local_error;
+        if (!LoadOpticalFileLocation(inode_id, &location, &local_error)) {
+            if (local_error.empty()) {
+                return true;
+            }
+            if (error) {
+                *error = local_error;
+            }
+            return false;
         }
-        return false;
     }
     *archived = !location.node_id().empty() && !location.disk_id().empty();
     return true;
@@ -1519,11 +1592,81 @@ bool OpticalArchiveManager::LoadInodeAttr(uint64_t inode_id,
     if (!store_->Get(InodeKey(inode_id), &data, error)) {
         return false;
     }
-    if (!MetaCodec::DecodeInodeAttr(data, attr)) {
+    std::string decode_error;
+    if (!MetaCodec::DecodeInodeAttrCompat(data, attr, nullptr, &decode_error)) {
         if (error) {
-            *error = "invalid inode attr";
+            *error = decode_error.empty() ? "invalid inode attr" : decode_error;
         }
         return false;
+    }
+    return true;
+}
+
+bool OpticalArchiveManager::BuildDiskFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
+                                                          zb::rpc::DiskFileLocation* location,
+                                                          std::string* error) const {
+    if (!location) {
+        if (error) {
+            *error = "disk location output is null";
+        }
+        return false;
+    }
+    if (!PopulateDiskFileLocationFromInodeAttr(attr, location)) {
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+    if (cache_) {
+        std::string resolved_disk_id;
+        if (cache_->ResolveDiskId(location->node_id(), attr.disk_id(), &resolved_disk_id) &&
+            !resolved_disk_id.empty()) {
+            location->set_disk_id(resolved_disk_id);
+        }
+        std::string node_address;
+        if (cache_->ResolveNodeAddress(location->node_id(), &node_address) && !node_address.empty()) {
+            location->set_node_address(node_address);
+        }
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool OpticalArchiveManager::BuildOpticalFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
+                                                             uint64_t inode_id,
+                                                             zb::rpc::OpticalFileLocation* location,
+                                                             std::string* error) const {
+    if (!location) {
+        if (error) {
+            *error = "optical location output is null";
+        }
+        return false;
+    }
+    if (!PopulateOpticalFileLocationFromInodeAttr(attr, inode_id, location)) {
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+    if (cache_) {
+        if (attr.optical_disk_id() <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            std::string resolved_disk_id;
+            if (cache_->ResolveDiskId(location->node_id(),
+                                      static_cast<uint32_t>(attr.optical_disk_id()),
+                                      &resolved_disk_id) &&
+                !resolved_disk_id.empty()) {
+                location->set_disk_id(resolved_disk_id);
+            }
+        }
+        std::string node_address;
+        if (cache_->ResolveNodeAddress(location->node_id(), &node_address) && !node_address.empty()) {
+            location->set_node_address(node_address);
+        }
+    }
+    if (error) {
+        error->clear();
     }
     return true;
 }
@@ -1655,9 +1798,41 @@ bool OpticalArchiveManager::LoadDiskFileLocation(uint64_t inode_id,
         }
         return false;
     }
+    location->Clear();
+    std::string inode_payload;
+    std::string inode_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &inode_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr) &&
+            PopulateDiskFileLocationFromUnifiedRecord(record, location)) {
+            if (cache_) {
+                std::string resolved_disk_id;
+                if (cache_->ResolveDiskId(location->node_id(), record.disk_id, &resolved_disk_id) &&
+                    !resolved_disk_id.empty()) {
+                    location->set_disk_id(resolved_disk_id);
+                }
+            }
+            if (cache_) {
+                std::string node_address;
+                if (cache_->ResolveNodeAddress(location->node_id(), &node_address) && !node_address.empty()) {
+                    location->set_node_address(node_address);
+                }
+            }
+            if (error) {
+                error->clear();
+            }
+            return true;
+        }
+    }
+    return LoadLegacyDiskFileLocation(inode_id, location, error);
+}
+
+bool OpticalArchiveManager::LoadLegacyDiskFileLocation(uint64_t inode_id,
+                                                       zb::rpc::DiskFileLocation* location,
+                                                       std::string* error) const {
     std::string data;
     std::string local_error;
-    if (!store_->GetDiskFileLocation(inode_id, &data, &local_error)) {
+    if (!store_->LegacyGetDiskFileLocation(inode_id, &data, &local_error)) {
         if (error) {
             *error = local_error;
         }
@@ -1665,7 +1840,7 @@ bool OpticalArchiveManager::LoadDiskFileLocation(uint64_t inode_id,
     }
     if (!MetaCodec::DecodeDiskFileLocation(data, location)) {
         if (error) {
-            *error = "invalid disk file location";
+            *error = "invalid legacy disk file location payload";
         }
         return false;
     }
@@ -1681,9 +1856,43 @@ bool OpticalArchiveManager::LoadOpticalFileLocation(uint64_t inode_id,
         }
         return false;
     }
+    location->Clear();
+    std::string inode_payload;
+    std::string inode_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &inode_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr) &&
+            PopulateOpticalFileLocationFromUnifiedRecord(record, location)) {
+            if (cache_ && record.optical_disk_id <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+                std::string resolved_disk_id;
+                if (cache_->ResolveDiskId(location->node_id(),
+                                          static_cast<uint32_t>(record.optical_disk_id),
+                                          &resolved_disk_id) &&
+                    !resolved_disk_id.empty()) {
+                    location->set_disk_id(resolved_disk_id);
+                }
+            }
+            if (cache_) {
+                std::string node_address;
+                if (cache_->ResolveNodeAddress(location->node_id(), &node_address) && !node_address.empty()) {
+                    location->set_node_address(node_address);
+                }
+            }
+            if (error) {
+                error->clear();
+            }
+            return true;
+        }
+    }
+    return LoadLegacyOpticalFileLocation(inode_id, location, error);
+}
+
+bool OpticalArchiveManager::LoadLegacyOpticalFileLocation(uint64_t inode_id,
+                                                          zb::rpc::OpticalFileLocation* location,
+                                                          std::string* error) const {
     std::string data;
     std::string local_error;
-    if (!store_->GetOpticalFileLocation(inode_id, &data, &local_error)) {
+    if (!store_->LegacyGetOpticalFileLocation(inode_id, &data, &local_error)) {
         if (error) {
             *error = local_error;
         }
@@ -1691,7 +1900,7 @@ bool OpticalArchiveManager::LoadOpticalFileLocation(uint64_t inode_id,
     }
     if (!MetaCodec::DecodeOpticalFileLocation(data, location)) {
         if (error) {
-            *error = "invalid optical file location";
+            *error = "invalid legacy optical file location payload";
         }
         return false;
     }
@@ -1708,14 +1917,41 @@ bool OpticalArchiveManager::SaveOpticalFileLocation(uint64_t inode_id,
         }
         return false;
     }
-    const std::string payload = MetaCodec::EncodeOpticalFileLocation(location);
-    if (payload.empty()) {
+    std::string inode_payload;
+    std::string local_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &local_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr)) {
+            ApplyOpticalLocationToUnifiedRecord(location, &record);
+            std::string encoded;
+            if (!MetaCodec::EncodeUnifiedInodeRecord(record, &encoded, error)) {
+                return false;
+            }
+            batch->Put(InodeKey(inode_id), encoded);
+            return true;
+        }
+        zb::rpc::InodeAttr attr;
+        if (MetaCodec::DecodeInodeAttrCompat(inode_payload, &attr, nullptr, nullptr) &&
+            AttrToUnifiedInodeRecord(attr, 0, UnifiedStorageTier::kOptical, &record, nullptr)) {
+            ApplyOpticalLocationToUnifiedRecord(location, &record);
+            std::string encoded;
+            if (!MetaCodec::EncodeUnifiedInodeRecord(record, &encoded, error)) {
+                return false;
+            }
+            batch->Put(InodeKey(inode_id), encoded);
+            return true;
+        }
         if (error) {
-            *error = "failed to encode optical file location";
+            *error = "failed to migrate inode payload to unified inode record";
+        }
+        return false;
+    } else if (!local_error.empty()) {
+        if (error) {
+            *error = local_error;
         }
         return false;
     }
-    return store_->BatchPutOpticalFileLocation(batch, inode_id, payload, error);
+    return true;
 }
 
 bool OpticalArchiveManager::DeleteDiskFileLocation(uint64_t inode_id,
@@ -1727,7 +1963,22 @@ bool OpticalArchiveManager::DeleteDiskFileLocation(uint64_t inode_id,
         }
         return false;
     }
-    return store_->BatchDeleteDiskFileLocation(batch, inode_id, error);
+    std::string inode_payload;
+    std::string local_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &local_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr) &&
+            record.storage_tier == static_cast<uint8_t>(UnifiedStorageTier::kDisk)) {
+            record.storage_tier = static_cast<uint8_t>(UnifiedStorageTier::kNone);
+            ClearDiskLocationInUnifiedRecord(&record);
+            std::string encoded;
+            if (!MetaCodec::EncodeUnifiedInodeRecord(record, &encoded, error)) {
+                return false;
+            }
+            batch->Put(InodeKey(inode_id), encoded);
+        }
+    }
+    return store_->LegacyBatchDeleteDiskFileLocation(batch, inode_id, error);
 }
 
 bool OpticalArchiveManager::DeleteDiskFile(uint64_t inode_id,

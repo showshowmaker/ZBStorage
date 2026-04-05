@@ -57,6 +57,10 @@ private:
                        uint64_t inode_id,
                        zb::rpc::InodeAttr* attr,
                        std::string* error) const;
+    bool ReadUnifiedInode(const LoadedGeneration& generation,
+                          uint64_t inode_id,
+                          UnifiedInodeRecord* inode,
+                          std::string* error) const;
     bool ReadInodeRecord(const LoadedGeneration& generation,
                          uint64_t inode_id,
                          MasstreeInodeRecord* record,

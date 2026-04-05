@@ -1,13 +1,18 @@
 #include "MasstreeInodeRecordCodec.h"
 
+#include "MasstreeOpticalProfile.h"
+
 namespace zb::mds {
 
 namespace {
 
-constexpr uint8_t kMasstreeInodeRecordVersion = 1;
+constexpr uint8_t kMasstreeInodeRecordVersionV1 = 1;
+constexpr uint8_t kMasstreeInodeRecordVersionUnifiedV2 = 2;
+constexpr uint8_t kMasstreeInodeRecordVersionUnifiedCurrent = unified_inode_layout::kVersion;
 constexpr uint8_t kHasOpticalImageFlag = 0x1U;
 constexpr uint64_t kInodeIdFieldNumber = 1U;
 constexpr uint8_t kWireTypeVarint = 0U;
+constexpr size_t kLegacyHeaderSize = 1U + 1U + sizeof(uint32_t);
 
 void AppendLe32(std::string* out, uint32_t value) {
     for (size_t i = 0; i < sizeof(uint32_t); ++i) {
@@ -185,39 +190,100 @@ bool PatchAttrPayloadInodeId(const char* data,
     return true;
 }
 
+bool DecodeLegacyV1(const std::string& data, MasstreeInodeRecord* record, std::string* error) {
+    if (data.size() < kLegacyHeaderSize) {
+        if (error) {
+            *error = "masstree inode record payload is too short";
+        }
+        return false;
+    }
+    const uint8_t version = static_cast<uint8_t>(data[0]);
+    if (version != kMasstreeInodeRecordVersionV1) {
+        if (error) {
+            *error = "unsupported masstree inode record version";
+        }
+        return false;
+    }
+    const uint8_t flags = static_cast<uint8_t>(data[1]);
+    const uint32_t attr_len = DecodeLe32(data.data() + 2U);
+    const size_t payload_offset = kLegacyHeaderSize;
+    if (data.size() < payload_offset + attr_len) {
+        if (error) {
+            *error = "masstree inode attr payload is truncated";
+        }
+        return false;
+    }
+
+    zb::rpc::InodeAttr attr;
+    if (!attr.ParseFromArray(data.data() + payload_offset, static_cast<int>(attr_len))) {
+        if (error) {
+            *error = "failed to parse masstree inode attr payload";
+        }
+        return false;
+    }
+
+    UnifiedInodeRecord inode;
+    if (!AttrToUnifiedInodeRecord(attr, 0, UnifiedStorageTier::kNone, &inode, error)) {
+        return false;
+    }
+    if ((flags & kHasOpticalImageFlag) != 0U) {
+        if (data.size() < payload_offset + attr_len + sizeof(uint64_t)) {
+            if (error) {
+                *error = "masstree inode optical image payload is truncated";
+            }
+            return false;
+        }
+        const uint64_t global_image_id = DecodeLe64(data.data() + payload_offset + attr_len);
+        const MasstreeOpticalProfile profile = MasstreeOpticalProfile::Fixed();
+        uint32_t node_index = 0;
+        uint32_t disk_index = 0;
+        uint32_t image_index_in_disk = 0;
+        if (!profile.DecodeGlobalImageId(global_image_id, &node_index, &disk_index, &image_index_in_disk)) {
+            if (error) {
+                *error = "invalid legacy masstree optical image id";
+            }
+            return false;
+        }
+        inode.storage_tier = static_cast<uint8_t>(UnifiedStorageTier::kOptical);
+        inode.optical_node_id = node_index;
+        inode.optical_disk_id = disk_index;
+        inode.optical_image_id = image_index_in_disk;
+    }
+
+    record->inode = std::move(inode);
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool DecodeV2(std::string_view data, MasstreeInodeRecord* record, std::string* error) {
+    UnifiedInodeRecord inode;
+    if (!DecodeUnifiedInodeRecord(data, &inode, error)) {
+        return false;
+    }
+    record->inode = std::move(inode);
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool IsUnifiedPayload(std::string_view data) {
+    if (data.size() != unified_inode_layout::kRecordSize) {
+        return false;
+    }
+    const uint8_t version = static_cast<uint8_t>(data[unified_inode_layout::kVersionOffset]);
+    return version == kMasstreeInodeRecordVersionUnifiedV2 ||
+           version == kMasstreeInodeRecordVersionUnifiedCurrent;
+}
+
 } // namespace
 
 bool MasstreeInodeRecordCodec::Encode(const MasstreeInodeRecord& record,
                                       std::string* data,
                                       std::string* error) {
-    if (!data) {
-        if (error) {
-            *error = "masstree inode record encode output is null";
-        }
-        return false;
-    }
-    std::string attr_payload;
-    if (!record.attr.SerializeToString(&attr_payload)) {
-        if (error) {
-            *error = "failed to serialize masstree inode attr";
-        }
-        return false;
-    }
-
-    data->clear();
-    data->reserve(1U + 1U + sizeof(uint32_t) + attr_payload.size() +
-                  (record.has_optical_image ? sizeof(uint64_t) : 0U));
-    data->push_back(static_cast<char>(kMasstreeInodeRecordVersion));
-    data->push_back(static_cast<char>(record.has_optical_image ? kHasOpticalImageFlag : 0U));
-    AppendLe32(data, static_cast<uint32_t>(attr_payload.size()));
-    data->append(attr_payload);
-    if (record.has_optical_image) {
-        AppendLe64(data, record.optical_image_global_id);
-    }
-    if (error) {
-        error->clear();
-    }
-    return true;
+    return EncodeUnifiedInodeRecord(record.inode, data, error);
 }
 
 bool MasstreeInodeRecordCodec::Decode(const std::string& data,
@@ -229,52 +295,10 @@ bool MasstreeInodeRecordCodec::Decode(const std::string& data,
         }
         return false;
     }
-    if (data.size() < 1U + 1U + sizeof(uint32_t)) {
-        if (error) {
-            *error = "masstree inode record payload is too short";
-        }
-        return false;
+    if (IsUnifiedPayload(data)) {
+        return DecodeV2(data, record, error);
     }
-    const uint8_t version = static_cast<uint8_t>(data[0]);
-    if (version != kMasstreeInodeRecordVersion) {
-        if (error) {
-            *error = "unsupported masstree inode record version";
-        }
-        return false;
-    }
-    const uint8_t flags = static_cast<uint8_t>(data[1]);
-    const uint32_t attr_len = DecodeLe32(data.data() + 2U);
-    const size_t payload_offset = 1U + 1U + sizeof(uint32_t);
-    if (data.size() < payload_offset + attr_len) {
-        if (error) {
-            *error = "masstree inode attr payload is truncated";
-        }
-        return false;
-    }
-
-    MasstreeInodeRecord decoded;
-    if (!decoded.attr.ParseFromArray(data.data() + payload_offset, static_cast<int>(attr_len))) {
-        if (error) {
-            *error = "failed to parse masstree inode attr payload";
-        }
-        return false;
-    }
-    decoded.has_optical_image = (flags & kHasOpticalImageFlag) != 0U;
-    if (decoded.has_optical_image) {
-        if (data.size() < payload_offset + attr_len + sizeof(uint64_t)) {
-            if (error) {
-                *error = "masstree inode optical image payload is truncated";
-            }
-            return false;
-        }
-        decoded.optical_image_global_id = DecodeLe64(data.data() + payload_offset + attr_len);
-    }
-
-    *record = std::move(decoded);
-    if (error) {
-        error->clear();
-    }
-    return true;
+    return DecodeLegacyV1(data, record, error);
 }
 
 bool MasstreeInodeRecordCodec::HasOpticalImage(const std::string& data,
@@ -286,13 +310,24 @@ bool MasstreeInodeRecordCodec::HasOpticalImage(const std::string& data,
         }
         return false;
     }
+    if (IsUnifiedPayload(data)) {
+        UnifiedInodeRecord inode;
+        if (!DecodeUnifiedInodeRecord(data, &inode, error)) {
+            return false;
+        }
+        *has_optical_image = inode.storage_tier == static_cast<uint8_t>(UnifiedStorageTier::kOptical);
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
     if (data.size() < 2U) {
         if (error) {
             *error = "masstree inode record payload is too short";
         }
         return false;
     }
-    if (static_cast<uint8_t>(data[0]) != kMasstreeInodeRecordVersion) {
+    if (static_cast<uint8_t>(data[0]) != kMasstreeInodeRecordVersionV1) {
         if (error) {
             *error = "unsupported masstree inode record version";
         }
@@ -317,14 +352,53 @@ bool MasstreeInodeRecordCodec::RebaseEncoded(const std::string& data,
         }
         return false;
     }
-    if (data.size() < 1U + 1U + sizeof(uint32_t)) {
+    if (IsUnifiedPayload(data)) {
+        UnifiedInodeRecord inode;
+        if (!DecodeUnifiedInodeRecord(data, &inode, error)) {
+            return false;
+        }
+        const uint64_t old_inode_id = inode.inode_id;
+        inode.inode_id = inode_id;
+        if (inode.parent_inode_id != 0) {
+            inode.parent_inode_id += (inode_id - old_inode_id);
+        }
+        if (has_optical_image) {
+            const MasstreeOpticalProfile profile = MasstreeOpticalProfile::Fixed();
+            uint32_t node_index = 0;
+            uint32_t disk_index = 0;
+            uint32_t image_index_in_disk = 0;
+            if (!profile.DecodeGlobalImageId(optical_image_global_id,
+                                             &node_index,
+                                             &disk_index,
+                                             &image_index_in_disk)) {
+                if (error) {
+                    *error = "invalid rebased optical image id";
+                }
+                return false;
+            }
+            inode.storage_tier = static_cast<uint8_t>(UnifiedStorageTier::kOptical);
+            inode.optical_node_id = node_index;
+            inode.optical_disk_id = disk_index;
+            inode.optical_image_id = image_index_in_disk;
+            inode.disk_node_id = 0;
+            inode.disk_id = 0;
+        } else if (inode.storage_tier == static_cast<uint8_t>(UnifiedStorageTier::kOptical)) {
+            inode.storage_tier = static_cast<uint8_t>(UnifiedStorageTier::kNone);
+            inode.optical_node_id = 0;
+            inode.optical_disk_id = 0;
+            inode.optical_image_id = 0;
+        }
+        return EncodeUnifiedInodeRecord(inode, rebased, error);
+    }
+
+    if (data.size() < kLegacyHeaderSize) {
         if (error) {
             *error = "masstree inode record payload is too short";
         }
         return false;
     }
     const uint8_t version = static_cast<uint8_t>(data[0]);
-    if (version != kMasstreeInodeRecordVersion) {
+    if (version != kMasstreeInodeRecordVersionV1) {
         if (error) {
             *error = "unsupported masstree inode record version";
         }
@@ -332,7 +406,7 @@ bool MasstreeInodeRecordCodec::RebaseEncoded(const std::string& data,
     }
     const uint8_t flags = static_cast<uint8_t>(data[1]);
     const uint32_t attr_len = DecodeLe32(data.data() + 2U);
-    const size_t payload_offset = 1U + 1U + sizeof(uint32_t);
+    const size_t payload_offset = kLegacyHeaderSize;
     if (data.size() < payload_offset + attr_len) {
         if (error) {
             *error = "masstree inode attr payload is truncated";
@@ -348,24 +422,21 @@ bool MasstreeInodeRecordCodec::RebaseEncoded(const std::string& data,
     }
     if (source_has_optical_image != has_optical_image) {
         if (error) {
-            *error = "masstree inode record optical flag mismatch";
+            *error = "masstree inode optical image layout mismatch";
         }
         return false;
     }
+
     std::string patched_attr_payload;
-    if (!PatchAttrPayloadInodeId(data.data() + payload_offset,
-                                 static_cast<size_t>(attr_len),
-                                 inode_id,
-                                 &patched_attr_payload,
-                                 error)) {
+    if (!PatchAttrPayloadInodeId(data.data() + payload_offset, attr_len, inode_id, &patched_attr_payload, error)) {
         return false;
     }
 
     rebased->clear();
-    rebased->reserve(1U + 1U + sizeof(uint32_t) + patched_attr_payload.size() +
+    rebased->reserve(kLegacyHeaderSize + patched_attr_payload.size() +
                      (has_optical_image ? sizeof(uint64_t) : 0U));
-    rebased->push_back(static_cast<char>(version));
-    rebased->push_back(static_cast<char>(flags));
+    rebased->push_back(static_cast<char>(kMasstreeInodeRecordVersionV1));
+    rebased->push_back(static_cast<char>(has_optical_image ? kHasOpticalImageFlag : 0U));
     AppendLe32(rebased, static_cast<uint32_t>(patched_attr_payload.size()));
     rebased->append(patched_attr_payload);
     if (has_optical_image) {

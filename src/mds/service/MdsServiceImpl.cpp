@@ -7,7 +7,6 @@
 #include <chrono>
 #include <filesystem>
 #include <fcntl.h>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -15,6 +14,8 @@
 #include <sstream>
 
 #include "../masstree_meta/MasstreeManifest.h"
+#include "../storage/UnifiedInodeLocation.h"
+#include "../storage/UnifiedInodeRecord.h"
 #include "real_node.pb.h"
 
 namespace zb::mds {
@@ -26,6 +27,8 @@ constexpr const char* kNoSpaceRealPolicyMessage = "NO_SPACE_REAL_POLICY";
 constexpr const char* kNoSpaceVirtualPolicyMessage = "NO_SPACE_VIRTUAL_POLICY";
 constexpr const char* kCrossTierRenameMessage = "CROSS_TIER_RENAME";
 constexpr size_t kMaxRetainedMasstreeImportJobs = 1000;
+constexpr uint32_t kDefaultPosixBlockSize = 4096;
+constexpr uint64_t kDefaultDirectorySizeBytes = 4096;
 
 bool IsLocationMetadataMissing(const std::string& error) {
     return error.empty();
@@ -271,6 +274,29 @@ zb::rpc::ReplicaLocation ToReplicaLocation(uint64_t inode_id,
     replica.set_replica_state(zb::rpc::REPLICA_READY);
     replica.set_image_id(location.image_id());
     return replica;
+}
+
+bool EncodeUnifiedInodePayload(const UnifiedInodeRecord& record, std::string* payload, std::string* error) {
+    return MetaCodec::EncodeUnifiedInodeRecord(record, payload, error);
+}
+
+uint64_t ComputeBlocks512(uint64_t size_bytes) {
+    return size_bytes == 0 ? 0 : ((size_bytes + 511ULL) / 512ULL);
+}
+
+void FillPosixInodeDefaults(zb::rpc::InodeAttr* attr) {
+    if (!attr) {
+        return;
+    }
+    if (attr->type() == zb::rpc::INODE_DIR && attr->size() == 0) {
+        attr->set_size(kDefaultDirectorySizeBytes);
+    }
+    if (attr->blksize() == 0) {
+        attr->set_blksize(kDefaultPosixBlockSize);
+    }
+    attr->set_blocks_512(ComputeBlocks512(attr->size()));
+    attr->set_rdev_major(0);
+    attr->set_rdev_minor(0);
 }
 
 } // namespace
@@ -612,6 +638,8 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     attr.set_replica(request->replica() ? request->replica() : 1);
     attr.set_version(1);
     attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
+    attr.set_file_name(name);
+    FillPosixInodeDefaults(&attr);
 
     zb::rpc::PathPlacementPolicyRecord placement_policy;
     std::string policy_error;
@@ -623,9 +651,6 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
         return;
     }
 
-    rocksdb::WriteBatch batch;
-    batch.Put(DentryKey(parent_inode, name), MetaCodec::EncodeUInt64(inode_id));
-    batch.Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(attr));
     zb::rpc::ReplicaLocation primary_location;
     bool location_ok = false;
     NodeType preferred_type = NodeType::kReal;
@@ -660,9 +685,27 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
         error.clear();
     }
     disk_location.set_disk_id(primary_location.disk_id());
+    ApplyDiskLocationToAttr(disk_location, &attr);
+    UnifiedInodeRecord inode_record;
+    if (!AttrToUnifiedInodeRecord(attr, parent_inode, UnifiedStorageTier::kDisk, &inode_record, &error)) {
+        LogRequestFailure("Create.BuildUnifiedInode", request->path(), error);
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+        return;
+    }
+    ApplyDiskLocationToUnifiedRecord(disk_location, &inode_record);
+    std::string inode_payload;
+    if (!EncodeUnifiedInodePayload(inode_record, &inode_payload, &error)) {
+        LogRequestFailure("Create.EncodeUnifiedInode", request->path(), error);
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+        return;
+    }
+
+    rocksdb::WriteBatch batch;
+    batch.Put(DentryKey(parent_inode, name), MetaCodec::EncodeUInt64(inode_id));
+    batch.Put(InodeKey(inode_id), inode_payload);
     if (!SaveDiskFileLocation(inode_id, disk_location, &batch)) {
-        LogRequestFailure("Create.SaveDiskFileLocation", request->path(), "failed to encode disk file location");
-        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to encode disk file location");
+        LogRequestFailure("Create.SaveDiskFileLocation", request->path(), "failed to persist inline disk location");
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to persist inline disk location");
         return;
     }
     if (!store_->WriteBatch(&batch, &error)) {
@@ -745,10 +788,23 @@ void MdsServiceImpl::Mkdir(google::protobuf::RpcController* cntl_base,
     attr.set_replica(1);
     attr.set_version(1);
     attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
+    attr.set_file_name(name);
+    FillPosixInodeDefaults(&attr);
+
+    UnifiedInodeRecord inode_record;
+    if (!AttrToUnifiedInodeRecord(attr, parent_inode, UnifiedStorageTier::kNone, &inode_record, &error)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+        return;
+    }
+    std::string inode_payload;
+    if (!EncodeUnifiedInodePayload(inode_record, &inode_payload, &error)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+        return;
+    }
 
     rocksdb::WriteBatch batch;
     batch.Put(DentryKey(parent_inode, name), MetaCodec::EncodeUInt64(inode_id));
-    batch.Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(attr));
+    batch.Put(InodeKey(inode_id), inode_payload);
     if (!store_->WriteBatch(&batch, &error)) {
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
@@ -872,9 +928,41 @@ void MdsServiceImpl::Rename(google::protobuf::RpcController* cntl_base,
         return;
     }
 
+    uint64_t inode_id = 0;
+    if (!MetaCodec::DecodeUInt64(inode_data, &inode_id)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "invalid inode data");
+        return;
+    }
+    zb::rpc::InodeAttr attr;
+    if (!GetInode(inode_id, &attr, &error)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error.empty() ? "failed to load inode" : error);
+        return;
+    }
+    attr.set_file_name(new_name);
+
+    UnifiedInodeRecord inode_record;
+    std::string existing_inode_payload;
+    std::string load_error;
+    if (store_->Get(InodeKey(inode_id), &existing_inode_payload, &load_error) &&
+        MetaCodec::DecodeUnifiedInodeRecord(existing_inode_payload, &inode_record, nullptr)) {
+        ApplyAttrToUnifiedRecord(attr, &inode_record);
+        inode_record.parent_inode_id = new_parent;
+        inode_record.file_name = new_name;
+        inode_record.file_name_len = static_cast<uint16_t>(new_name.size());
+    } else if (!AttrToUnifiedInodeRecord(attr, new_parent, UnifiedStorageTier::kNone, &inode_record, &error)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+        return;
+    }
+    std::string encoded_inode_payload;
+    if (!EncodeUnifiedInodePayload(inode_record, &encoded_inode_payload, &error)) {
+        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
+        return;
+    }
+
     rocksdb::WriteBatch batch;
     batch.Delete(DentryKey(old_parent, old_name));
     batch.Put(DentryKey(new_parent, new_name), inode_data);
+    batch.Put(InodeKey(inode_id), encoded_inode_payload);
     if (!store_->WriteBatch(&batch, &error)) {
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
         return;
@@ -1137,10 +1225,9 @@ void MdsServiceImpl::UpdateInodeStat(google::protobuf::RpcController* cntl_base,
     const uint64_t mtime = request->mtime() > 0 ? request->mtime() : now_sec;
     attr.set_mtime(mtime);
     attr.set_ctime(now_sec);
+    FillPosixInodeDefaults(&attr);
 
-    rocksdb::WriteBatch batch;
-    batch.Put(InodeKey(request->inode_id()), MetaCodec::EncodeInodeAttr(attr));
-    if (!store_->WriteBatch(&batch, &error)) {
+    if (!PutInode(request->inode_id(), attr, &error)) {
         FillStatus(response->mutable_status(),
                    zb::rpc::MDS_INTERNAL_ERROR,
                    error.empty() ? "failed to persist inode stat" : error);
@@ -1305,6 +1392,9 @@ void MdsServiceImpl::ImportMasstreeNamespace(google::protobuf::RpcController* cn
     import_request.namespace_id = request->namespace_id();
     import_request.generation_id = request->generation_id();
     import_request.path_prefix = request->path_prefix();
+    import_request.source_mode = request->source_mode();
+    import_request.path_list_file = request->path_list_file();
+    import_request.repeat_dir_prefix = request->repeat_dir_prefix();
     import_request.template_id = request->template_id();
     import_request.template_mode = request->template_mode();
     import_request.inode_start = request->inode_start();
@@ -1706,7 +1796,7 @@ bool MdsServiceImpl::EnsureRoot(std::string* error) {
     root.set_mode(0755);
     root.set_uid(0);
     root.set_gid(0);
-    root.set_size(0);
+    root.set_size(kDefaultDirectorySizeBytes);
     root.set_atime(now);
     root.set_mtime(now);
     root.set_ctime(now);
@@ -1715,6 +1805,8 @@ bool MdsServiceImpl::EnsureRoot(std::string* error) {
     root.set_replica(1);
     root.set_version(1);
     root.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
+    root.set_file_name("/");
+    FillPosixInodeDefaults(&root);
 
     return PutInode(kRootInodeId, root, error);
 }
@@ -1764,7 +1856,21 @@ bool MdsServiceImpl::GetInode(uint64_t inode_id, zb::rpc::InodeAttr* attr, std::
 }
 
 bool MdsServiceImpl::PutInode(uint64_t inode_id, const zb::rpc::InodeAttr& attr, std::string* error) {
-    return store_->Put(InodeKey(inode_id), MetaCodec::EncodeInodeAttr(attr), error);
+    UnifiedInodeRecord record;
+    std::string existing_payload;
+    std::string get_error;
+    if (store_->Get(InodeKey(inode_id), &existing_payload, &get_error) &&
+        MetaCodec::DecodeUnifiedInodeRecord(existing_payload, &record, nullptr)) {
+        ApplyAttrToUnifiedRecord(attr, &record);
+    } else if (!AttrToUnifiedInodeRecord(attr, 0, UnifiedStorageTier::kNone, &record, error)) {
+        return false;
+    }
+
+    std::string payload;
+    if (!EncodeUnifiedInodePayload(record, &payload, error)) {
+        return false;
+    }
+    return store_->Put(InodeKey(inode_id), payload, error);
 }
 
 bool MdsServiceImpl::PutDentry(uint64_t parent_inode, const std::string& name, uint64_t inode_id, std::string* error) {
@@ -2006,9 +2112,40 @@ bool MdsServiceImpl::LoadDiskFileLocation(uint64_t inode_id,
         }
         return false;
     }
+    location->Clear();
+    std::string inode_payload;
+    std::string inode_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &inode_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr) &&
+            PopulateDiskFileLocationFromUnifiedRecord(record, location)) {
+            if (allocator_) {
+                std::string resolved_disk_id;
+                if (allocator_->ResolveDiskId(location->node_id(), record.disk_id, &resolved_disk_id) &&
+                    !resolved_disk_id.empty()) {
+                    location->set_disk_id(resolved_disk_id);
+                }
+            }
+            std::string node_address;
+            std::string resolve_error;
+            if (ResolveNodeAddress(location->node_id(), &node_address, &resolve_error) && !node_address.empty()) {
+                location->set_node_address(node_address);
+            }
+            if (error) {
+                error->clear();
+            }
+            return true;
+        }
+    }
+    return LoadLegacyDiskFileLocation(inode_id, location, error);
+}
+
+bool MdsServiceImpl::LoadLegacyDiskFileLocation(uint64_t inode_id,
+                                                zb::rpc::DiskFileLocation* location,
+                                                std::string* error) const {
     std::string payload;
     std::string local_error;
-    if (!store_->GetDiskFileLocation(inode_id, &payload, &local_error)) {
+    if (!store_->LegacyGetDiskFileLocation(inode_id, &payload, &local_error)) {
         if (error) {
             *error = local_error;
         }
@@ -2016,9 +2153,42 @@ bool MdsServiceImpl::LoadDiskFileLocation(uint64_t inode_id,
     }
     if (!MetaCodec::DecodeDiskFileLocation(payload, location)) {
         if (error) {
-            *error = "invalid disk file location payload";
+            *error = "invalid legacy disk file location payload";
         }
         return false;
+    }
+    return true;
+}
+
+bool MdsServiceImpl::BuildDiskFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
+                                                   zb::rpc::DiskFileLocation* location,
+                                                   std::string* error) const {
+    if (!location) {
+        if (error) {
+            *error = "disk location output is null";
+        }
+        return false;
+    }
+    if (!PopulateDiskFileLocationFromInodeAttr(attr, location)) {
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+    if (allocator_) {
+        std::string resolved_disk_id;
+        if (allocator_->ResolveDiskId(location->node_id(), attr.disk_id(), &resolved_disk_id) &&
+            !resolved_disk_id.empty()) {
+            location->set_disk_id(resolved_disk_id);
+        }
+    }
+    std::string node_address;
+    std::string resolve_error;
+    if (ResolveNodeAddress(location->node_id(), &node_address, &resolve_error) && !node_address.empty()) {
+        location->set_node_address(node_address);
+    }
+    if (error) {
+        error->clear();
     }
     return true;
 }
@@ -2029,11 +2199,35 @@ bool MdsServiceImpl::SaveDiskFileLocation(uint64_t inode_id,
     if (!batch || inode_id == 0) {
         return false;
     }
-    std::string payload = MetaCodec::EncodeDiskFileLocation(location);
-    if (payload.empty()) {
+    std::string inode_payload;
+    std::string local_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &local_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr)) {
+            ApplyDiskLocationToUnifiedRecord(location, &record);
+            std::string encoded;
+            if (!EncodeUnifiedInodePayload(record, &encoded, nullptr)) {
+                return false;
+            }
+            batch->Put(InodeKey(inode_id), encoded);
+            return true;
+        }
+        zb::rpc::InodeAttr attr;
+        if (MetaCodec::DecodeInodeAttrCompat(inode_payload, &attr, nullptr, nullptr) &&
+            AttrToUnifiedInodeRecord(attr, 0, UnifiedStorageTier::kDisk, &record, nullptr)) {
+            ApplyDiskLocationToUnifiedRecord(location, &record);
+            std::string encoded;
+            if (!EncodeUnifiedInodePayload(record, &encoded, nullptr)) {
+                return false;
+            }
+            batch->Put(InodeKey(inode_id), encoded);
+            return true;
+        }
+        return false;
+    } else if (!local_error.empty()) {
         return false;
     }
-    return store_->BatchPutDiskFileLocation(batch, inode_id, payload, nullptr);
+    return true;
 }
 
 bool MdsServiceImpl::DeleteDiskFileLocation(uint64_t inode_id,
@@ -2045,7 +2239,22 @@ bool MdsServiceImpl::DeleteDiskFileLocation(uint64_t inode_id,
         }
         return false;
     }
-    return store_->BatchDeleteDiskFileLocation(batch, inode_id, error);
+    std::string inode_payload;
+    std::string local_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &local_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr) &&
+            record.storage_tier == static_cast<uint8_t>(UnifiedStorageTier::kDisk)) {
+            record.storage_tier = static_cast<uint8_t>(UnifiedStorageTier::kNone);
+            ClearDiskLocationInUnifiedRecord(&record);
+            std::string encoded;
+            if (!EncodeUnifiedInodePayload(record, &encoded, error)) {
+                return false;
+            }
+            batch->Put(InodeKey(inode_id), encoded);
+        }
+    }
+    return store_->LegacyBatchDeleteDiskFileLocation(batch, inode_id, error);
 }
 
 bool MdsServiceImpl::LoadOpticalFileLocation(uint64_t inode_id,
@@ -2057,9 +2266,42 @@ bool MdsServiceImpl::LoadOpticalFileLocation(uint64_t inode_id,
         }
         return false;
     }
+    location->Clear();
+    std::string inode_payload;
+    std::string inode_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &inode_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr) &&
+            PopulateOpticalFileLocationFromUnifiedRecord(record, location)) {
+            if (allocator_ && record.optical_disk_id <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+                std::string resolved_disk_id;
+                if (allocator_->ResolveDiskId(location->node_id(),
+                                              static_cast<uint32_t>(record.optical_disk_id),
+                                              &resolved_disk_id) &&
+                    !resolved_disk_id.empty()) {
+                    location->set_disk_id(resolved_disk_id);
+                }
+            }
+            std::string node_address;
+            std::string resolve_error;
+            if (ResolveNodeAddress(location->node_id(), &node_address, &resolve_error) && !node_address.empty()) {
+                location->set_node_address(node_address);
+            }
+            if (error) {
+                error->clear();
+            }
+            return true;
+        }
+    }
+    return LoadLegacyOpticalFileLocation(inode_id, location, error);
+}
+
+bool MdsServiceImpl::LoadLegacyOpticalFileLocation(uint64_t inode_id,
+                                                   zb::rpc::OpticalFileLocation* location,
+                                                   std::string* error) const {
     std::string payload;
     std::string local_error;
-    if (!store_->GetOpticalFileLocation(inode_id, &payload, &local_error)) {
+    if (!store_->LegacyGetOpticalFileLocation(inode_id, &payload, &local_error)) {
         if (error) {
             *error = local_error;
         }
@@ -2067,9 +2309,44 @@ bool MdsServiceImpl::LoadOpticalFileLocation(uint64_t inode_id,
     }
     if (!MetaCodec::DecodeOpticalFileLocation(payload, location)) {
         if (error) {
-            *error = "invalid optical file location payload";
+            *error = "invalid legacy optical file location payload";
         }
         return false;
+    } else if (!local_error.empty()) {
+        return false;
+    }
+    return true;
+}
+
+bool MdsServiceImpl::BuildOpticalFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
+                                                      uint64_t inode_id,
+                                                      zb::rpc::OpticalFileLocation* location,
+                                                      std::string* error) const {
+    if (!location) {
+        if (error) {
+            *error = "optical location output is null";
+        }
+        return false;
+    }
+    if (inode_id == 0) {
+        if (error) {
+            *error = "inode_id is zero";
+        }
+        return false;
+    }
+    if (!PopulateOpticalFileLocationFromInodeAttr(attr, inode_id, location)) {
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+    std::string node_address;
+    std::string resolve_error;
+    if (ResolveNodeAddress(location->node_id(), &node_address, &resolve_error) && !node_address.empty()) {
+        location->set_node_address(node_address);
+    }
+    if (error) {
+        error->clear();
     }
     return true;
 }
@@ -2133,11 +2410,33 @@ bool MdsServiceImpl::SaveOpticalFileLocation(uint64_t inode_id,
     if (!batch || inode_id == 0) {
         return false;
     }
-    std::string payload = MetaCodec::EncodeOpticalFileLocation(location);
-    if (payload.empty()) {
+    std::string inode_payload;
+    std::string local_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &local_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr)) {
+            ApplyOpticalLocationToUnifiedRecord(location, &record);
+            std::string encoded;
+            if (!EncodeUnifiedInodePayload(record, &encoded, nullptr)) {
+                return false;
+            }
+            batch->Put(InodeKey(inode_id), encoded);
+            return true;
+        }
+        zb::rpc::InodeAttr attr;
+        if (MetaCodec::DecodeInodeAttrCompat(inode_payload, &attr, nullptr, nullptr) &&
+            AttrToUnifiedInodeRecord(attr, 0, UnifiedStorageTier::kOptical, &record, nullptr)) {
+            ApplyOpticalLocationToUnifiedRecord(location, &record);
+            std::string encoded;
+            if (!EncodeUnifiedInodePayload(record, &encoded, nullptr)) {
+                return false;
+            }
+            batch->Put(InodeKey(inode_id), encoded);
+            return true;
+        }
         return false;
     }
-    return store_->BatchPutOpticalFileLocation(batch, inode_id, payload, nullptr);
+    return true;
 }
 
 bool MdsServiceImpl::DeleteOpticalFileLocation(uint64_t inode_id,
@@ -2149,7 +2448,22 @@ bool MdsServiceImpl::DeleteOpticalFileLocation(uint64_t inode_id,
         }
         return false;
     }
-    return store_->BatchDeleteOpticalFileLocation(batch, inode_id, error);
+    std::string inode_payload;
+    std::string local_error;
+    if (store_->Get(InodeKey(inode_id), &inode_payload, &local_error)) {
+        UnifiedInodeRecord record;
+        if (MetaCodec::DecodeUnifiedInodeRecord(inode_payload, &record, nullptr) &&
+            record.storage_tier == static_cast<uint8_t>(UnifiedStorageTier::kOptical)) {
+            record.storage_tier = static_cast<uint8_t>(UnifiedStorageTier::kNone);
+            ClearOpticalLocationInUnifiedRecord(&record);
+            std::string encoded;
+            if (!EncodeUnifiedInodePayload(record, &encoded, error)) {
+                return false;
+            }
+            batch->Put(InodeKey(inode_id), encoded);
+        }
+    }
+    return store_->LegacyBatchDeleteOpticalFileLocation(batch, inode_id, error);
 }
 
 bool MdsServiceImpl::BuildFileLocationView(uint64_t inode_id,
@@ -2166,10 +2480,39 @@ bool MdsServiceImpl::BuildFileLocationView(uint64_t inode_id,
     *view->mutable_attr() = attr;
     zb::rpc::DiskFileLocation disk;
     zb::rpc::OpticalFileLocation optical;
+    std::string attr_disk_error;
+    if (BuildDiskFileLocationFromAttr(attr, &disk, &attr_disk_error)) {
+        *view->mutable_disk_location() = disk;
+        ApplyDiskLocationToAttr(disk, view->mutable_attr());
+        if (error) {
+            error->clear();
+        }
+        return true;
+    } else if (!attr_disk_error.empty()) {
+        if (error) {
+            *error = attr_disk_error;
+        }
+        return false;
+    }
+    std::string attr_optical_error;
+    if (BuildOpticalFileLocationFromAttr(attr, inode_id, &optical, &attr_optical_error)) {
+        *view->mutable_optical_location() = optical;
+        ApplyOpticalLocationToAttr(optical, view->mutable_attr());
+        if (error) {
+            error->clear();
+        }
+        return true;
+    } else if (!attr_optical_error.empty()) {
+        if (error) {
+            *error = attr_optical_error;
+        }
+        return false;
+    }
     std::string disk_error;
     const bool has_disk = LoadDiskFileLocation(inode_id, &disk, &disk_error);
     if (has_disk) {
         *view->mutable_disk_location() = disk;
+        ApplyDiskLocationToAttr(disk, view->mutable_attr());
     } else if (!IsLocationMetadataMissing(disk_error)) {
         if (error) {
             *error = disk_error;
@@ -2180,6 +2523,7 @@ bool MdsServiceImpl::BuildFileLocationView(uint64_t inode_id,
     const bool has_optical = LoadOpticalFileLocation(inode_id, &optical, &optical_error);
     if (has_optical) {
         *view->mutable_optical_location() = optical;
+        ApplyOpticalLocationToAttr(optical, view->mutable_attr());
     } else if (!IsLocationMetadataMissing(optical_error)) {
         if (error) {
             *error = optical_error;
@@ -2189,6 +2533,7 @@ bool MdsServiceImpl::BuildFileLocationView(uint64_t inode_id,
         std::string masstree_optical_error;
         if (LoadMasstreeOpticalFileLocation(inode_id, &optical, &masstree_optical_error)) {
             *view->mutable_optical_location() = optical;
+            ApplyOpticalLocationToAttr(optical, view->mutable_attr());
         } else if (!masstree_optical_error.empty()) {
             if (error) {
                 *error = masstree_optical_error;
@@ -2210,6 +2555,17 @@ bool MdsServiceImpl::LoadFilePrimaryLocation(uint64_t inode_id,
         return false;
     }
     zb::rpc::DiskFileLocation disk;
+    std::string attr_disk_error;
+    if (BuildDiskFileLocationFromAttr(attr, &disk, &attr_disk_error)) {
+        *anchor = ToReplicaLocation(inode_id, attr.size(), disk);
+        return true;
+    }
+    if (!attr_disk_error.empty()) {
+        if (error) {
+            *error = attr_disk_error;
+        }
+        return false;
+    }
     std::string disk_error;
     if (LoadDiskFileLocation(inode_id, &disk, &disk_error)) {
         *anchor = ToReplicaLocation(inode_id, attr.size(), disk);
@@ -2222,6 +2578,17 @@ bool MdsServiceImpl::LoadFilePrimaryLocation(uint64_t inode_id,
         return false;
     }
     zb::rpc::OpticalFileLocation optical;
+    std::string attr_optical_error;
+    if (BuildOpticalFileLocationFromAttr(attr, inode_id, &optical, &attr_optical_error)) {
+        *anchor = ToReplicaLocation(inode_id, attr.size(), optical);
+        return true;
+    }
+    if (!attr_optical_error.empty()) {
+        if (error) {
+            *error = attr_optical_error;
+        }
+        return false;
+    }
     std::string optical_error;
     if (LoadOpticalFileLocation(inode_id, &optical, &optical_error)) {
         *anchor = ToReplicaLocation(inode_id, attr.size(), optical);
@@ -2544,7 +2911,7 @@ void MdsServiceImpl::FillMasstreeImportJobInfo(const MasstreeImportJob& job,
     info->set_namespace_id(job.request.namespace_id);
     info->set_generation_id(job.request.generation_id);
     info->set_path_prefix(job.request.path_prefix);
-    info->set_file_count(job.request.file_count);
+    info->set_file_count(job.result.file_count != 0 ? job.result.file_count : job.request.file_count);
     info->set_state(job.state);
     info->set_error_message(job.error_message);
     info->set_manifest_path(job.result.manifest_path);

@@ -5,6 +5,8 @@
 #include <fstream>
 #include <string_view>
 
+#include "../storage/MetaCodec.h"
+
 namespace zb::mds {
 
 namespace {
@@ -507,9 +509,12 @@ bool ArchiveDataFile::FindInodeLegacy(uint64_t inode_id,
             return false;
         }
         if (current_inode == inode_id) {
-            if (!attr->ParseFromString(payload)) {
+            std::string decode_error;
+            if (!MetaCodec::DecodeInodeAttrCompat(payload, attr, nullptr, &decode_error)) {
                 if (error) {
-                    *error = "invalid archive inode payload: " + data_path_;
+                    *error = decode_error.empty()
+                                 ? "invalid archive inode payload: " + data_path_
+                                 : decode_error + ": " + data_path_;
                 }
                 return false;
             }
@@ -753,9 +758,13 @@ bool ArchiveDataFile::FindInodePaged(uint64_t inode_id,
         }
         return false;
     }
-    if (!attr->ParseFromArray(view.payload, static_cast<int>(view.payload_len))) {
+    const std::string payload(view.payload, view.payload_len);
+    std::string decode_error;
+    if (!MetaCodec::DecodeInodeAttrCompat(payload, attr, nullptr, &decode_error)) {
         if (error) {
-            *error = "invalid archive inode payload: " + data_path_;
+            *error = decode_error.empty()
+                         ? "invalid archive inode payload: " + data_path_
+                         : decode_error + ": " + data_path_;
         }
         return false;
     }

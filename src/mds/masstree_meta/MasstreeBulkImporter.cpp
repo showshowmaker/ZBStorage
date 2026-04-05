@@ -13,6 +13,7 @@
 #include "MasstreePageLayout.h"
 #include "MasstreePageReader.h"
 #include "MasstreeOpticalProfile.h"
+#include "../storage/UnifiedInodeRecord.h"
 #include "mds.pb.h"
 
 namespace zb::mds {
@@ -222,6 +223,52 @@ bool ReadLengthPrefixedPayload(std::ifstream* input, std::string* payload, std::
         error->clear();
     }
     return true;
+}
+
+bool BuildUnifiedRecordFromRawPayload(const std::string& payload,
+                                      uint64_t parent_inode_id,
+                                      UnifiedInodeRecord* record,
+                                      std::string* error) {
+    if (!record) {
+        if (error) {
+            *error = "unified inode output is null";
+        }
+        return false;
+    }
+    if (DecodeUnifiedInodeRecord(payload, record, nullptr)) {
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+    zb::rpc::InodeAttr attr;
+    if (!attr.ParseFromString(payload)) {
+        if (error) {
+            *error = "failed to parse inode record payload";
+        }
+        return false;
+    }
+    return AttrToUnifiedInodeRecord(attr, parent_inode_id, UnifiedStorageTier::kNone, record, error);
+}
+
+void ApplyOpticalLocation(const MasstreeOpticalProfile& profile,
+                          uint64_t global_image_id,
+                          UnifiedInodeRecord* record) {
+    if (!record) {
+        return;
+    }
+    uint32_t node_index = 0;
+    uint32_t disk_index = 0;
+    uint32_t image_index_in_disk = 0;
+    if (!profile.DecodeGlobalImageId(global_image_id, &node_index, &disk_index, &image_index_in_disk)) {
+        return;
+    }
+    record->storage_tier = static_cast<uint8_t>(UnifiedStorageTier::kOptical);
+    record->disk_node_id = 0;
+    record->disk_id = 0;
+    record->optical_node_id = node_index;
+    record->optical_disk_id = disk_index;
+    record->optical_image_id = image_index_in_disk;
 }
 
 void PatchLe64(std::string* data, size_t offset, uint64_t value) {
@@ -946,25 +993,24 @@ bool BuildInodePages(std::ifstream* inode_in,
     };
 
     while (ReadInodeRecord(inode_in, &inode_record, error)) {
-        zb::rpc::InodeAttr attr;
-        if (!attr.ParseFromString(inode_record.payload)) {
-            if (error) {
-                *error = "failed to parse inode record payload";
-            }
+        UnifiedInodeRecord inode_record_data;
+        if (!BuildUnifiedRecordFromRawPayload(inode_record.payload, 0, &inode_record_data, error)) {
             return false;
         }
         const uint64_t adjusted_inode_id = inode_record.inode_id + inode_id_offset;
-        attr.set_inode_id(adjusted_inode_id);
+        inode_record_data.inode_id = adjusted_inode_id;
+        if (inode_record_data.parent_inode_id != 0) {
+            inode_record_data.parent_inode_id += inode_id_offset;
+        }
 
         MasstreeInodeRecord blob_record;
-        blob_record.attr = attr;
-        if (attr.type() == zb::rpc::INODE_FILE) {
+        blob_record.inode = inode_record_data;
+        if (blob_record.inode.inode_type == static_cast<uint8_t>(zb::rpc::INODE_FILE)) {
             uint64_t global_image_id = 0;
-            if (!allocator.Allocate(attr.size(), &global_image_id, error)) {
+            if (!allocator.Allocate(blob_record.inode.size_bytes, &global_image_id, error)) {
                 return false;
             }
-            blob_record.has_optical_image = true;
-            blob_record.optical_image_global_id = global_image_id;
+            ApplyOpticalLocation(optical_profile, global_image_id, &blob_record.inode);
             if (*file_count == 0) {
                 *start_global_image_id = global_image_id;
             }
@@ -983,7 +1029,7 @@ bool BuildInodePages(std::ifstream* inode_in,
                 }
             }
             ++(*file_count);
-            total_file_bytes_accumulator.Add(attr.size());
+            total_file_bytes_accumulator.Add(blob_record.inode.size_bytes);
         }
 
         std::string encoded_record_payload;
@@ -1047,7 +1093,7 @@ bool BuildInodePages(std::ifstream* inode_in,
         }
         MasstreeInodeRecord decoded;
         if (!MasstreeInodeRecordCodec::Decode(found.payload, &decoded, error) ||
-            decoded.attr.inode_id() != inode_id) {
+            decoded.inode.inode_id != inode_id) {
             if (error && error->empty()) {
                 *error = "masstree importer inode page verification mismatch";
             }
@@ -1168,7 +1214,7 @@ bool BuildInodePagesFromTemplate(std::ifstream* source_pages_in,
                 } else {
                     MasstreeInodeRecord record;
                     if (!MasstreeInodeRecordCodec::Decode(source_entry.payload, &record, error) ||
-                        !allocator.Allocate(record.attr.size(), &global_image_id, error)) {
+                        !allocator.Allocate(record.inode.size_bytes, &global_image_id, error)) {
                         return false;
                     }
                 }
@@ -1274,7 +1320,7 @@ bool BuildInodePagesFromTemplate(std::ifstream* source_pages_in,
         }
         MasstreeInodeRecord decoded;
         if (!MasstreeInodeRecordCodec::Decode(found.payload, &decoded, error) ||
-            decoded.attr.inode_id() != inode_id) {
+            decoded.inode.inode_id != inode_id) {
             if (error && error->empty()) {
                 *error = "masstree template inode page verification mismatch";
             }

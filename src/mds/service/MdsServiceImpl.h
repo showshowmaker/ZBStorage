@@ -200,11 +200,24 @@ private:
     bool SavePathPlacementPolicy(const zb::rpc::PathPlacementPolicyRecord& policy, std::string* error);
     bool DeletePathPlacementPolicyByPrefix(const std::string& path_prefix, std::string* error);
     bool LoadDiskFileLocation(uint64_t inode_id, zb::rpc::DiskFileLocation* location, std::string* error) const;
+    bool LoadLegacyDiskFileLocation(uint64_t inode_id,
+                                    zb::rpc::DiskFileLocation* location,
+                                    std::string* error) const;
+    bool BuildDiskFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
+                                       zb::rpc::DiskFileLocation* location,
+                                       std::string* error) const;
     bool SaveDiskFileLocation(uint64_t inode_id,
                               const zb::rpc::DiskFileLocation& location,
                               rocksdb::WriteBatch* batch) const;
     bool DeleteDiskFileLocation(uint64_t inode_id, rocksdb::WriteBatch* batch, std::string* error) const;
     bool LoadOpticalFileLocation(uint64_t inode_id, zb::rpc::OpticalFileLocation* location, std::string* error) const;
+    bool LoadLegacyOpticalFileLocation(uint64_t inode_id,
+                                       zb::rpc::OpticalFileLocation* location,
+                                       std::string* error) const;
+    bool BuildOpticalFileLocationFromAttr(const zb::rpc::InodeAttr& attr,
+                                          uint64_t inode_id,
+                                          zb::rpc::OpticalFileLocation* location,
+                                          std::string* error) const;
     bool LoadMasstreeOpticalFileLocation(uint64_t inode_id,
                                          zb::rpc::OpticalFileLocation* location,
                                          std::string* error) const;

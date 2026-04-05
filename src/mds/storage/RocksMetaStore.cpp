@@ -26,14 +26,9 @@ bool RocksMetaStore::Open(const std::string& path, std::string* error) {
         cf_names.clear();
         cf_names.push_back(rocksdb::kDefaultColumnFamilyName);
     }
-    auto ensure_cf = [&](const std::string& name) {
-        if (std::find(cf_names.begin(), cf_names.end(), name) == cf_names.end()) {
-            cf_names.push_back(name);
-        }
-    };
-    ensure_cf(rocksdb::kDefaultColumnFamilyName);
-    ensure_cf(kDiskFileLocationColumnFamily);
-    ensure_cf(kOpticalFileLocationColumnFamily);
+    if (std::find(cf_names.begin(), cf_names.end(), rocksdb::kDefaultColumnFamilyName) == cf_names.end()) {
+        cf_names.push_back(rocksdb::kDefaultColumnFamilyName);
+    }
 
     std::vector<rocksdb::ColumnFamilyDescriptor> descriptors;
     descriptors.reserve(cf_names.size());
@@ -123,34 +118,59 @@ bool RocksMetaStore::WriteBatch(rocksdb::WriteBatch* batch, std::string* error) 
     return true;
 }
 
-bool RocksMetaStore::PutDiskFileLocation(uint64_t inode_id, const std::string& value, std::string* error) {
-    return PutToColumnFamily(GetColumnFamily(kDiskFileLocationColumnFamily), LocationKey(inode_id), value, error);
+bool RocksMetaStore::LegacyGetDiskFileLocation(uint64_t inode_id, std::string* value, std::string* error) const {
+    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kDiskFileLocationColumnFamily);
+    if (!cf) {
+        if (value) {
+            value->clear();
+        }
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+    return GetFromColumnFamily(cf, LocationKey(inode_id), value, error);
 }
 
-bool RocksMetaStore::GetDiskFileLocation(uint64_t inode_id, std::string* value, std::string* error) const {
-    return GetFromColumnFamily(GetColumnFamily(kDiskFileLocationColumnFamily), LocationKey(inode_id), value, error);
+bool RocksMetaStore::LegacyDeleteDiskFileLocation(uint64_t inode_id, std::string* error) {
+    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kDiskFileLocationColumnFamily);
+    if (!cf) {
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+    return DeleteFromColumnFamily(cf, LocationKey(inode_id), error);
 }
 
-bool RocksMetaStore::DeleteDiskFileLocation(uint64_t inode_id, std::string* error) {
-    return DeleteFromColumnFamily(GetColumnFamily(kDiskFileLocationColumnFamily), LocationKey(inode_id), error);
+bool RocksMetaStore::LegacyGetOpticalFileLocation(uint64_t inode_id, std::string* value, std::string* error) const {
+    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kOpticalFileLocationColumnFamily);
+    if (!cf) {
+        if (value) {
+            value->clear();
+        }
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+    return GetFromColumnFamily(cf, LocationKey(inode_id), value, error);
 }
 
-bool RocksMetaStore::PutOpticalFileLocation(uint64_t inode_id, const std::string& value, std::string* error) {
-    return PutToColumnFamily(GetColumnFamily(kOpticalFileLocationColumnFamily), LocationKey(inode_id), value, error);
+bool RocksMetaStore::LegacyDeleteOpticalFileLocation(uint64_t inode_id, std::string* error) {
+    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kOpticalFileLocationColumnFamily);
+    if (!cf) {
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+    return DeleteFromColumnFamily(cf, LocationKey(inode_id), error);
 }
 
-bool RocksMetaStore::GetOpticalFileLocation(uint64_t inode_id, std::string* value, std::string* error) const {
-    return GetFromColumnFamily(GetColumnFamily(kOpticalFileLocationColumnFamily), LocationKey(inode_id), value, error);
-}
-
-bool RocksMetaStore::DeleteOpticalFileLocation(uint64_t inode_id, std::string* error) {
-    return DeleteFromColumnFamily(GetColumnFamily(kOpticalFileLocationColumnFamily), LocationKey(inode_id), error);
-}
-
-bool RocksMetaStore::BatchPutDiskFileLocation(rocksdb::WriteBatch* batch,
-                                              uint64_t inode_id,
-                                              const std::string& value,
-                                              std::string* error) const {
+bool RocksMetaStore::LegacyBatchDeleteDiskFileLocation(rocksdb::WriteBatch* batch,
+                                                       uint64_t inode_id,
+                                                       std::string* error) const {
     if (!batch) {
         if (error) {
             *error = "WriteBatch is null";
@@ -160,38 +180,17 @@ bool RocksMetaStore::BatchPutDiskFileLocation(rocksdb::WriteBatch* batch,
     rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kDiskFileLocationColumnFamily);
     if (!cf) {
         if (error) {
-            *error = "disk file location column family is unavailable";
+            error->clear();
         }
-        return false;
-    }
-    batch->Put(cf, LocationKey(inode_id), value);
-    return true;
-}
-
-bool RocksMetaStore::BatchDeleteDiskFileLocation(rocksdb::WriteBatch* batch,
-                                                 uint64_t inode_id,
-                                                 std::string* error) const {
-    if (!batch) {
-        if (error) {
-            *error = "WriteBatch is null";
-        }
-        return false;
-    }
-    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kDiskFileLocationColumnFamily);
-    if (!cf) {
-        if (error) {
-            *error = "disk file location column family is unavailable";
-        }
-        return false;
+        return true;
     }
     batch->Delete(cf, LocationKey(inode_id));
     return true;
 }
 
-bool RocksMetaStore::BatchPutOpticalFileLocation(rocksdb::WriteBatch* batch,
-                                                 uint64_t inode_id,
-                                                 const std::string& value,
-                                                 std::string* error) const {
+bool RocksMetaStore::LegacyBatchDeleteOpticalFileLocation(rocksdb::WriteBatch* batch,
+                                                          uint64_t inode_id,
+                                                          std::string* error) const {
     if (!batch) {
         if (error) {
             *error = "WriteBatch is null";
@@ -201,29 +200,9 @@ bool RocksMetaStore::BatchPutOpticalFileLocation(rocksdb::WriteBatch* batch,
     rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kOpticalFileLocationColumnFamily);
     if (!cf) {
         if (error) {
-            *error = "optical file location column family is unavailable";
+            error->clear();
         }
-        return false;
-    }
-    batch->Put(cf, LocationKey(inode_id), value);
-    return true;
-}
-
-bool RocksMetaStore::BatchDeleteOpticalFileLocation(rocksdb::WriteBatch* batch,
-                                                    uint64_t inode_id,
-                                                    std::string* error) const {
-    if (!batch) {
-        if (error) {
-            *error = "WriteBatch is null";
-        }
-        return false;
-    }
-    rocksdb::ColumnFamilyHandle* cf = GetColumnFamily(kOpticalFileLocationColumnFamily);
-    if (!cf) {
-        if (error) {
-            *error = "optical file location column family is unavailable";
-        }
-        return false;
+        return true;
     }
     batch->Delete(cf, LocationKey(inode_id));
     return true;
@@ -239,32 +218,6 @@ rocksdb::ColumnFamilyHandle* RocksMetaStore::GetColumnFamily(const std::string& 
         return nullptr;
     }
     return it->second;
-}
-
-bool RocksMetaStore::PutToColumnFamily(rocksdb::ColumnFamilyHandle* cf,
-                                       const std::string& key,
-                                       const std::string& value,
-                                       std::string* error) {
-    if (!db_) {
-        if (error) {
-            *error = "DB not opened";
-        }
-        return false;
-    }
-    if (!cf) {
-        if (error) {
-            *error = "column family is unavailable";
-        }
-        return false;
-    }
-    rocksdb::Status status = db_->Put(rocksdb::WriteOptions(), cf, key, value);
-    if (!status.ok()) {
-        if (error) {
-            *error = status.ToString();
-        }
-        return false;
-    }
-    return true;
 }
 
 bool RocksMetaStore::GetFromColumnFamily(rocksdb::ColumnFamilyHandle* cf,

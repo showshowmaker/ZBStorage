@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string_view>
 
@@ -282,6 +283,55 @@ bool DecodeMasstreeReaddirToken(const std::string& token,
     return true;
 }
 
+bool BuildMasstreeOpticalFileLocation(const UnifiedInodeRecord& inode,
+                                      uint64_t inode_id,
+                                      zb::rpc::OpticalFileLocation* location,
+                                      std::string* error) {
+    if (!location) {
+        if (error) {
+            *error = "optical location output is null";
+        }
+        return false;
+    }
+    if (inode.inode_type != static_cast<uint8_t>(zb::rpc::INODE_FILE) ||
+        inode.storage_tier != static_cast<uint8_t>(UnifiedStorageTier::kOptical)) {
+        if (error) {
+            error->clear();
+        }
+        return false;
+    }
+
+    const MasstreeOpticalProfile profile = MasstreeOpticalProfile::Fixed();
+    if (inode.optical_node_id > std::numeric_limits<uint32_t>::max() ||
+        inode.optical_disk_id > std::numeric_limits<uint32_t>::max()) {
+        if (error) {
+            *error = "invalid masstree optical location ids";
+        }
+        return false;
+    }
+    const uint32_t node_index = static_cast<uint32_t>(inode.optical_node_id);
+    const uint32_t disk_index = static_cast<uint32_t>(inode.optical_disk_id);
+    const uint32_t image_index_in_disk = inode.optical_image_id;
+    if (node_index >= profile.optical_node_count ||
+        disk_index >= profile.disks_per_node ||
+        image_index_in_disk >= profile.ImagesPerDisk(disk_index)) {
+        if (error) {
+            *error = "invalid masstree optical location indexes";
+        }
+        return false;
+    }
+
+    location->Clear();
+    location->set_node_id(profile.NodeId(node_index));
+    location->set_disk_id(profile.DiskId(disk_index));
+    location->set_image_id(profile.ImageId(profile.GlobalImageId(node_index, disk_index, image_index_in_disk)));
+    location->set_file_id("obj-" + std::to_string(inode_id) + "-0");
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
 } // namespace
 
 bool MasstreeMetaStore::ResolvePath(const MasstreeNamespaceRoute& route,
@@ -367,39 +417,11 @@ bool MasstreeMetaStore::GetOpticalFileLocation(const MasstreeNamespaceRoute& rou
     if (!EnsureGenerationLoaded(route, &generation, error)) {
         return false;
     }
-    MasstreeInodeRecord record;
-    if (!ReadInodeRecord(*generation, inode_id, &record, error)) {
+    UnifiedInodeRecord inode;
+    if (!ReadUnifiedInode(*generation, inode_id, &inode, error)) {
         return false;
     }
-    if (record.attr.type() != zb::rpc::INODE_FILE || !record.has_optical_image) {
-        if (error) {
-            error->clear();
-        }
-        return false;
-    }
-    const MasstreeOpticalProfile profile = MasstreeOpticalProfile::Fixed();
-    uint32_t node_index = 0;
-    uint32_t disk_index = 0;
-    uint32_t image_index_in_disk = 0;
-    if (!profile.DecodeGlobalImageId(record.optical_image_global_id,
-                                     &node_index,
-                                     &disk_index,
-                                     &image_index_in_disk)) {
-        if (error) {
-            *error = "invalid masstree optical image id";
-        }
-        return false;
-    }
-
-    location->Clear();
-    location->set_node_id(profile.NodeId(node_index));
-    location->set_disk_id(profile.DiskId(disk_index));
-    location->set_image_id(profile.ImageId(record.optical_image_global_id));
-    location->set_file_id("obj-" + std::to_string(inode_id) + "-0");
-    if (error) {
-        error->clear();
-    }
-    return true;
+    return BuildMasstreeOpticalFileLocation(inode, inode_id, location, error);
 }
 
 bool MasstreeMetaStore::Readdir(const MasstreeNamespaceRoute& route,
@@ -692,11 +714,32 @@ bool MasstreeMetaStore::ReadInodeAttr(const LoadedGeneration& generation,
                                       uint64_t inode_id,
                                       zb::rpc::InodeAttr* attr,
                                       std::string* error) const {
+    UnifiedInodeRecord inode;
+    if (!ReadUnifiedInode(generation, inode_id, &inode, error)) {
+        return false;
+    }
+    UnifiedInodeRecordToAttr(inode, attr);
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool MasstreeMetaStore::ReadUnifiedInode(const LoadedGeneration& generation,
+                                         uint64_t inode_id,
+                                         UnifiedInodeRecord* inode,
+                                         std::string* error) const {
+    if (!inode) {
+        if (error) {
+            *error = "inode output is null";
+        }
+        return false;
+    }
     MasstreeInodeRecord record;
     if (!ReadInodeRecord(generation, inode_id, &record, error)) {
         return false;
     }
-    *attr = std::move(record.attr);
+    *inode = record.inode;
     if (error) {
         error->clear();
     }
@@ -741,7 +784,7 @@ bool MasstreeMetaStore::ReadInodeRecordFromSparsePages(const LoadedGeneration& g
     if (!MasstreeInodeRecordCodec::Decode(found.payload, record, error)) {
         return false;
     }
-    if (record->attr.inode_id() != inode_id) {
+    if (record->inode.inode_id != inode_id) {
         if (error) {
             *error = "masstree inode page payload inode mismatch";
         }

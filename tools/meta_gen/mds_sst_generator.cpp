@@ -23,9 +23,8 @@
 #include <rocksdb/options.h>
 #include <rocksdb/sst_file_writer.h>
 
-#include <google/protobuf/message_lite.h>
-
 #include "file_size_sampler.h"
+#include "mds/storage/UnifiedInodeRecord.h"
 #include "mds.pb.h"
 #include "namespace_layout_planner.h"
 
@@ -139,14 +138,6 @@ std::string DentryKey(uint64_t parent_inode, const std::string& name) {
     return "D/" + std::to_string(parent_inode) + "/" + name;
 }
 
-std::string DiskFileLocationKey(uint64_t inode_id) {
-    return "DF/" + std::to_string(inode_id);
-}
-
-std::string OpticalFileLocationKey(uint64_t inode_id) {
-    return "OF/" + std::to_string(inode_id);
-}
-
 std::string NextInodeKey() {
     return "X/next_inode";
 }
@@ -161,12 +152,45 @@ std::string EncodeU64(uint64_t value) {
     return out;
 }
 
-bool EncodeProto(const google::protobuf::MessageLite& m, std::string* out) {
-    if (!out) {
+uint64_t ComputeBlocks512(uint64_t size_bytes) {
+    return size_bytes == 0 ? 0 : ((size_bytes + 511ULL) / 512ULL);
+}
+
+void FillPosixInodeDefaults(zb::rpc::InodeAttr* attr) {
+    if (!attr) {
+        return;
+    }
+    if (attr->type() == zb::rpc::INODE_DIR && attr->size() == 0) {
+        attr->set_size(4096);
+    }
+    if (attr->blksize() == 0) {
+        attr->set_blksize(4096);
+    }
+    attr->set_blocks_512(ComputeBlocks512(attr->size()));
+    attr->set_rdev_major(0);
+    attr->set_rdev_minor(0);
+}
+
+bool EncodeUnifiedInode(const zb::rpc::InodeAttr& attr,
+                        uint64_t parent_inode_id,
+                        zb::mds::UnifiedStorageTier storage_tier,
+                        uint64_t disk_node_id,
+                        uint32_t disk_id,
+                        uint64_t optical_node_id,
+                        uint64_t optical_disk_id,
+                        uint32_t optical_image_id,
+                        std::string* out,
+                        std::string* error) {
+    zb::mds::UnifiedInodeRecord record;
+    if (!zb::mds::AttrToUnifiedInodeRecord(attr, parent_inode_id, storage_tier, &record, error)) {
         return false;
     }
-    out->clear();
-    return m.SerializeToString(out);
+    record.disk_node_id = disk_node_id;
+    record.disk_id = disk_id;
+    record.optical_node_id = optical_node_id;
+    record.optical_disk_id = optical_disk_id;
+    record.optical_image_id = optical_image_id;
+    return zb::mds::EncodeUnifiedInodeRecord(record, out, error);
 }
 
 uint64_t NowSeconds() {
@@ -182,6 +206,13 @@ std::string FormatNodeId(bool is_real_node, uint64_t index) {
         oss << "virtual-" << (index + 1);
     }
     return oss.str();
+}
+
+uint64_t SelectDiskNodeNumericId(bool is_real_node, uint64_t index) {
+    if (is_real_node) {
+        return index + 1U;
+    }
+    return index;
 }
 
 std::string FormatDiskId(uint64_t disk_index) {
@@ -382,7 +413,11 @@ uint64_t AllocInode(GeneratorRuntime* rt) {
     return rt->next_inode++;
 }
 
-bool EmitDirInode(GeneratorRuntime* rt, uint64_t inode_id, uint64_t now_sec) {
+bool EmitDirInode(GeneratorRuntime* rt,
+                  uint64_t inode_id,
+                  uint64_t parent_inode_id,
+                  const std::string& file_name,
+                  uint64_t now_sec) {
     zb::rpc::InodeAttr attr;
     attr.set_inode_id(inode_id);
     attr.set_type(zb::rpc::INODE_DIR);
@@ -398,10 +433,21 @@ bool EmitDirInode(GeneratorRuntime* rt, uint64_t inode_id, uint64_t now_sec) {
     attr.set_replica(1);
     attr.set_version(1);
     attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_PENDING);
+    attr.set_file_name(file_name);
+    FillPosixInodeDefaults(&attr);
     std::string payload;
-    if (!EncodeProto(attr, &payload)) {
+    if (!EncodeUnifiedInode(attr,
+                            parent_inode_id,
+                            zb::mds::UnifiedStorageTier::kNone,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            &payload,
+                            rt->error)) {
         if (rt->error) {
-            *rt->error = "failed to serialize dir inode";
+            *rt->error = rt->error->empty() ? "failed to encode dir inode" : *rt->error;
         }
         return false;
     }
@@ -499,10 +545,53 @@ bool EmitFileMeta(GeneratorRuntime* rt,
     attr.set_replica(has_disk_anchor ? 2 : 1);
     attr.set_version(1);
     attr.set_file_archive_state(zb::rpc::INODE_ARCHIVE_ARCHIVED);
+    attr.set_file_name(file_name);
+    FillPosixInodeDefaults(&attr);
     std::string inode_payload;
-    if (!EncodeProto(attr, &inode_payload)) {
+    uint64_t disk_node_numeric_id = 0;
+    uint32_t disk_numeric_id = 0;
+    uint64_t optical_node_numeric_id = 0;
+    uint64_t optical_disk_numeric_id = 0;
+    uint32_t optical_image_numeric_id = 0;
+    if (has_disk_anchor) {
+        const uint64_t real_disk_total = rt->cluster->real_node_count * rt->cluster->real_disks_per_node;
+        const uint64_t virtual_disk_total = rt->cluster->virtual_node_count * rt->cluster->virtual_disks_per_node;
+        const uint64_t total_disk = real_disk_total + virtual_disk_total;
+        if (total_disk != 0) {
+            uint64_t slot = inode_id % total_disk;
+            if (slot < real_disk_total && rt->cluster->real_node_count > 0 && rt->cluster->real_disks_per_node > 0) {
+                const uint64_t node_idx = slot / rt->cluster->real_disks_per_node;
+                const uint64_t disk_idx = slot % rt->cluster->real_disks_per_node;
+                disk_node_numeric_id = SelectDiskNodeNumericId(true, node_idx);
+                disk_numeric_id = static_cast<uint32_t>(disk_idx);
+            } else {
+                slot -= real_disk_total;
+                if (rt->cluster->virtual_node_count > 0 && rt->cluster->virtual_disks_per_node > 0) {
+                    const uint64_t node_idx = slot / rt->cluster->virtual_disks_per_node;
+                    const uint64_t disk_idx = slot % rt->cluster->virtual_disks_per_node;
+                    disk_node_numeric_id = SelectDiskNodeNumericId(false, node_idx);
+                    disk_numeric_id = static_cast<uint32_t>(disk_idx);
+                }
+            }
+        }
+    } else if (rt->cluster->optical_node_count > 0 && rt->cluster->discs_per_optical_node > 0) {
+        optical_node_numeric_id = inode_id % rt->cluster->optical_node_count;
+        optical_disk_numeric_id =
+            (inode_id / std::max<uint64_t>(1ULL, rt->cluster->optical_node_count)) % rt->cluster->discs_per_optical_node;
+        optical_image_numeric_id = 0;
+    }
+    if (!EncodeUnifiedInode(attr,
+                            parent_inode,
+                            has_disk_anchor ? zb::mds::UnifiedStorageTier::kDisk : zb::mds::UnifiedStorageTier::kOptical,
+                            disk_node_numeric_id,
+                            disk_numeric_id,
+                            optical_node_numeric_id,
+                            optical_disk_numeric_id,
+                            optical_image_numeric_id,
+                            &inode_payload,
+                            rt->error)) {
         if (rt->error) {
-            *rt->error = "failed to serialize file inode";
+            *rt->error = rt->error->empty() ? "failed to encode file inode" : *rt->error;
         }
         return false;
     }
@@ -511,48 +600,9 @@ bool EmitFileMeta(GeneratorRuntime* rt,
     }
     ++rt->stats->inode_count;
 
-    zb::rpc::OpticalFileLocation optical_location;
-    {
-        std::string node_id;
-        std::string disc_id;
-        SelectOpticalReplica(inode_id, *rt->cluster, &node_id, &disc_id);
-        optical_location.set_node_id(node_id);
-        optical_location.set_node_address(node_id + ":0");
-        optical_location.set_disk_id(disc_id);
-        optical_location.set_image_id("img-" + disc_id);
-        optical_location.set_file_id(BuildObjectId(inode_id));
-        optical_location.set_file_path("/inode/" + std::to_string(inode_id));
-    }
-    std::string optical_payload;
-    if (!EncodeProto(optical_location, &optical_payload)) {
-        if (rt->error) {
-            *rt->error = "failed to serialize optical file location";
-        }
-        return false;
-    }
-    if (!EmitKv(rt, OpticalFileLocationKey(inode_id), std::move(optical_payload))) {
-        return false;
-    }
     ++rt->stats->anchor_count;
 
     if (has_disk_anchor) {
-        std::string node_id;
-        std::string disk_id;
-        SelectDiskReplica(inode_id, *rt->cluster, &node_id, &disk_id);
-        zb::rpc::DiskFileLocation disk_location;
-        disk_location.set_node_id(node_id);
-        disk_location.set_node_address(node_id + ":0");
-        disk_location.set_disk_id(disk_id);
-        std::string disk_payload;
-        if (!EncodeProto(disk_location, &disk_payload)) {
-            if (rt->error) {
-                *rt->error = "failed to serialize disk file location";
-            }
-            return false;
-        }
-        if (!EmitKv(rt, DiskFileLocationKey(inode_id), std::move(disk_payload))) {
-            return false;
-        }
         ++rt->stats->anchor_count;
     }
 
@@ -602,7 +652,7 @@ bool GenerateTreeRec(GeneratorRuntime* rt,
             return false;
         }
         ++rt->stats->dentry_count;
-        if (!EmitDirInode(rt, child_inode, now_sec)) {
+        if (!EmitDirInode(rt, child_inode, parent_inode, dir_name, now_sec)) {
             return false;
         }
         if (!GenerateTreeRec(rt, namespace_id, child_inode, level + 1, leaf_index, file_ordinal, now_sec)) {
@@ -682,7 +732,7 @@ bool MdsSstGenerator::Generate(const ClusterScaleConfig& cluster,
     rt.start_tp = std::chrono::steady_clock::now();
     rt.last_progress_tp = rt.start_tp;
 
-    if (!EmitDirInode(&rt, 1, now_sec)) {
+    if (!EmitDirInode(&rt, 1, 0, "/", now_sec)) {
         return false;
     }
 
@@ -693,7 +743,7 @@ bool MdsSstGenerator::Generate(const ClusterScaleConfig& cluster,
             return false;
         }
         ++stats.dentry_count;
-        if (!EmitDirInode(&rt, ns_inode, now_sec)) {
+        if (!EmitDirInode(&rt, ns_inode, 1, ns_name, now_sec)) {
             return false;
         }
 

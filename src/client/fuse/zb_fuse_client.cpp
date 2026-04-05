@@ -14,6 +14,7 @@
 #include <ctime>
 #include <fcntl.h>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -197,6 +198,10 @@ void FillStat(const zb::rpc::InodeAttr& attr, struct stat* st) {
     st->st_atim.tv_sec = static_cast<time_t>(attr.atime());
     st->st_mtim.tv_sec = static_cast<time_t>(attr.mtime());
     st->st_ctim.tv_sec = static_cast<time_t>(attr.ctime());
+    st->st_blksize = static_cast<blksize_t>(attr.blksize() ? attr.blksize() : 4096U);
+    st->st_blocks = static_cast<blkcnt_t>(attr.blocks_512());
+    st->st_rdev = static_cast<dev_t>((static_cast<uint64_t>(attr.rdev_major()) << 32U) |
+                                     static_cast<uint64_t>(attr.rdev_minor()));
 }
 
 std::string ReplicaObjectId(const zb::rpc::ReplicaLocation& replica) {
@@ -204,6 +209,53 @@ std::string ReplicaObjectId(const zb::rpc::ReplicaLocation& replica) {
 }
 
 std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index);
+
+std::string FormatRealNodeId(uint64_t numeric_id) {
+    std::ostringstream oss;
+    oss << "node-real-" << std::setw(2) << std::setfill('0') << numeric_id;
+    return oss.str();
+}
+
+std::string FormatVirtualNodeId(uint64_t numeric_id) {
+    return "vpool-v" + std::to_string(numeric_id);
+}
+
+std::string FormatDiskIdForTier(uint32_t numeric_id, bool is_virtual) {
+    if (is_virtual) {
+        return "disk" + std::to_string(numeric_id);
+    }
+    std::ostringstream oss;
+    oss << "disk-" << std::setw(2) << std::setfill('0') << numeric_id;
+    return oss.str();
+}
+
+std::string FormatOpticalNodeId(uint64_t numeric_id) {
+    return "optical-node-" + std::to_string(numeric_id);
+}
+
+std::string FormatOpticalDiskId(uint64_t numeric_id) {
+    return "disk-" + std::to_string(numeric_id);
+}
+
+std::string FormatOpticalImageId(uint64_t node_id, uint64_t disk_id, uint32_t image_id) {
+    return "img-" + std::to_string(node_id) + "-" + std::to_string(disk_id) + "-" + std::to_string(image_id);
+}
+
+bool HasDiskLocationInAttr(const zb::rpc::InodeAttr& attr) {
+    return attr.storage_tier() == zb::rpc::INODE_STORAGE_DISK && attr.disk_node_id() != 0;
+}
+
+bool HasOpticalLocationInAttr(const zb::rpc::InodeAttr& attr) {
+    return attr.storage_tier() == zb::rpc::INODE_STORAGE_OPTICAL && attr.optical_node_id() != 0;
+}
+
+bool HasLegacyDiskLocation(const zb::rpc::FileLocationView& view) {
+    return !view.disk_location().node_id().empty() && !view.disk_location().disk_id().empty();
+}
+
+bool HasLegacyOpticalLocation(const zb::rpc::FileLocationView& view) {
+    return !view.optical_location().node_id().empty() && !view.optical_location().disk_id().empty();
+}
 
 bool IsWriteOpenFlags(uint32_t flags) {
     const int access_mode = static_cast<int>(flags) & O_ACCMODE;
@@ -221,6 +273,35 @@ bool IsWriteOpenFlags(uint32_t flags) {
     }
 #endif
     return false;
+}
+
+zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::FileLocationView& view,
+                                           const zb::rpc::InodeAttr& attr) {
+    zb::rpc::ReplicaLocation replica;
+    if (attr.storage_tier() == zb::rpc::INODE_STORAGE_DISK) {
+        const bool is_virtual = attr.disk_node_is_virtual();
+        replica.set_node_id(is_virtual ? FormatVirtualNodeId(attr.disk_node_id())
+                                       : FormatRealNodeId(attr.disk_node_id()));
+        replica.set_disk_id(FormatDiskIdForTier(attr.disk_id(), is_virtual));
+        replica.set_object_id(BuildStableObjectId(view.attr().inode_id(), 0));
+        replica.set_size(view.attr().size());
+        replica.set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+        replica.set_replica_state(zb::rpc::REPLICA_READY);
+        return replica;
+    }
+    if (attr.storage_tier() == zb::rpc::INODE_STORAGE_OPTICAL) {
+        replica.set_node_id(FormatOpticalNodeId(attr.optical_node_id()));
+        replica.set_disk_id(FormatOpticalDiskId(attr.optical_disk_id()));
+        replica.set_object_id(BuildStableObjectId(view.attr().inode_id(), 0));
+        replica.set_size(view.attr().size());
+        replica.set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
+        replica.set_replica_state(zb::rpc::REPLICA_READY);
+        replica.set_image_id(FormatOpticalImageId(attr.optical_node_id(),
+                                                  attr.optical_disk_id(),
+                                                  attr.optical_image_id()));
+        return replica;
+    }
+    return replica;
 }
 
 zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::FileLocationView& view,
@@ -252,8 +333,7 @@ zb::rpc::ReplicaLocation ToReplicaLocation(const zb::rpc::FileLocationView& view
 }
 
 bool HasOpticalLocation(const zb::rpc::FileLocationView& view) {
-    return !view.optical_location().node_id().empty() &&
-           !view.optical_location().disk_id().empty();
+    return HasOpticalLocationInAttr(view.attr()) || HasLegacyOpticalLocation(view);
 }
 
 bool IsArchivedReadOnly(const zb::rpc::FileLocationView& view) {
@@ -264,15 +344,15 @@ bool SelectLocationForIo(const zb::rpc::FileLocationView& view, zb::rpc::Replica
     if (!anchor) {
         return false;
     }
-    const bool has_disk =
-        !view.disk_location().node_id().empty() && !view.disk_location().disk_id().empty();
-    const bool has_optical =
-        !view.optical_location().node_id().empty() && !view.optical_location().disk_id().empty();
-    if (has_disk) {
+    if (HasDiskLocationInAttr(view.attr()) || HasOpticalLocationInAttr(view.attr())) {
+        *anchor = ToReplicaLocation(view, view.attr());
+        return !anchor->node_id().empty() && !anchor->disk_id().empty();
+    }
+    if (HasLegacyDiskLocation(view)) {
         *anchor = ToReplicaLocation(view, view.disk_location());
         return true;
     }
-    if (has_optical) {
+    if (HasLegacyOpticalLocation(view)) {
         *anchor = ToReplicaLocation(view, view.optical_location());
         return true;
     }
@@ -1322,6 +1402,29 @@ bool ResolveNodeAddress(FuseState* state, const std::string& node_id, std::strin
     return true;
 }
 
+bool EnsureReplicaNodeAddress(FuseState* state, zb::rpc::ReplicaLocation* replica, zb::rpc::MdsStatus* status) {
+    if (!replica) {
+        if (status) {
+            status->set_code(zb::rpc::MDS_INVALID_ARGUMENT);
+            status->set_message("replica is null");
+        }
+        return false;
+    }
+    if (!replica->node_address().empty()) {
+        return true;
+    }
+    std::string address;
+    if (!ResolveNodeAddress(state, replica->node_id(), &address) || address.empty()) {
+        if (status) {
+            status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+            status->set_message("failed to resolve node address for anchor");
+        }
+        return false;
+    }
+    replica->set_node_address(address);
+    return true;
+}
+
 void InvalidateInodeCache(FuseState* state, uint64_t inode_id) {
     if (!state || inode_id == 0) {
         return;
@@ -1456,6 +1559,9 @@ bool GetOrFetchAnchor(FuseState* state,
             status->set_code(zb::rpc::MDS_INTERNAL_ERROR);
             status->set_message("empty anchor node_id/disk_id");
         }
+        return false;
+    }
+    if (!EnsureReplicaNodeAddress(state, anchor, status)) {
         return false;
     }
     UpdateInodeAnchorCache(state, inode_id, *anchor);
@@ -1676,6 +1782,9 @@ int FuseOpen(const char* path, struct fuse_file_info* fi) {
                 LogMdsFailure("Open.GetOrFetchAnchor", path, status);
                 return -StatusToErrno(status);
             }
+        } else if (!EnsureReplicaNodeAddress(state, &anchor, &status)) {
+            LogMdsFailure("Open.ResolveAnchorAddress", path, status);
+            return -StatusToErrno(status);
         } else {
             UpdateInodeAnchorCache(state, attr.inode_id(), anchor);
         }
@@ -1763,6 +1872,9 @@ int FuseCreate(const char* path, mode_t mode, struct fuse_file_info* fi) {
             LogMdsFailure("Create.GetOrFetchAnchor", path, status);
             return -StatusToErrno(status);
         }
+    } else if (!EnsureReplicaNodeAddress(state, &anchor, &status)) {
+        LogMdsFailure("Create.ResolveAnchorAddress", path, status);
+        return -StatusToErrno(status);
     } else {
         UpdateInodeAnchorCache(state, attr.inode_id(), anchor);
     }
@@ -1881,6 +1993,9 @@ int FuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse
     if (!SelectLocationForIo(location, &anchor)) {
         status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
         status.set_message("GetFileLocation returned empty location");
+        return -StatusToErrno(status);
+    }
+    if (!EnsureReplicaNodeAddress(state, &anchor, &status)) {
         return -StatusToErrno(status);
     }
     UpdateInodeAnchorCache(state, inode_id, anchor);
@@ -2021,6 +2136,10 @@ int FuseWrite(const char* path, const char* buf, size_t size, off_t offset, stru
         LogMdsFailure("Write.SelectLocationForIo", path, status);
         return -StatusToErrno(status);
     }
+    if (!EnsureReplicaNodeAddress(state, &anchor, &status)) {
+        LogMdsFailure("Write.ResolveAnchorAddress", path, status);
+        return -StatusToErrno(status);
+    }
     UpdateInodeAnchorCache(state, inode_id, anchor);
 
     uint64_t hint_object_unit_size = FLAGS_default_object_unit_size;
@@ -2136,6 +2255,9 @@ int FuseTruncate(const char* path, off_t size, struct fuse_file_info* fi) {
     if (!SelectLocationForIo(location, &anchor)) {
         status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
         status.set_message("GetFileLocation returned empty location");
+        return -StatusToErrno(status);
+    }
+    if (!EnsureReplicaNodeAddress(state, &anchor, &status)) {
         return -StatusToErrno(status);
     }
     UpdateInodeAnchorCache(state, inode_id, anchor);

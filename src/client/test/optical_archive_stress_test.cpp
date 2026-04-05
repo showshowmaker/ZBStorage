@@ -6,6 +6,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -46,6 +47,64 @@ namespace {
 uint64_t NowMilliseconds() {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+}
+
+std::string FormatRealNodeId(uint64_t numeric_id) {
+    std::ostringstream oss;
+    oss << "node-real-" << std::setw(2) << std::setfill('0') << numeric_id;
+    return oss.str();
+}
+
+std::string FormatVirtualNodeId(uint64_t numeric_id) {
+    return "vpool-v" + std::to_string(numeric_id);
+}
+
+std::string FormatDiskIdForTier(uint32_t numeric_id, bool is_virtual) {
+    if (is_virtual) {
+        return "disk" + std::to_string(numeric_id);
+    }
+    std::ostringstream oss;
+    oss << "disk-" << std::setw(2) << std::setfill('0') << numeric_id;
+    return oss.str();
+}
+
+std::string FormatOpticalNodeId(uint64_t numeric_id) {
+    return "optical-node-" + std::to_string(numeric_id);
+}
+
+std::string FormatOpticalDiskId(uint64_t numeric_id) {
+    return "disk-" + std::to_string(numeric_id);
+}
+
+std::string FormatOpticalImageId(uint64_t node_id, uint64_t disk_id, uint32_t image_id) {
+    return "img-" + std::to_string(node_id) + "-" + std::to_string(disk_id) + "-" + std::to_string(image_id);
+}
+
+bool PopulateAnchorFromLegacyLocation(const zb::rpc::FileLocationView& view,
+                                      zb::rpc::ReplicaLocation* anchor) {
+    if (!anchor) {
+        return false;
+    }
+    if (!view.disk_location().node_id().empty() && !view.disk_location().disk_id().empty()) {
+        anchor->set_node_id(view.disk_location().node_id());
+        anchor->set_node_address(view.disk_location().node_address());
+        anchor->set_disk_id(view.disk_location().disk_id());
+        anchor->set_object_id("obj-" + std::to_string(view.attr().inode_id()) + "-0");
+        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
+        anchor->set_replica_state(zb::rpc::REPLICA_READY);
+        return true;
+    }
+    if (!view.optical_location().node_id().empty() && !view.optical_location().disk_id().empty()) {
+        anchor->set_node_id(view.optical_location().node_id());
+        anchor->set_node_address(view.optical_location().node_address());
+        anchor->set_disk_id(view.optical_location().disk_id());
+        anchor->set_object_id(view.optical_location().file_id());
+        anchor->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
+        anchor->set_replica_state(zb::rpc::REPLICA_READY);
+        anchor->set_image_id(view.optical_location().image_id());
+        return true;
+    }
+    return false;
 }
 
 struct FileState {
@@ -278,22 +337,25 @@ public:
         }
         if (anchor) {
             const auto& view = resp.location();
-            if (!view.disk_location().node_id().empty() && !view.disk_location().disk_id().empty()) {
-                anchor->set_node_id(view.disk_location().node_id());
-                anchor->set_node_address(view.disk_location().node_address());
-                anchor->set_disk_id(view.disk_location().disk_id());
+            if (view.attr().storage_tier() == zb::rpc::INODE_STORAGE_DISK && view.attr().disk_node_id() != 0) {
+                const bool is_virtual = view.attr().disk_node_is_virtual();
+                anchor->set_node_id(is_virtual ? FormatVirtualNodeId(view.attr().disk_node_id())
+                                               : FormatRealNodeId(view.attr().disk_node_id()));
+                anchor->set_disk_id(FormatDiskIdForTier(view.attr().disk_id(), is_virtual));
                 anchor->set_object_id("obj-" + std::to_string(view.attr().inode_id()) + "-0");
                 anchor->set_storage_tier(zb::rpc::STORAGE_TIER_DISK);
                 anchor->set_replica_state(zb::rpc::REPLICA_READY);
-            } else if (!view.optical_location().node_id().empty() && !view.optical_location().disk_id().empty()) {
-                anchor->set_node_id(view.optical_location().node_id());
-                anchor->set_node_address(view.optical_location().node_address());
-                anchor->set_disk_id(view.optical_location().disk_id());
-                anchor->set_object_id(view.optical_location().file_id());
+            } else if (view.attr().storage_tier() == zb::rpc::INODE_STORAGE_OPTICAL &&
+                       view.attr().optical_node_id() != 0) {
+                anchor->set_node_id(FormatOpticalNodeId(view.attr().optical_node_id()));
+                anchor->set_disk_id(FormatOpticalDiskId(view.attr().optical_disk_id()));
+                anchor->set_object_id("obj-" + std::to_string(view.attr().inode_id()) + "-0");
                 anchor->set_storage_tier(zb::rpc::STORAGE_TIER_OPTICAL);
                 anchor->set_replica_state(zb::rpc::REPLICA_READY);
-                anchor->set_image_id(view.optical_location().image_id());
-            } else {
+                anchor->set_image_id(FormatOpticalImageId(view.attr().optical_node_id(),
+                                                          view.attr().optical_disk_id(),
+                                                          view.attr().optical_image_id()));
+            } else if (!PopulateAnchorFromLegacyLocation(view, anchor)) {
                 if (err) {
                     *err = "GetFileLocation returned empty location";
                 }

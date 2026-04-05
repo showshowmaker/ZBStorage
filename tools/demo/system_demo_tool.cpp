@@ -169,6 +169,52 @@ std::string BaseNodeIdFromVirtual(const std::string& node_id) {
     return node_id.substr(0, pos);
 }
 
+std::string FormatRealNodeId(uint64_t numeric_id) {
+    std::ostringstream oss;
+    oss << "node-real-" << std::setw(2) << std::setfill('0') << numeric_id;
+    return oss.str();
+}
+
+std::string FormatVirtualNodeId(uint64_t numeric_id) {
+    return "vpool-v" + std::to_string(numeric_id);
+}
+
+std::string FormatDiskIdForTier(uint32_t numeric_id, bool is_virtual) {
+    if (is_virtual) {
+        return "disk" + std::to_string(numeric_id);
+    }
+    std::ostringstream oss;
+    oss << "disk-" << std::setw(2) << std::setfill('0') << numeric_id;
+    return oss.str();
+}
+
+bool HasLegacyDiskLocation(const zb::rpc::FileLocationView& view) {
+    return !view.disk_location().node_id().empty() && !view.disk_location().disk_id().empty();
+}
+
+bool ResolveNodeAndDiskFromLocationView(const zb::rpc::FileLocationView& view,
+                                        std::string* node_id,
+                                        std::string* disk_id) {
+    if (!node_id || !disk_id) {
+        return false;
+    }
+    node_id->clear();
+    disk_id->clear();
+    if (view.attr().storage_tier() == zb::rpc::INODE_STORAGE_DISK && view.attr().disk_node_id() != 0) {
+        const bool is_virtual = view.attr().disk_node_is_virtual();
+        *node_id = is_virtual ? FormatVirtualNodeId(view.attr().disk_node_id())
+                              : FormatRealNodeId(view.attr().disk_node_id());
+        *disk_id = FormatDiskIdForTier(view.attr().disk_id(), is_virtual);
+        return true;
+    }
+    if (HasLegacyDiskLocation(view)) {
+        *node_id = view.disk_location().node_id();
+        *disk_id = view.disk_location().disk_id();
+        return true;
+    }
+    return false;
+}
+
 std::string FormatBytes(uint64_t bytes) {
     const char* units[] = {"B", "KB", "MB", "GB", "TB", "PB", "EB"};
     double value = static_cast<double>(bytes);
@@ -1662,8 +1708,9 @@ private:
             std::cerr << "查询文件位置失败 inode=" << attr.inode_id() << ": " << status.message() << std::endl;
             return false;
         }
-        const std::string node_id = view.disk_location().node_id();
-        const std::string disk_id = view.disk_location().disk_id();
+        std::string node_id;
+        std::string disk_id;
+        (void)ResolveNodeAndDiskFromLocationView(view, &node_id, &disk_id);
         const std::string base_node_id = BaseNodeIdFromVirtual(node_id);
         auto it = node_type_by_id_.find(base_node_id);
         std::string actual_tier = "unknown";

@@ -99,6 +99,13 @@ bool ReadString(const std::string& in, size_t* cursor, std::string* value) {
     return true;
 }
 
+bool DecodeLegacyInodeAttr(const std::string& data, zb::rpc::InodeAttr* attr) {
+    if (!attr) {
+        return false;
+    }
+    return attr->ParseFromString(data);
+}
+
 std::string EncodeEnvelope(const std::string& payload, uint32_t version = kEnvelopeVersionCurrent) {
     std::string out;
     out.reserve(sizeof(uint32_t) * 4 + payload.size());
@@ -185,17 +192,45 @@ bool MetaCodec::DecodeUInt64(const std::string& data, uint64_t* value) {
     return true;
 }
 
-std::string MetaCodec::EncodeInodeAttr(const zb::rpc::InodeAttr& attr) {
-    std::string out;
-    attr.SerializeToString(&out);
-    return out;
+bool MetaCodec::EncodeUnifiedInodeRecord(const UnifiedInodeRecord& record, std::string* out, std::string* error) {
+    return zb::mds::EncodeUnifiedInodeRecord(record, out, error);
 }
 
-bool MetaCodec::DecodeInodeAttr(const std::string& data, zb::rpc::InodeAttr* attr) {
-    if (!attr) {
-        return false;
+bool MetaCodec::DecodeUnifiedInodeRecord(const std::string& data,
+                                         UnifiedInodeRecord* record,
+                                         std::string* error) {
+    return zb::mds::DecodeUnifiedInodeRecord(data, record, error);
+}
+
+bool MetaCodec::DecodeInodeAttrCompat(const std::string& data,
+                                      zb::rpc::InodeAttr* attr,
+                                      bool* decoded_from_unified,
+                                      std::string* error) {
+    if (decoded_from_unified) {
+        *decoded_from_unified = false;
     }
-    return attr->ParseFromString(data);
+    UnifiedInodeRecord record;
+    std::string local_error;
+    if (zb::mds::DecodeUnifiedInodeRecord(data, &record, &local_error)) {
+        UnifiedInodeRecordToAttr(record, attr);
+        if (decoded_from_unified) {
+            *decoded_from_unified = true;
+        }
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+    if (DecodeLegacyInodeAttr(data, attr)) {
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+    if (error) {
+        *error = !local_error.empty() ? local_error : "invalid inode payload";
+    }
+    return false;
 }
 
 std::string MetaCodec::EncodeDiskFileLocation(const zb::rpc::DiskFileLocation& location) {
