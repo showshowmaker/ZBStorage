@@ -763,20 +763,21 @@ bool BuildPathListPlan(const MasstreeBulkMetaGenerator::Request& request,
     return true;
 }
 
-bool EmitPathListSubtree(const PathListPlan& plan,
-                         size_t node_index,
-                         uint64_t parent_inode_id,
-                         uint64_t now_sec,
-                         uint64_t namespace_seed,
-                         uint64_t generation_seed,
-                         const MasstreeOpticalProfile& optical_profile,
-                         uint64_t* next_inode,
-                         uint64_t* file_ordinal,
-                         MasstreeDecimalAccumulator* total_file_bytes_accumulator,
-                         std::ofstream* inode_out,
-                         std::ofstream* dentry_out,
-                         std::string* error) {
-    if (!next_inode || !file_ordinal || !total_file_bytes_accumulator) {
+bool AssignPathListSubtreeInodes(const PathListPlan& plan,
+                                 size_t node_index,
+                                 uint64_t parent_inode_id,
+                                 uint64_t now_sec,
+                                 uint64_t namespace_seed,
+                                 uint64_t generation_seed,
+                                 const MasstreeOpticalProfile& optical_profile,
+                                 uint64_t* next_inode,
+                                 uint64_t* file_ordinal,
+                                 MasstreeDecimalAccumulator* total_file_bytes_accumulator,
+                                 std::vector<uint64_t>* node_inode_ids,
+                                 std::ofstream* inode_out,
+                                 std::string* error) {
+    if (!next_inode || !file_ordinal || !total_file_bytes_accumulator || !node_inode_ids ||
+        node_index >= node_inode_ids->size()) {
         if (error) {
             *error = "invalid path_list emit state";
         }
@@ -784,6 +785,7 @@ bool EmitPathListSubtree(const PathListPlan& plan,
     }
     const PathListNode& node = plan.nodes[node_index];
     const uint64_t inode_id = (*next_inode)++;
+    (*node_inode_ids)[node_index] = inode_id;
     const bool is_dir = NodeIsDirectory(node);
     if (is_dir) {
         const uint32_t nlink = static_cast<uint32_t>(2U + node.children.size());
@@ -791,29 +793,23 @@ bool EmitPathListSubtree(const PathListPlan& plan,
                               inode_id,
                               BuildDirectoryAttr(inode_id, node.name, nlink, now_sec),
                               parent_inode_id,
-                              error) ||
-            !WriteDentryRecord(dentry_out,
-                               parent_inode_id,
-                               node.name,
-                               inode_id,
-                               zb::rpc::INODE_DIR,
-                               error)) {
+                              error)) {
             return false;
         }
         for (size_t child_index : node.children) {
-            if (!EmitPathListSubtree(plan,
-                                     child_index,
-                                     inode_id,
-                                     now_sec,
-                                     namespace_seed,
-                                     generation_seed,
-                                     optical_profile,
-                                     next_inode,
-                                     file_ordinal,
-                                     total_file_bytes_accumulator,
-                                     inode_out,
-                                     dentry_out,
-                                     error)) {
+            if (!AssignPathListSubtreeInodes(plan,
+                                             child_index,
+                                             inode_id,
+                                             now_sec,
+                                             namespace_seed,
+                                             generation_seed,
+                                             optical_profile,
+                                             next_inode,
+                                             file_ordinal,
+                                             total_file_bytes_accumulator,
+                                             node_inode_ids,
+                                             inode_out,
+                                             error)) {
                 return false;
             }
         }
@@ -828,14 +824,55 @@ bool EmitPathListSubtree(const PathListPlan& plan,
                           inode_id,
                           BuildFileAttr(inode_id, node.name, file_size_bytes, now_sec),
                           parent_inode_id,
-                          error) ||
-        !WriteDentryRecord(dentry_out,
-                           parent_inode_id,
-                           node.name,
-                           inode_id,
-                           zb::rpc::INODE_FILE,
-                           error)) {
+                          error)) {
         return false;
+    }
+    return true;
+}
+
+bool EmitPathListDentryGroup(const PathListPlan& plan,
+                             size_t parent_index,
+                             uint64_t parent_inode_id,
+                             const std::vector<uint64_t>& node_inode_ids,
+                             std::ofstream* dentry_out,
+                             std::string* error) {
+    if (!dentry_out || parent_index >= plan.nodes.size() || node_inode_ids.size() != plan.nodes.size()) {
+        if (error) {
+            *error = "invalid path_list dentry emit state";
+        }
+        return false;
+    }
+    const PathListNode& parent = plan.nodes[parent_index];
+    for (size_t child_index : parent.children) {
+        if (child_index >= node_inode_ids.size() || node_inode_ids[child_index] == 0) {
+            if (error) {
+                *error = "path_list child inode assignment is incomplete";
+            }
+            return false;
+        }
+        const PathListNode& child = plan.nodes[child_index];
+        const bool child_is_dir = NodeIsDirectory(child);
+        if (!WriteDentryRecord(dentry_out,
+                               parent_inode_id,
+                               child.name,
+                               node_inode_ids[child_index],
+                               child_is_dir ? zb::rpc::INODE_DIR : zb::rpc::INODE_FILE,
+                               error)) {
+            return false;
+        }
+    }
+    for (size_t child_index : parent.children) {
+        if (!NodeIsDirectory(plan.nodes[child_index])) {
+            continue;
+        }
+        if (!EmitPathListDentryGroup(plan,
+                                     child_index,
+                                     node_inode_ids[child_index],
+                                     node_inode_ids,
+                                     dentry_out,
+                                     error)) {
+            return false;
+        }
     }
     return true;
 }
@@ -1001,6 +1038,22 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
             return false;
         }
 
+        const uint64_t per_repeat_inode_count = static_cast<uint64_t>(plan.nodes.size());
+        for (uint64_t repeat_index = 0; repeat_index < plan.repeat_count; ++repeat_index) {
+            const uint64_t wrapper_inode = request.inode_start + 1ULL + repeat_index * per_repeat_inode_count;
+            const std::string wrapper_name = RepeatDirName(plan.repeat_dir_prefix,
+                                                           repeat_index,
+                                                           static_cast<size_t>(plan.wrapper_name_width));
+            if (!WriteDentryRecord(&dentry_out,
+                                   root_inode_id,
+                                   wrapper_name,
+                                   wrapper_inode,
+                                   zb::rpc::INODE_DIR,
+                                   error)) {
+                return false;
+            }
+        }
+
         uint64_t next_inode = request.inode_start + 1ULL;
         uint64_t file_ordinal = 0;
         for (uint64_t repeat_index = 0; repeat_index < plan.repeat_count; ++repeat_index) {
@@ -1013,31 +1066,34 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
                                   wrapper_inode,
                                   BuildDirectoryAttr(wrapper_inode, wrapper_name, wrapper_nlink, now_sec),
                                   root_inode_id,
-                                  error) ||
-                !WriteDentryRecord(&dentry_out,
-                                   root_inode_id,
-                                   wrapper_name,
-                                   wrapper_inode,
-                                   zb::rpc::INODE_DIR,
-                                   error)) {
+                                  error)) {
                 return false;
             }
+            std::vector<uint64_t> node_inode_ids(plan.nodes.size(), 0);
             for (size_t child_index : plan.nodes[0].children) {
-                if (!EmitPathListSubtree(plan,
-                                         child_index,
-                                         wrapper_inode,
-                                         now_sec,
-                                         namespace_seed,
-                                         generation_seed,
-                                         optical_profile,
-                                         &next_inode,
-                                         &file_ordinal,
-                                         &total_file_bytes_accumulator,
-                                         &inode_out,
-                                         &dentry_out,
-                                         error)) {
+                if (!AssignPathListSubtreeInodes(plan,
+                                                 child_index,
+                                                 wrapper_inode,
+                                                 now_sec,
+                                                 namespace_seed,
+                                                 generation_seed,
+                                                 optical_profile,
+                                                 &next_inode,
+                                                 &file_ordinal,
+                                                 &total_file_bytes_accumulator,
+                                                 &node_inode_ids,
+                                                 &inode_out,
+                                                 error)) {
                     return false;
                 }
+            }
+            if (!EmitPathListDentryGroup(plan,
+                                         0,
+                                         wrapper_inode,
+                                         node_inode_ids,
+                                         &dentry_out,
+                                         error)) {
+                return false;
             }
         }
         if (next_inode != request.inode_start + inode_count) {

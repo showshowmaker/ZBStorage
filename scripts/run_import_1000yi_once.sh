@@ -65,14 +65,19 @@ RUN_DIR="${RUN_DIR}" BUILD_DIR="${BUILD_DIR}" bash "${ROOT_DIR}/scripts/start_de
 
 if [[ -n "${PATH_LIST_FILE}" ]]; then
   log "[INFO] generating template from txt path list"
-  RUN_DIR="${RUN_DIR}" \
-    BUILD_DIR="${BUILD_DIR}" \
-    MOUNT_POINT="${RUN_DIR}/mnt" \
-    MASSTREE_TEMPLATE_ID="${TEMPLATE_ID}" \
-    MASSTREE_PATH_LIST_FILE="${PATH_LIST_FILE}" \
-    MASSTREE_REPEAT_DIR_PREFIX="${REPEAT_DIR_PREFIX}" \
-    bash "${ROOT_DIR}/scripts/generate_masstree_template.sh" \
-    "${TEMPLATE_ID}" "${PATH_LIST_FILE}" "${REPEAT_DIR_PREFIX}" | tee "${IMPORT_LOG}"
+  if RUN_DIR="${RUN_DIR}" \
+     BUILD_DIR="${BUILD_DIR}" \
+     MOUNT_POINT="${RUN_DIR}/mnt" \
+     MASSTREE_TEMPLATE_ID="${TEMPLATE_ID}" \
+     MASSTREE_PATH_LIST_FILE="${PATH_LIST_FILE}" \
+     MASSTREE_REPEAT_DIR_PREFIX="${REPEAT_DIR_PREFIX}" \
+     bash "${ROOT_DIR}/scripts/generate_masstree_template.sh" \
+     "${TEMPLATE_ID}" "${PATH_LIST_FILE}" "${REPEAT_DIR_PREFIX}" | tee "${IMPORT_LOG}"; then
+    :
+  else
+    STATUS=${PIPESTATUS[0]:-1}
+    exit "${STATUS}"
+  fi
 fi
 
 log "[INFO] importing ${NAMESPACE_COUNT} namespaces (~${NAMESPACE_COUNT} * 1e8 files)"
