@@ -1012,6 +1012,7 @@ public:
                                       zb::rpc::GetRandomMasstreeLookupPathsReply* reply_out) {
         zb::rpc::GetRandomMasstreeLookupPathsReply reply;
         brpc::Controller cntl;
+        cntl.set_timeout_ms(std::max<int32_t>(FLAGS_timeout_ms, 120000));
         stub_.GetRandomMasstreeLookupPaths(&cntl, &request, &reply, nullptr);
         if (cntl.Failed()) {
             reply.mutable_status()->set_code(zb::rpc::MDS_INTERNAL_ERROR);
@@ -1148,11 +1149,11 @@ public:
             return RunInteractiveV2();
         }
         if (scenario == "health") {
-            return RunScenarioCommand("health", "Health Check", "Health check passed", "Health check failed",
+            return RunScenarioCommand("health", "环境健康检查", "环境健康检查通过", "环境健康检查失败",
                                       [&]() { return RunHealthCheck(); });
         }
         if (scenario == "stats") {
-            return RunScenarioCommand("stats", "TC-P1 Global Stats", "TC-P1 stats passed", "TC-P1 stats failed",
+            return RunScenarioCommand("stats", "TC-P1 全局统计", "TC-P1 全局统计通过", "TC-P1 全局统计失败",
                                       [&]() { return RunStatsScenario(); });
         }
         if (scenario == "posix") {
@@ -1168,23 +1169,23 @@ public:
         }
         if (scenario == "masstree_import") {
             return RunScenarioCommand("masstree_import",
-                                      "TC-P4 Masstree Import",
-                                      "Masstree import finished",
-                                      "Masstree import failed",
+                                      "TC-P4 Masstree 导入",
+                                      "Masstree 导入完成",
+                                      "Masstree 导入失败",
                                       [&]() { return RunMasstreeImportDemo(); });
         }
         if (scenario == "masstree_template") {
             return RunScenarioCommand("masstree_template",
-                                      "TC-P4A Masstree Template Generate",
-                                      "Masstree template generation finished",
-                                      "Masstree template generation failed",
+                                      "TC-P4A Masstree 模板生成",
+                                      "Masstree 模板生成完成",
+                                      "Masstree 模板生成失败",
                                       [&]() { return RunMasstreeTemplateGenerateDemo(); });
         }
         if (scenario == "masstree_query") {
             return RunScenarioCommand("masstree_query",
-                                      "TC-P5 Masstree Query",
-                                      "Masstree query finished",
-                                      "Masstree query failed",
+                                      "TC-P5 Masstree 查询",
+                                      "Masstree 查询完成",
+                                      "Masstree 查询失败",
                                       [&]() { return RunMasstreeQueryDemo(); });
         }
         if (scenario == "all") {
@@ -1216,7 +1217,7 @@ private:
     }
 
     bool RunHealthCheck() {
-        PrintSection("Health Check");
+        PrintSection("环境健康检查");
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup("/", &attr, &status)) {
@@ -1248,7 +1249,7 @@ private:
     }
 
     bool RunStatsScenario() {
-        PrintSection("TC-P1 Global Stats");
+        PrintSection("TC-P1 全局统计");
         if (!RefreshClusterView()) {
             return false;
         }
@@ -1308,26 +1309,26 @@ private:
         if (!actions_.empty()) {
             return;
         }
-        actions_.push_back({"0", "Health Check", "Check MDS, Scheduler, and tier roots", "0", {"health"}});
-        actions_.push_back({"1", "TC-P1 Global Stats", "Collect node, capacity, file, and metadata stats", "1 [key=value ...]", {"stats", "p1"}});
-        actions_.push_back({"2", "TC-P2 Real Tier Read/Write", "Write and read back a test file on the real tier", "2 [dir=<real_dir>]", {"real", "p2"}});
-        actions_.push_back({"3", "TC-P3 Virtual Tier Read/Write", "Write and read back a test file on the virtual tier", "3 [dir=<virtual_dir>]", {"virtual", "p3"}});
+        actions_.push_back({"0", "环境健康检查", "检查 MDS、Scheduler 和各层根目录", "0", {"health"}});
+        actions_.push_back({"1", "TC-P1 全局统计", "统计节点、容量、文件与元数据信息", "1 [key=value ...]", {"stats", "p1"}});
+        actions_.push_back({"2", "TC-P2 真实节点读写", "向真实层写入并回读测试文件", "2 [dir=<real_dir>]", {"real", "p2"}});
+        actions_.push_back({"3", "TC-P3 虚拟节点读写", "向虚拟层写入并回读测试文件", "3 [dir=<virtual_dir>]", {"virtual", "p3"}});
         actions_.push_back({"4",
-                            "TC-P4 Masstree Import",
-                            "Import a Masstree namespace from a template",
+                            "TC-P4 Masstree 导入",
+                            "基于模板导入一个 Masstree 命名空间",
                             "4 namespace=<id> generation=<id> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
                             {"import", "p4"}});
         actions_.push_back({"10",
-                            "TC-P4A Masstree Template Generate",
-                            "Generate a Masstree template from a txt path list",
+                            "TC-P4A Masstree 模板生成",
+                            "根据 txt 路径文件生成 Masstree 模板",
                             "10 template_id=<id> path_list_file=<path> [repeat_dir_prefix=<prefix>] [key=value ...]",
                             {"template", "template_generate", "p4a"}});
         actions_.push_back({"5",
-                            "TC-P5 Masstree Query",
-                            "Run random metadata queries and print latency stats",
+                            "TC-P5 Masstree 查询",
+                            "执行随机元数据查询并输出时延统计",
                             "5 [n=<count>] [query_mode=random_path_lookup|random_inode]",
                             {"query", "p5"}});
-        actions_.push_back({"q", "Quit", "Exit the demo console", "q", {"quit", "exit"}});
+        actions_.push_back({"q", "退出", "退出演示控制台", "q", {"退出", "exit"}});
     }
 
     zb::demo::DemoRunResult ExecuteInteractiveCommandV2(const zb::demo::ParsedCommand& command, bool* should_exit) {
@@ -1338,10 +1339,10 @@ private:
             command.args.count("template_id") != 0 || command.args.count("masstree_template_id") != 0;
         const zb::demo::MenuActionSpec* action = zb::demo::FindAction(actions_, command.action);
         if (!action) {
-            return BuildInfoResult("Unknown Command",
+            return BuildInfoResult("未知命令",
                                    false,
-                                   "Unsupported action: " + command.action,
-                                   "Use 0, 1, 2, 3, 4, 5, 10, or q");
+                                   "不支持的操作: " + command.action,
+                                   "请输入 0、1、2、3、4、5、10 或 q");
         }
         if (action->id == "q") {
             if (should_exit) {
@@ -1358,66 +1359,66 @@ private:
         if (action->id == "0") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Health check passed",
-                                         "Health check failed",
+                                         "环境健康检查通过",
+                                         "环境健康检查失败",
                                          [&]() { return RunHealthCheck(); });
         }
         if (action->id == "1") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "TC-P1 stats passed",
-                                         "TC-P1 stats failed",
+                                         "TC-P1 全局统计通过",
+                                         "TC-P1 全局统计失败",
                                          [&]() { return RunStatsScenario(); });
         }
         if (action->id == "2") {
             const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_real_dir;
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Real tier read/write passed",
-                                         "Real tier read/write failed",
+                                         "真实层读写通过",
+                                         "真实层读写失败",
                                          [&]() { return RunTierFileDemo(dir, "real", &last_real_logical_path_); });
         }
         if (action->id == "3") {
             const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_virtual_dir;
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Virtual tier read/write passed",
-                                         "Virtual tier read/write failed",
+                                         "虚拟层读写通过",
+                                         "虚拟层读写失败",
                                          [&]() { return RunTierFileDemo(dir, "virtual", &last_virtual_logical_path_); });
         }
         if (action->id == "4") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree import finished",
-                                         "Masstree import failed",
+                                         "Masstree 导入完成",
+                                         "Masstree 导入失败",
                                          [&]() { return RunMasstreeImportDemo(); });
         }
         if (action->id == "10") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree template generation finished",
-                                         "Masstree template generation failed",
+                                         "Masstree 模板生成完成",
+                                         "Masstree 模板生成失败",
                                          [&]() { return RunMasstreeTemplateGenerateDemo(); });
         }
         if (action->id == "5") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree query finished",
-                                         "Masstree query failed",
+                                         "Masstree 查询完成",
+                                         "Masstree 查询失败",
                                          [&]() { return RunMasstreeQueryDemo(); });
         }
-        return BuildInfoResult(action->title, false, "Unhandled action dispatch", action->usage);
+        return BuildInfoResult(action->title, false, "未处理的操作分发", action->usage);
     }
 
     int RunInteractiveV2() {
         std::cout << "Enter an action id plus optional key=value arguments.\n";
         for (;;) {
-            zb::demo::RenderMenu("ZB Storage Demo Console", actions_);
-            const std::string input = PromptLine("input");
+            zb::demo::RenderMenu("ZB Storage 演示控制台", actions_);
+            const std::string input = PromptLine("输入");
             const zb::demo::ParsedCommand command = zb::demo::ParseCommandLine(input);
             if (!command.ok) {
                 zb::demo::RenderResult(
-                    BuildInfoResult("Input Error", false, command.error, "Use 0, 1, 2, 3, 4, 5, 10, or q"));
+                    BuildInfoResult("输入错误", false, command.error, "请输入 0、1、2、3、4、5、10 或 q"));
                 continue;
             }
             bool should_exit = false;
@@ -1516,7 +1517,7 @@ private:
 
     std::string BuildHelpText() const {
         std::ostringstream out;
-        out << "Menu actions:\n";
+        out << "菜单功能:\\n";
         for (const auto& action : actions_) {
             out << "  " << action.id << "  " << action.title;
             if (!action.description.empty()) {
@@ -2597,7 +2598,7 @@ private:
     }
 
     bool RunMasstreeQueryDemo() {
-        PrintSection("Masstree Query Demo");
+        PrintSection("Masstree 查询演示");
         const std::string query_mode = [&]() {
             const std::string normalized = ToLowerCopy(TrimCopy(FLAGS_masstree_query_mode));
             return normalized.empty() ? std::string("random_path_lookup") : normalized;
@@ -2702,26 +2703,26 @@ private:
             samples.push_back(std::move(sample));
         }
 
-        std::cout << "query_samples=" << sample_count << '\n';
-        std::cout << "query_mode=" << query_mode << '\n';
-        std::cout << "query_success_count=" << success_count << '\n';
-        std::cout << "query_failure_count=" << failure_count << '\n';
-        std::cout << "query_success_rate="
+        std::cout << "查询样本数=" << sample_count << '\n';
+        std::cout << "查询模式=" << query_mode << '\n';
+        std::cout << "查询成功数=" << success_count << '\n';
+        std::cout << "查询失败数=" << failure_count << '\n';
+        std::cout << "查询成功率="
                   << FormatDouble(sample_count == 0 ? 0.0
                                                     : static_cast<double>(success_count) / static_cast<double>(sample_count),
                                   4)
                   << '\n';
-        std::cout << "total_query_latency=" << FormatLatencyHuman(total_latency_us) << '\n';
-        std::cout << "avg_query_latency="
+        std::cout << "总查询时延=" << FormatLatencyHuman(total_latency_us) << '\n';
+        std::cout << "平均查询时延="
                   << FormatLatencyHuman(sample_count == 0 ? 0 : (total_latency_us / sample_count)) << '\n';
-        std::cout << "min_query_latency=" << FormatLatencyHuman(sample_count == 0 ? 0 : min_latency_us) << '\n';
-        std::cout << "max_query_latency=" << FormatLatencyHuman(max_latency_us) << '\n';
+        std::cout << "最小时延=" << FormatLatencyHuman(sample_count == 0 ? 0 : min_latency_us) << '\n';
+        std::cout << "最大时延=" << FormatLatencyHuman(max_latency_us) << '\n';
         for (const auto& sample : samples) {
-            std::cout << "sample_index=" << sample.index << '\n';
-            std::cout << "query_ok=" << (sample.ok ? "true" : "false") << '\n';
-            std::cout << "query_latency=" << FormatLatencyHuman(sample.latency_us) << '\n';
-            std::cout << "status_code=" << static_cast<int>(sample.status.code()) << '\n';
-            std::cout << "status_text=" << (sample.ok ? "OK" : sample.error_message) << '\n';
+            std::cout << "样本序号=" << sample.index << '\n';
+            std::cout << "查询成功=" << (sample.ok ? "true" : "false") << '\n';
+            std::cout << "查询时延=" << FormatLatencyHuman(sample.latency_us) << '\n';
+            std::cout << "状态码=" << static_cast<int>(sample.status.code()) << '\n';
+            std::cout << "状态信息=" << (sample.ok ? "OK" : sample.error_message) << '\n';
             if (!sample.ok) {
                 continue;
             }

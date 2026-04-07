@@ -1,4 +1,4 @@
-ï»¿#include "demo_menu.h"
+#include "demo_menu.h"
 
 #include <algorithm>
 #include <iostream>
@@ -16,8 +16,8 @@ void RenderMenu(const std::string& title, const std::vector<MenuActionSpec>& act
         }
         std::cout << '\n';
     }
-    std::cout << "\nInput: <action> key=value key=value\n";
-    std::cout << "Example: 10 template_id=template-pathlist-100m path_list_file=examples/masstree_path_list_sample.txt\n";
+    std::cout << "\nÊäÈë¸ñÊ½: <ÐòºÅ> key=value key=value\n";
+    std::cout << "Ê¾Àý: 10 template_id=template-pathlist-100m path_list_file=examples/masstree_path_list_sample.txt\n";
 }
 
 const MenuActionSpec* FindAction(const std::vector<MenuActionSpec>& actions, const std::string& token) {
