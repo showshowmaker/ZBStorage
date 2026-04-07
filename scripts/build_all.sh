@@ -17,11 +17,7 @@ pick_generator() {
     echo "${CMAKE_GENERATOR}"
     return
   fi
-  if command -v ninja >/dev/null 2>&1; then
-    echo "Ninja"
-    return
-  fi
-  echo ""
+  echo "Unix Makefiles"
 }
 
 configure_project() {
@@ -65,7 +61,7 @@ Usage: $0 [build|configure|reconfigure|clean]
 Environment variables:
   BUILD_DIR         Build directory, default: ${ROOT_DIR}/build
   BUILD_TYPE        CMake build type, default: Release
-  CMAKE_GENERATOR   Optional CMake generator, auto-picks Ninja when available
+  CMAKE_GENERATOR   Optional CMake generator, default: Unix Makefiles
   JOBS              Parallel job count for cmake --build
 EOF
 }

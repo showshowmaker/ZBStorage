@@ -52,9 +52,11 @@ bash scripts/build_all.sh clean
 ```bash
 BUILD_DIR=build
 BUILD_TYPE=Release
-CMAKE_GENERATOR=Ninja
+CMAKE_GENERATOR="Unix Makefiles"
 JOBS=32
 ```
+
+默认情况下，`scripts/build_all.sh` 现在使用 `Unix Makefiles`。
 
 示例：
 
