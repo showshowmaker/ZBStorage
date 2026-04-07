@@ -815,6 +815,11 @@ MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
                                const ArchiveMetaStore::Options& archive_meta_options,
                                uint32_t archive_import_page_size_bytes,
                                bool strict_tier_bypass_pg,
+                               bool masstree_preload_all_sparse_on_start,
+                               double masstree_preload_memory_utilization_limit,
+                               uint64_t masstree_preload_memory_reserve_bytes,
+                               double masstree_preload_estimate_multiplier,
+                               bool masstree_preload_background,
                                FileArchiveCandidateQueue* candidate_queue,
                                ArchiveLeaseManager* lease_manager)
     : store_(store),
@@ -824,6 +829,11 @@ MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
       masstree_root_(masstree_root),
       archive_import_page_size_bytes_(archive_import_page_size_bytes),
       strict_tier_bypass_pg_(strict_tier_bypass_pg),
+      masstree_preload_all_sparse_on_start_(masstree_preload_all_sparse_on_start),
+      masstree_preload_memory_utilization_limit_(masstree_preload_memory_utilization_limit),
+      masstree_preload_memory_reserve_bytes_(masstree_preload_memory_reserve_bytes),
+      masstree_preload_estimate_multiplier_(masstree_preload_estimate_multiplier),
+      masstree_preload_background_(masstree_preload_background),
       candidate_queue_(candidate_queue),
       lease_manager_(lease_manager),
       archive_namespace_catalog_(store),
@@ -842,6 +852,7 @@ MdsServiceImpl::MdsServiceImpl(RocksMetaStore* store,
     RecoverArchiveCatalog(&error);
     EnsureRoot(&error);
     masstree_import_worker_ = std::thread(&MdsServiceImpl::RunMasstreeImportWorker, this);
+    TryPreloadMasstreeSparseIndexes();
 }
 
 MdsServiceImpl::~MdsServiceImpl() {
@@ -853,6 +864,80 @@ MdsServiceImpl::~MdsServiceImpl() {
     if (masstree_import_worker_.joinable()) {
         masstree_import_worker_.join();
     }
+    if (masstree_preload_worker_.joinable()) {
+        masstree_preload_worker_.join();
+    }
+}
+
+void MdsServiceImpl::TryPreloadMasstreeSparseIndexes() {
+    if (!masstree_preload_all_sparse_on_start_ || masstree_root_.empty()) {
+        return;
+    }
+    if (masstree_preload_background_) {
+        masstree_preload_worker_ = std::thread(&MdsServiceImpl::RunMasstreePreloadWorker, this);
+        return;
+    }
+    RunMasstreePreloadWorker();
+}
+
+void MdsServiceImpl::RunMasstreePreloadWorker() {
+    std::vector<MasstreeNamespaceRoute> routes;
+    std::string error;
+    if (!masstree_namespace_catalog_.ListRoutes(&routes, &error)) {
+        std::cerr << "[masstree-preload] failed to list routes: " << error << std::endl;
+        return;
+    }
+    if (routes.empty()) {
+        std::cerr << "[masstree-preload] no routes found, skip preload" << std::endl;
+        return;
+    }
+
+    uint64_t estimated_total_bytes = 0;
+    for (const auto& route : routes) {
+        uint64_t estimated_bytes = 0;
+        std::string local_error;
+        if (!masstree_meta_store_.EstimateGenerationSparseMemoryBytes(
+                route, masstree_preload_estimate_multiplier_, &estimated_bytes, &local_error)) {
+            std::cerr << "[masstree-preload] failed to estimate route namespace=" << route.namespace_id
+                      << " generation=" << route.generation_id << ": " << local_error << std::endl;
+            return;
+        }
+        estimated_total_bytes += estimated_bytes;
+    }
+
+    SystemMemorySnapshot snapshot;
+    if (!ReadSystemMemorySnapshot(&snapshot)) {
+        std::cerr << "[masstree-preload] failed to read system memory, skip preload" << std::endl;
+        return;
+    }
+
+    const uint64_t utilization_cap_bytes = static_cast<uint64_t>(
+        static_cast<long double>(snapshot.available_bytes) *
+        static_cast<long double>(masstree_preload_memory_utilization_limit_));
+    const bool within_utilization_limit = estimated_total_bytes <= utilization_cap_bytes;
+    const bool keeps_reserve = snapshot.available_bytes >= estimated_total_bytes &&
+                               snapshot.available_bytes - estimated_total_bytes >=
+                                   masstree_preload_memory_reserve_bytes_;
+
+    std::cerr << "[masstree-preload] routes=" << routes.size()
+              << " estimated_bytes=" << estimated_total_bytes
+              << " mem_available_bytes=" << snapshot.available_bytes
+              << " mem_total_bytes=" << snapshot.total_bytes
+              << " reserve_bytes=" << masstree_preload_memory_reserve_bytes_
+              << " utilization_limit=" << masstree_preload_memory_utilization_limit_ << std::endl;
+    if (!within_utilization_limit || !keeps_reserve) {
+        std::cerr << "[masstree-preload] skip preload due to memory budget" << std::endl;
+        return;
+    }
+
+    MasstreeMetaStore::PreloadReport report;
+    if (!masstree_meta_store_.PreloadAllGenerations(routes, &report, &error) && !error.empty()) {
+        std::cerr << "[masstree-preload] preload completed with errors: " << error << std::endl;
+    }
+    report.estimated_total_bytes = estimated_total_bytes;
+    std::cerr << "[masstree-preload] finished loaded=" << report.loaded_count
+              << " failed=" << report.failed_count
+              << " elapsed_ms=" << report.elapsed_ms << std::endl;
 }
 
 bool MdsServiceImpl::RecoverArchiveCatalog(std::string* error) {

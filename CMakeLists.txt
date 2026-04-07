@@ -622,6 +622,7 @@ target_link_libraries(pg_migration_sim_test
 
 add_executable(mds_server
     src/mds/config/MdsConfig.cpp
+    src/mds/common/SystemMemory.cpp
     src/mds/archive_meta/ArchiveBloomFilter.cpp
     src/mds/archive_meta/ArchiveDataFile.cpp
     src/mds/archive_meta/ArchiveGenerationPublisher.cpp

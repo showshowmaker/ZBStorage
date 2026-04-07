@@ -17,6 +17,14 @@ namespace zb::mds {
 
 class MasstreeMetaStore {
 public:
+    struct PreloadReport {
+        uint64_t route_count{0};
+        uint64_t estimated_total_bytes{0};
+        uint64_t loaded_count{0};
+        uint64_t failed_count{0};
+        uint64_t elapsed_ms{0};
+    };
+
     MasstreeMetaStore() = default;
 
     bool ResolvePath(const MasstreeNamespaceRoute& route,
@@ -45,6 +53,14 @@ public:
                  bool* has_more,
                  std::string* next_token,
                  std::string* error) const;
+    bool EstimateGenerationSparseMemoryBytes(const MasstreeNamespaceRoute& route,
+                                             double estimate_multiplier,
+                                             uint64_t* bytes,
+                                             std::string* error) const;
+    bool PreloadGeneration(const MasstreeNamespaceRoute& route, std::string* error) const;
+    bool PreloadAllGenerations(const std::vector<MasstreeNamespaceRoute>& routes,
+                               PreloadReport* report,
+                               std::string* error) const;
 
 private:
     struct LoadedGeneration {

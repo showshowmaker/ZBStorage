@@ -76,6 +76,11 @@ int main(int argc, char* argv[]) {
                                     archive_meta_options,
                                     cfg.archive_import_page_size_bytes,
                                     cfg.strict_tier_bypass_pg,
+                                    cfg.masstree_preload_all_sparse_on_start,
+                                    cfg.masstree_preload_memory_utilization_limit,
+                                    cfg.masstree_preload_memory_reserve_bytes,
+                                    cfg.masstree_preload_estimate_multiplier,
+                                    cfg.masstree_preload_background,
                                     &candidate_queue,
                                     &lease_manager);
     std::unique_ptr<zb::mds::OpticalArchiveManager> archive_manager;

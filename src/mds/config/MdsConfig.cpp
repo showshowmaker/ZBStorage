@@ -58,6 +58,22 @@ bool ParsePositiveUint32(const std::string& text, uint32_t* out) {
     }
 }
 
+bool ParsePositiveDouble(const std::string& text, double* out) {
+    if (!out || text.empty()) {
+        return false;
+    }
+    try {
+        const double value = std::stod(text);
+        if (!(value > 0.0)) {
+            return false;
+        }
+        *out = value;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 bool ParseNodeType(const std::string& text, NodeType* type) {
     if (!type) {
         return false;
@@ -295,6 +311,36 @@ MdsConfig MdsConfig::LoadFromFile(const std::string& path, std::string* error) {
             cfg.archive_meta_cache_bytes = static_cast<uint64_t>(std::stoull(value));
         } else if (key == "ARCHIVE_IMPORT_PAGE_SIZE_BYTES") {
             cfg.archive_import_page_size_bytes = static_cast<uint32_t>(std::stoul(value));
+        } else if (key == "MASSTREE_PRELOAD_ALL_SPARSE_ON_START") {
+            if (!ParseBool(value, &cfg.masstree_preload_all_sparse_on_start)) {
+                if (error) {
+                    *error = "Invalid MASSTREE_PRELOAD_ALL_SPARSE_ON_START value: " + value;
+                }
+                return {};
+            }
+        } else if (key == "MASSTREE_PRELOAD_MEMORY_UTILIZATION_LIMIT") {
+            if (!ParsePositiveDouble(value, &cfg.masstree_preload_memory_utilization_limit)) {
+                if (error) {
+                    *error = "Invalid MASSTREE_PRELOAD_MEMORY_UTILIZATION_LIMIT value: " + value;
+                }
+                return {};
+            }
+        } else if (key == "MASSTREE_PRELOAD_MEMORY_RESERVE_BYTES") {
+            cfg.masstree_preload_memory_reserve_bytes = static_cast<uint64_t>(std::stoull(value));
+        } else if (key == "MASSTREE_PRELOAD_ESTIMATE_MULTIPLIER") {
+            if (!ParsePositiveDouble(value, &cfg.masstree_preload_estimate_multiplier)) {
+                if (error) {
+                    *error = "Invalid MASSTREE_PRELOAD_ESTIMATE_MULTIPLIER value: " + value;
+                }
+                return {};
+            }
+        } else if (key == "MASSTREE_PRELOAD_BACKGROUND") {
+            if (!ParseBool(value, &cfg.masstree_preload_background)) {
+                if (error) {
+                    *error = "Invalid MASSTREE_PRELOAD_BACKGROUND value: " + value;
+                }
+                return {};
+            }
         } else if (key == "NODES") {
             auto nodes = Split(value, ';');
             cfg.nodes.clear();

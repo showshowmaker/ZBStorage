@@ -67,6 +67,11 @@ struct MdsConfig {
     size_t archive_meta_cache_generations{16};
     uint64_t archive_meta_cache_bytes{512ULL * 1024ULL * 1024ULL};
     uint32_t archive_import_page_size_bytes{64 * 1024};
+    bool masstree_preload_all_sparse_on_start{true};
+    double masstree_preload_memory_utilization_limit{0.70};
+    uint64_t masstree_preload_memory_reserve_bytes{128ULL * 1024ULL * 1024ULL * 1024ULL};
+    double masstree_preload_estimate_multiplier{2.5};
+    bool masstree_preload_background{true};
 
     static MdsConfig LoadFromFile(const std::string& path, std::string* error);
 };

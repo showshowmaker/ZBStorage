@@ -16,6 +16,7 @@
 #include "../archive_meta/ArchiveImportService.h"
 #include "../archive_meta/ArchiveMetaStore.h"
 #include "../archive_meta/ArchiveNamespaceCatalog.h"
+#include "../common/SystemMemory.h"
 #include "../archive/FileArchiveCandidateQueue.h"
 #include "../archive/ArchiveLeaseManager.h"
 #include "../masstree_meta/MasstreeImportService.h"
@@ -40,6 +41,11 @@ public:
                    const ArchiveMetaStore::Options& archive_meta_options,
                    uint32_t archive_import_page_size_bytes,
                    bool strict_tier_bypass_pg,
+                   bool masstree_preload_all_sparse_on_start,
+                   double masstree_preload_memory_utilization_limit,
+                   uint64_t masstree_preload_memory_reserve_bytes,
+                   double masstree_preload_estimate_multiplier,
+                   bool masstree_preload_background,
                    FileArchiveCandidateQueue* candidate_queue = nullptr,
                    ArchiveLeaseManager* lease_manager = nullptr);
     ~MdsServiceImpl() override;
@@ -273,6 +279,8 @@ private:
     std::shared_ptr<MasstreeImportJob> FindMasstreeImportJob(const std::string& job_id) const;
     static void FillMasstreeImportJobInfo(const MasstreeImportJob& job, zb::rpc::MasstreeImportJobInfo* info);
     brpc::Channel* GetDataChannel(const std::string& address, std::string* error);
+    void TryPreloadMasstreeSparseIndexes();
+    void RunMasstreePreloadWorker();
 
     uint64_t AllocateInodeId(std::string* error);
     uint64_t AllocateHandleId(std::string* error);
@@ -287,6 +295,11 @@ private:
     std::string masstree_root_;
     uint32_t archive_import_page_size_bytes_{0};
     bool strict_tier_bypass_pg_{false};
+    bool masstree_preload_all_sparse_on_start_{true};
+    double masstree_preload_memory_utilization_limit_{0.70};
+    uint64_t masstree_preload_memory_reserve_bytes_{128ULL * 1024ULL * 1024ULL * 1024ULL};
+    double masstree_preload_estimate_multiplier_{2.5};
+    bool masstree_preload_background_{true};
     FileArchiveCandidateQueue* candidate_queue_{};
     ArchiveLeaseManager* lease_manager_{};
     ArchiveNamespaceCatalog archive_namespace_catalog_;
@@ -302,6 +315,7 @@ private:
     std::deque<std::string> masstree_import_job_history_;
     std::unordered_map<std::string, std::shared_ptr<MasstreeImportJob>> masstree_import_jobs_;
     std::thread masstree_import_worker_;
+    std::thread masstree_preload_worker_;
     uint64_t masstree_import_next_job_id_{1};
     bool stop_masstree_import_worker_{false};
     mutable std::mutex channel_mu_;

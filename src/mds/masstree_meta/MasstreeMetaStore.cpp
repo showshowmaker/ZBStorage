@@ -1,6 +1,7 @@
 #include "MasstreeMetaStore.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -628,6 +629,86 @@ bool MasstreeMetaStore::Readdir(const MasstreeNamespaceRoute& route,
         error->clear();
     }
     return true;
+}
+
+bool MasstreeMetaStore::EstimateGenerationSparseMemoryBytes(const MasstreeNamespaceRoute& route,
+                                                            double estimate_multiplier,
+                                                            uint64_t* bytes,
+                                                            std::string* error) const {
+    if (!bytes || !(estimate_multiplier > 0.0)) {
+        if (error) {
+            *error = "invalid masstree preload estimate args";
+        }
+        return false;
+    }
+
+    MasstreeNamespaceManifest manifest;
+    if (!MasstreeNamespaceManifest::LoadFromFile(ResolveManifestPath(route), &manifest, error)) {
+        return false;
+    }
+
+    std::error_code ec;
+    const uint64_t inode_sparse_bytes = std::filesystem::file_size(manifest.inode_sparse_index_path, ec);
+    if (ec) {
+        if (error) {
+            *error = "failed to stat masstree inode sparse index: " + manifest.inode_sparse_index_path;
+        }
+        return false;
+    }
+    const uint64_t dentry_sparse_bytes = std::filesystem::file_size(manifest.dentry_sparse_index_path, ec);
+    if (ec) {
+        if (error) {
+            *error = "failed to stat masstree dentry sparse index: " + manifest.dentry_sparse_index_path;
+        }
+        return false;
+    }
+
+    const long double total_sparse_bytes =
+        static_cast<long double>(inode_sparse_bytes) + static_cast<long double>(dentry_sparse_bytes);
+    *bytes = static_cast<uint64_t>(total_sparse_bytes * static_cast<long double>(estimate_multiplier));
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool MasstreeMetaStore::PreloadGeneration(const MasstreeNamespaceRoute& route, std::string* error) const {
+    std::shared_ptr<LoadedGeneration> generation;
+    return EnsureGenerationLoaded(route, &generation, error);
+}
+
+bool MasstreeMetaStore::PreloadAllGenerations(const std::vector<MasstreeNamespaceRoute>& routes,
+                                              PreloadReport* report,
+                                              std::string* error) const {
+    const auto started_at = std::chrono::steady_clock::now();
+    if (report) {
+        *report = PreloadReport{};
+        report->route_count = static_cast<uint64_t>(routes.size());
+    }
+    for (const auto& route : routes) {
+        std::string local_error;
+        if (!PreloadGeneration(route, &local_error)) {
+            if (report) {
+                ++report->failed_count;
+            }
+            if (error && error->empty()) {
+                *error = "failed to preload route " + route.namespace_id + ": " + local_error;
+            }
+            continue;
+        }
+        if (report) {
+            ++report->loaded_count;
+        }
+    }
+    if (report) {
+        report->elapsed_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started_at)
+                .count());
+    }
+    if (error && (!report || report->failed_count == 0)) {
+        error->clear();
+    }
+    return !report || report->failed_count == 0;
 }
 
 bool MasstreeMetaStore::EnsureGenerationLoaded(const MasstreeNamespaceRoute& route,
