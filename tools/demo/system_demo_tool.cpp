@@ -1149,11 +1149,11 @@ public:
             return RunInteractiveV2();
         }
         if (scenario == "health") {
-            return RunScenarioCommand("health", "»·¾³½¡¿µ¼ì²é", "»·¾³½¡¿µ¼ì²éÍ¨¹ı", "»·¾³½¡¿µ¼ì²éÊ§°Ü",
+            return RunScenarioCommand("health", "ç¯å¢ƒå¥åº·æ£€æŸ¥", "ç¯å¢ƒå¥åº·æ£€æŸ¥é€šè¿‡", "ç¯å¢ƒå¥åº·æ£€æŸ¥å¤±è´¥",
                                       [&]() { return RunHealthCheck(); });
         }
         if (scenario == "stats") {
-            return RunScenarioCommand("stats", "TC-P1 È«¾ÖÍ³¼Æ", "TC-P1 È«¾ÖÍ³¼ÆÍ¨¹ı", "TC-P1 È«¾ÖÍ³¼ÆÊ§°Ü",
+            return RunScenarioCommand("stats", "TC-P1 å…¨å±€ç»Ÿè®¡", "TC-P1 å…¨å±€ç»Ÿè®¡é€šè¿‡", "TC-P1 å…¨å±€ç»Ÿè®¡å¤±è´¥",
                                       [&]() { return RunStatsScenario(); });
         }
         if (scenario == "posix") {
@@ -1169,23 +1169,23 @@ public:
         }
         if (scenario == "masstree_import") {
             return RunScenarioCommand("masstree_import",
-                                      "TC-P4 Masstree µ¼Èë",
-                                      "Masstree µ¼ÈëÍê³É",
-                                      "Masstree µ¼ÈëÊ§°Ü",
+                                      "TC-P4 Masstree å¯¼å…¥",
+                                      "Masstree å¯¼å…¥å®Œæˆ",
+                                      "Masstree å¯¼å…¥å¤±è´¥",
                                       [&]() { return RunMasstreeImportDemo(); });
         }
         if (scenario == "masstree_template") {
             return RunScenarioCommand("masstree_template",
-                                      "TC-P4A Masstree Ä£°åÉú³É",
-                                      "Masstree Ä£°åÉú³ÉÍê³É",
-                                      "Masstree Ä£°åÉú³ÉÊ§°Ü",
+                                      "TC-P4A Masstree æ¨¡æ¿ç”Ÿæˆ",
+                                      "Masstree æ¨¡æ¿ç”Ÿæˆå®Œæˆ",
+                                      "Masstree æ¨¡æ¿ç”Ÿæˆå¤±è´¥",
                                       [&]() { return RunMasstreeTemplateGenerateDemo(); });
         }
         if (scenario == "masstree_query") {
             return RunScenarioCommand("masstree_query",
-                                      "TC-P5 Masstree ²éÑ¯",
-                                      "Masstree ²éÑ¯Íê³É",
-                                      "Masstree ²éÑ¯Ê§°Ü",
+                                      "TC-P5 Masstree æŸ¥è¯¢",
+                                      "Masstree æŸ¥è¯¢å®Œæˆ",
+                                      "Masstree æŸ¥è¯¢å¤±è´¥",
                                       [&]() { return RunMasstreeQueryDemo(); });
         }
         if (scenario == "all") {
@@ -1217,7 +1217,7 @@ private:
     }
 
     bool RunHealthCheck() {
-        PrintSection("»·¾³½¡¿µ¼ì²é");
+        PrintSection("ç¯å¢ƒå¥åº·æ£€æŸ¥");
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup("/", &attr, &status)) {
@@ -1249,7 +1249,7 @@ private:
     }
 
     bool RunStatsScenario() {
-        PrintSection("TC-P1 È«¾ÖÍ³¼Æ");
+        PrintSection("TC-P1 å…¨å±€ç»Ÿè®¡");
         if (!RefreshClusterView()) {
             return false;
         }
@@ -1309,26 +1309,26 @@ private:
         if (!actions_.empty()) {
             return;
         }
-        actions_.push_back({"0", "»·¾³½¡¿µ¼ì²é", "¼ì²é MDS¡¢Scheduler ºÍ¸÷²ã¸ùÄ¿Â¼", "0", {"health"}});
-        actions_.push_back({"1", "TC-P1 È«¾ÖÍ³¼Æ", "Í³¼Æ½Úµã¡¢ÈİÁ¿¡¢ÎÄ¼şÓëÔªÊı¾İĞÅÏ¢", "1 [key=value ...]", {"stats", "p1"}});
-        actions_.push_back({"2", "TC-P2 ÕæÊµ½Úµã¶ÁĞ´", "ÏòÕæÊµ²ãĞ´Èë²¢»Ø¶Á²âÊÔÎÄ¼ş", "2 [dir=<real_dir>]", {"real", "p2"}});
-        actions_.push_back({"3", "TC-P3 ĞéÄâ½Úµã¶ÁĞ´", "ÏòĞéÄâ²ãĞ´Èë²¢»Ø¶Á²âÊÔÎÄ¼ş", "3 [dir=<virtual_dir>]", {"virtual", "p3"}});
+        actions_.push_back({"0", "ç¯å¢ƒå¥åº·æ£€æŸ¥", "æ£€æŸ¥ MDSã€Scheduler å’Œå„å±‚æ ¹ç›®å½•", "0", {"health"}});
+        actions_.push_back({"1", "TC-P1 å…¨å±€ç»Ÿè®¡", "ç»Ÿè®¡èŠ‚ç‚¹ã€å®¹é‡ã€æ–‡ä»¶ä¸å…ƒæ•°æ®ä¿¡æ¯", "1 [key=value ...]", {"stats", "p1"}});
+        actions_.push_back({"2", "TC-P2 çœŸå®èŠ‚ç‚¹è¯»å†™", "å‘çœŸå®å±‚å†™å…¥å¹¶å›è¯»æµ‹è¯•æ–‡ä»¶", "2 [dir=<real_dir>]", {"real", "p2"}});
+        actions_.push_back({"3", "TC-P3 è™šæ‹ŸèŠ‚ç‚¹è¯»å†™", "å‘è™šæ‹Ÿå±‚å†™å…¥å¹¶å›è¯»æµ‹è¯•æ–‡ä»¶", "3 [dir=<virtual_dir>]", {"virtual", "p3"}});
         actions_.push_back({"4",
-                            "TC-P4 Masstree µ¼Èë",
-                            "»ùÓÚÄ£°åµ¼ÈëÒ»¸ö Masstree ÃüÃû¿Õ¼ä",
+                            "TC-P4 Masstree å¯¼å…¥",
+                            "åŸºäºæ¨¡æ¿å¯¼å…¥ä¸€ä¸ª Masstree å‘½åç©ºé—´",
                             "4 namespace=<id> generation=<id> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
                             {"import", "p4"}});
         actions_.push_back({"10",
-                            "TC-P4A Masstree Ä£°åÉú³É",
-                            "¸ù¾İ txt Â·¾¶ÎÄ¼şÉú³É Masstree Ä£°å",
+                            "TC-P4A Masstree æ¨¡æ¿ç”Ÿæˆ",
+                            "æ ¹æ® txt è·¯å¾„æ–‡ä»¶ç”Ÿæˆ Masstree æ¨¡æ¿",
                             "10 template_id=<id> path_list_file=<path> [repeat_dir_prefix=<prefix>] [key=value ...]",
                             {"template", "template_generate", "p4a"}});
         actions_.push_back({"5",
-                            "TC-P5 Masstree ²éÑ¯",
-                            "Ö´ĞĞËæ»úÔªÊı¾İ²éÑ¯²¢Êä³öÊ±ÑÓÍ³¼Æ",
+                            "TC-P5 Masstree æŸ¥è¯¢",
+                            "æ‰§è¡Œéšæœºå…ƒæ•°æ®æŸ¥è¯¢å¹¶è¾“å‡ºæ—¶å»¶ç»Ÿè®¡",
                             "5 [n=<count>] [query_mode=random_path_lookup|random_inode]",
                             {"query", "p5"}});
-        actions_.push_back({"q", "ÍË³ö", "ÍË³öÑİÊ¾¿ØÖÆÌ¨", "q", {"ÍË³ö", "exit"}});
+        actions_.push_back({"q", "é€€å‡º", "é€€å‡ºæ¼”ç¤ºæ§åˆ¶å°", "q", {"é€€å‡º", "exit"}});
     }
 
     zb::demo::DemoRunResult ExecuteInteractiveCommandV2(const zb::demo::ParsedCommand& command, bool* should_exit) {
@@ -1339,10 +1339,10 @@ private:
             command.args.count("template_id") != 0 || command.args.count("masstree_template_id") != 0;
         const zb::demo::MenuActionSpec* action = zb::demo::FindAction(actions_, command.action);
         if (!action) {
-            return BuildInfoResult("Î´ÖªÃüÁî",
+            return BuildInfoResult("æœªçŸ¥å‘½ä»¤",
                                    false,
-                                   "²»Ö§³ÖµÄ²Ù×÷: " + command.action,
-                                   "ÇëÊäÈë 0¡¢1¡¢2¡¢3¡¢4¡¢5¡¢10 »ò q");
+                                   "ä¸æ”¯æŒçš„æ“ä½œ: " + command.action,
+                                   "è¯·è¾“å…¥ 0ã€1ã€2ã€3ã€4ã€5ã€10 æˆ– q");
         }
         if (action->id == "q") {
             if (should_exit) {
@@ -1359,66 +1359,66 @@ private:
         if (action->id == "0") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "»·¾³½¡¿µ¼ì²éÍ¨¹ı",
-                                         "»·¾³½¡¿µ¼ì²éÊ§°Ü",
+                                         "ç¯å¢ƒå¥åº·æ£€æŸ¥é€šè¿‡",
+                                         "ç¯å¢ƒå¥åº·æ£€æŸ¥å¤±è´¥",
                                          [&]() { return RunHealthCheck(); });
         }
         if (action->id == "1") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "TC-P1 È«¾ÖÍ³¼ÆÍ¨¹ı",
-                                         "TC-P1 È«¾ÖÍ³¼ÆÊ§°Ü",
+                                         "TC-P1 å…¨å±€ç»Ÿè®¡é€šè¿‡",
+                                         "TC-P1 å…¨å±€ç»Ÿè®¡å¤±è´¥",
                                          [&]() { return RunStatsScenario(); });
         }
         if (action->id == "2") {
             const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_real_dir;
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "ÕæÊµ²ã¶ÁĞ´Í¨¹ı",
-                                         "ÕæÊµ²ã¶ÁĞ´Ê§°Ü",
+                                         "çœŸå®å±‚è¯»å†™é€šè¿‡",
+                                         "çœŸå®å±‚è¯»å†™å¤±è´¥",
                                          [&]() { return RunTierFileDemo(dir, "real", &last_real_logical_path_); });
         }
         if (action->id == "3") {
             const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_virtual_dir;
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "ĞéÄâ²ã¶ÁĞ´Í¨¹ı",
-                                         "ĞéÄâ²ã¶ÁĞ´Ê§°Ü",
+                                         "è™šæ‹Ÿå±‚è¯»å†™é€šè¿‡",
+                                         "è™šæ‹Ÿå±‚è¯»å†™å¤±è´¥",
                                          [&]() { return RunTierFileDemo(dir, "virtual", &last_virtual_logical_path_); });
         }
         if (action->id == "4") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree µ¼ÈëÍê³É",
-                                         "Masstree µ¼ÈëÊ§°Ü",
+                                         "Masstree å¯¼å…¥å®Œæˆ",
+                                         "Masstree å¯¼å…¥å¤±è´¥",
                                          [&]() { return RunMasstreeImportDemo(); });
         }
         if (action->id == "10") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree Ä£°åÉú³ÉÍê³É",
-                                         "Masstree Ä£°åÉú³ÉÊ§°Ü",
+                                         "Masstree æ¨¡æ¿ç”Ÿæˆå®Œæˆ",
+                                         "Masstree æ¨¡æ¿ç”Ÿæˆå¤±è´¥",
                                          [&]() { return RunMasstreeTemplateGenerateDemo(); });
         }
         if (action->id == "5") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree ²éÑ¯Íê³É",
-                                         "Masstree ²éÑ¯Ê§°Ü",
+                                         "Masstree æŸ¥è¯¢å®Œæˆ",
+                                         "Masstree æŸ¥è¯¢å¤±è´¥",
                                          [&]() { return RunMasstreeQueryDemo(); });
         }
-        return BuildInfoResult(action->title, false, "Î´´¦ÀíµÄ²Ù×÷·Ö·¢", action->usage);
+        return BuildInfoResult(action->title, false, "æœªå¤„ç†çš„æ“ä½œåˆ†å‘", action->usage);
     }
 
     int RunInteractiveV2() {
         std::cout << "Enter an action id plus optional key=value arguments.\n";
         for (;;) {
-            zb::demo::RenderMenu("ZB Storage ÑİÊ¾¿ØÖÆÌ¨", actions_);
-            const std::string input = PromptLine("ÊäÈë");
+            zb::demo::RenderMenu("ZB Storage æ¼”ç¤ºæ§åˆ¶å°", actions_);
+            const std::string input = PromptLine("è¾“å…¥");
             const zb::demo::ParsedCommand command = zb::demo::ParseCommandLine(input);
             if (!command.ok) {
                 zb::demo::RenderResult(
-                    BuildInfoResult("ÊäÈë´íÎó", false, command.error, "ÇëÊäÈë 0¡¢1¡¢2¡¢3¡¢4¡¢5¡¢10 »ò q"));
+                    BuildInfoResult("è¾“å…¥é”™è¯¯", false, command.error, "è¯·è¾“å…¥ 0ã€1ã€2ã€3ã€4ã€5ã€10 æˆ– q"));
                 continue;
             }
             bool should_exit = false;
@@ -1517,7 +1517,7 @@ private:
 
     std::string BuildHelpText() const {
         std::ostringstream out;
-        out << "²Ëµ¥¹¦ÄÜ:\\n";
+        out << "èœå•åŠŸèƒ½:\\n";
         for (const auto& action : actions_) {
             out << "  " << action.id << "  " << action.title;
             if (!action.description.empty()) {
@@ -2598,7 +2598,7 @@ private:
     }
 
     bool RunMasstreeQueryDemo() {
-        PrintSection("Masstree ²éÑ¯ÑİÊ¾");
+        PrintSection("Masstree æŸ¥è¯¢æ¼”ç¤º");
         const std::string query_mode = [&]() {
             const std::string normalized = ToLowerCopy(TrimCopy(FLAGS_masstree_query_mode));
             return normalized.empty() ? std::string("random_path_lookup") : normalized;
@@ -2703,26 +2703,26 @@ private:
             samples.push_back(std::move(sample));
         }
 
-        std::cout << "²éÑ¯Ñù±¾Êı=" << sample_count << '\n';
-        std::cout << "²éÑ¯Ä£Ê½=" << query_mode << '\n';
-        std::cout << "²éÑ¯³É¹¦Êı=" << success_count << '\n';
-        std::cout << "²éÑ¯Ê§°ÜÊı=" << failure_count << '\n';
-        std::cout << "²éÑ¯³É¹¦ÂÊ="
+        std::cout << "æŸ¥è¯¢æ ·æœ¬æ•°=" << sample_count << '\n';
+        std::cout << "æŸ¥è¯¢æ¨¡å¼=" << query_mode << '\n';
+        std::cout << "æŸ¥è¯¢æˆåŠŸæ•°=" << success_count << '\n';
+        std::cout << "æŸ¥è¯¢å¤±è´¥æ•°=" << failure_count << '\n';
+        std::cout << "æŸ¥è¯¢æˆåŠŸç‡="
                   << FormatDouble(sample_count == 0 ? 0.0
                                                     : static_cast<double>(success_count) / static_cast<double>(sample_count),
                                   4)
                   << '\n';
-        std::cout << "×Ü²éÑ¯Ê±ÑÓ=" << FormatLatencyHuman(total_latency_us) << '\n';
-        std::cout << "Æ½¾ù²éÑ¯Ê±ÑÓ="
+        std::cout << "æ€»æŸ¥è¯¢æ—¶å»¶=" << FormatLatencyHuman(total_latency_us) << '\n';
+        std::cout << "å¹³å‡æŸ¥è¯¢æ—¶å»¶="
                   << FormatLatencyHuman(sample_count == 0 ? 0 : (total_latency_us / sample_count)) << '\n';
-        std::cout << "×îĞ¡Ê±ÑÓ=" << FormatLatencyHuman(sample_count == 0 ? 0 : min_latency_us) << '\n';
-        std::cout << "×î´óÊ±ÑÓ=" << FormatLatencyHuman(max_latency_us) << '\n';
+        std::cout << "æœ€å°æ—¶å»¶=" << FormatLatencyHuman(sample_count == 0 ? 0 : min_latency_us) << '\n';
+        std::cout << "æœ€å¤§æ—¶å»¶=" << FormatLatencyHuman(max_latency_us) << '\n';
         for (const auto& sample : samples) {
-            std::cout << "Ñù±¾ĞòºÅ=" << sample.index << '\n';
-            std::cout << "²éÑ¯³É¹¦=" << (sample.ok ? "true" : "false") << '\n';
-            std::cout << "²éÑ¯Ê±ÑÓ=" << FormatLatencyHuman(sample.latency_us) << '\n';
-            std::cout << "×´Ì¬Âë=" << static_cast<int>(sample.status.code()) << '\n';
-            std::cout << "×´Ì¬ĞÅÏ¢=" << (sample.ok ? "OK" : sample.error_message) << '\n';
+            std::cout << "æ ·æœ¬åºå·=" << sample.index << '\n';
+            std::cout << "æŸ¥è¯¢æˆåŠŸ=" << (sample.ok ? "true" : "false") << '\n';
+            std::cout << "æŸ¥è¯¢æ—¶å»¶=" << FormatLatencyHuman(sample.latency_us) << '\n';
+            std::cout << "çŠ¶æ€ç =" << static_cast<int>(sample.status.code()) << '\n';
+            std::cout << "çŠ¶æ€ä¿¡æ¯=" << (sample.ok ? "OK" : sample.error_message) << '\n';
             if (!sample.ok) {
                 continue;
             }
