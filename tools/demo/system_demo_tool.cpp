@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -489,7 +490,18 @@ void PrintDecimalMetric(const std::string& key, const std::string& value) {
 }
 
 void PrintBoolMetric(const std::string& key, bool value) {
-    std::cout << key << "=" << (value ? "é—? : "é—?) << '\n';
+    std::cout << key << "=" << (value ? "true" : "false") << '\n';
+}
+
+std::string BuildTierLogicalPath(const std::string& dir_name) {
+    return NormalizeLogicalPath("/" + dir_name);
+}
+
+std::string PromptLine(const std::string& label) {
+    std::cout << label << "> " << std::flush;
+    std::string input;
+    std::getline(std::cin, input);
+    return input;
 }
 
 void CollectTierStats(const std::vector<zb::rpc::NodeView>& nodes, TierStats* real_stats, TierStats* virtual_stats) {
@@ -2888,6 +2900,20 @@ private:
         }
         return true;
     }
+    MdsClient mds_;
+    SchedulerClient scheduler_;
+    std::vector<zb::rpc::NodeView> nodes_;
+    uint64_t cluster_generation_{0};
+    std::map<std::string, zb::rpc::NodeType> node_type_by_id_;
+    std::vector<zb::demo::MenuActionSpec> actions_;
+    zb::demo::DemoRunResult last_result_;
+    std::string last_real_logical_path_;
+    std::string last_virtual_logical_path_;
+    std::string last_masstree_manifest_path_;
+    std::string last_masstree_namespace_id_;
+    std::string last_masstree_path_prefix_;
+    std::string last_masstree_generation_id_;
+    bool current_command_has_template_id_{false};
 };
 
 } // namespace
