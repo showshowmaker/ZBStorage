@@ -358,15 +358,15 @@ std::string FormatDurationSeconds(uint64_t seconds) {
 const char* MasstreeJobStateName(zb::rpc::MasstreeImportJobState state) {
     switch (state) {
     case zb::rpc::MASSTREE_IMPORT_JOB_PENDING:
-        return "等待中";
+        return "缁涘绶熸稉?;
     case zb::rpc::MASSTREE_IMPORT_JOB_RUNNING:
-        return "运行中";
+        return "鏉╂劘顢戞稉?;
     case zb::rpc::MASSTREE_IMPORT_JOB_COMPLETED:
-        return "已完成";
+        return "瀹告彃鐣幋?;
     case zb::rpc::MASSTREE_IMPORT_JOB_FAILED:
-        return "失败";
+        return "婢惰精瑙?;
     default:
-        return "未知";
+        return "閺堫亞鐓?;
     }
 }
 
@@ -385,15 +385,15 @@ std::string NodeTypeName(zb::rpc::NodeType type) {
 
 std::string DisplayTierName(const std::string& tier) {
     if (tier == "real") {
-        return "真实";
+        return "閻喎鐤?;
     }
     if (tier == "virtual") {
-        return "虚拟";
+        return "閾忔碍瀚?;
     }
     if (tier == "optical") {
-        return "光盘";
+        return "閸忓娲?;
     }
-    return tier.empty() ? "未知" : tier;
+    return tier.empty() ? "閺堫亞鐓? : tier;
 }
 
 void PrintSection(const std::string& title) {
@@ -489,7 +489,7 @@ void PrintDecimalMetric(const std::string& key, const std::string& value) {
 }
 
 void PrintBoolMetric(const std::string& key, bool value) {
-    std::cout << key << "=" << (value ? "是" : "否") << '\n';
+    std::cout << key << "=" << (value ? "閺? : "閸?) << '\n';
 }
 
 void CollectTierStats(const std::vector<zb::rpc::NodeView>& nodes, TierStats* real_stats, TierStats* virtual_stats) {
@@ -804,24 +804,24 @@ std::string FormatLatencyHuman(uint64_t latency_us) {
 const char* InodeTypeToString(zb::rpc::InodeType type) {
     switch (type) {
     case zb::rpc::INODE_FILE:
-        return "文件";
+        return "閺傚洣娆?;
     case zb::rpc::INODE_DIR:
-        return "目录";
+        return "閻╊喖缍?;
     default:
-        return "未知";
+        return "閺堫亞鐓?;
     }
 }
 
 const char* ArchiveStateToString(zb::rpc::InodeArchiveState state) {
     switch (state) {
     case zb::rpc::INODE_ARCHIVE_PENDING:
-        return "待归档";
+        return "瀵板懎缍婂?;
     case zb::rpc::INODE_ARCHIVE_ARCHIVING:
-        return "归档中";
+        return "瑜版帗銆傛稉?;
     case zb::rpc::INODE_ARCHIVE_ARCHIVED:
-        return "已归档";
+        return "瀹告彃缍婂?;
     default:
-        return "未知";
+        return "閺堫亞鐓?;
     }
 }
 
@@ -1126,60 +1126,60 @@ public:
             std::cerr << "Failed to connect to scheduler " << FLAGS_scheduler << '\n';
             return false;
         }
-        InitializeMenuActions();
+        InitializeMenuActionsV2();
         return RefreshClusterView();
     }
 
     int Run() {
         const std::string scenario = FLAGS_scenario;
         if (scenario == "interactive") {
-            return RunInteractive();
+            return RunInteractiveV2();
         }
         if (scenario == "health") {
-            return RunScenarioCommand("health", "环境健康检查", "环境健康检查通过", "环境健康检查失败",
+            return RunScenarioCommand("health", "Health Check", "Health check passed", "Health check failed",
                                       [&]() { return RunHealthCheck(); });
         }
         if (scenario == "stats") {
-            return RunScenarioCommand("stats", "TC-P1 全局统计", "TC-P1 统计校验通过", "TC-P1 统计校验失败",
+            return RunScenarioCommand("stats", "TC-P1 Global Stats", "TC-P1 stats passed", "TC-P1 stats failed",
                                       [&]() { return RunStatsScenario(); });
         }
         if (scenario == "posix") {
-            return RunScenarioCommand("posix", "POSIX 在线层测试", "POSIX 在线层测试通过", "POSIX 在线层测试失败",
+            return RunScenarioCommand("posix", "POSIX Tier Demo", "POSIX tier demo passed", "POSIX tier demo failed",
                                       [&]() { return RunPosixSuite(); });
         }
         if (scenario == "masstree") {
             return RunScenarioCommand("masstree",
-                                      "Masstree 测试集",
-                                      "Masstree 测试集通过",
-                                      "Masstree 测试集失败",
+                                      "Masstree Suite",
+                                      "Masstree suite passed",
+                                      "Masstree suite failed",
                                       [&]() { return RunMasstreeSuite(); });
         }
         if (scenario == "masstree_import") {
             return RunScenarioCommand("masstree_import",
-                                      "TC-P4 Masstree 导入",
-                                      "Masstree 导入完成",
-                                      "Masstree 导入失败",
+                                      "TC-P4 Masstree Import",
+                                      "Masstree import finished",
+                                      "Masstree import failed",
                                       [&]() { return RunMasstreeImportDemo(); });
         }
         if (scenario == "masstree_template") {
             return RunScenarioCommand("masstree_template",
-                                      "TC-P4A Masstree 妯℃澘鐢熸垚",
-                                      "Masstree 妯℃澘鐢熸垚瀹屾垚",
-                                      "Masstree 妯℃澘鐢熸垚澶辫触",
+                                      "TC-P4A Masstree Template Generate",
+                                      "Masstree template generation finished",
+                                      "Masstree template generation failed",
                                       [&]() { return RunMasstreeTemplateGenerateDemo(); });
         }
         if (scenario == "masstree_query") {
             return RunScenarioCommand("masstree_query",
-                                      "TC-P5 Masstree 查询",
-                                      "Masstree 查询完成",
-                                      "Masstree 查询失败",
+                                      "TC-P5 Masstree Query",
+                                      "Masstree query finished",
+                                      "Masstree query failed",
                                       [&]() { return RunMasstreeQueryDemo(); });
         }
         if (scenario == "all") {
             return RunScenarioCommand("all",
-                                      "完整测试集",
-                                      "完整测试集通过",
-                                      "完整测试集失败",
+                                      "Full Demo Suite",
+                                      "Full demo suite passed",
+                                      "Full demo suite failed",
                                       [&]() {
                                           return RunHealthCheck() && RunStatsScenario() && RunPosixSuite() &&
                                                  RunMasstreeSuite();
@@ -1204,16 +1204,16 @@ private:
     }
 
     bool RunHealthCheck() {
-        PrintSection("环境健康检查");
+        PrintSection("Health Check");
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup("/", &attr, &status)) {
-            std::cerr << "查询 MDS 根目录失败: " << status.message() << '\n';
+            std::cerr << "MDS root lookup failed: " << status.message() << '\n';
             return false;
         }
-        std::cout << "MDS根inode=" << attr.inode_id() << '\n';
-        std::cout << "调度代次=" << cluster_generation_ << '\n';
-        std::cout << "集群节点数=" << nodes_.size() << '\n';
+        std::cout << "mds_root_inode=" << attr.inode_id() << '\n';
+        std::cout << "cluster_generation=" << cluster_generation_ << '\n';
+        std::cout << "online_nodes=" << nodes_.size() << '\n';
 
         const std::string real_root = BuildTierLogicalPath(FLAGS_real_dir);
         const std::string virtual_root = BuildTierLogicalPath(FLAGS_virtual_dir);
@@ -1223,9 +1223,9 @@ private:
         if (!CheckTierDirectory(virtual_root)) {
             return false;
         }
-        std::cout << "挂载点=" << FLAGS_mount_point << '\n';
-        std::cout << "真实层根目录=" << real_root << '\n';
-        std::cout << "虚拟层根目录=" << virtual_root << '\n';
+        std::cout << "mount_point=" << FLAGS_mount_point << '\n';
+        std::cout << "real_root=" << real_root << '\n';
+        std::cout << "virtual_root=" << virtual_root << '\n';
         return true;
     }
 
@@ -1236,7 +1236,7 @@ private:
     }
 
     bool RunStatsScenario() {
-        PrintSection("TC-P1 全局统计");
+        PrintSection("TC-P1 Global Stats");
         if (!RefreshClusterView()) {
             return false;
         }
@@ -1247,38 +1247,38 @@ private:
 
         zb::rpc::GetMasstreeClusterStatsReply masstree_stats;
         if (!mds_.GetMasstreeClusterStats(&masstree_stats)) {
-            std::cerr << "获取 Masstree 集群统计失败: " << masstree_stats.status().message() << '\n';
+            std::cerr << "GetMasstreeClusterStats failed: " << masstree_stats.status().message() << '\n';
             return false;
         }
 
         const uint64_t online_logical_node_count = real_stats.logical_node_count + virtual_stats.logical_node_count;
-        std::cout << "真实层物理节点数=" << real_stats.physical_node_count << '\n';
-        std::cout << "真实层逻辑节点数=" << real_stats.logical_node_count << '\n';
-        std::cout << "真实层磁盘数=" << real_stats.disk_count << '\n';
-        PrintByteMetric("真实层总容量字节", real_stats.total_capacity_bytes);
-        PrintByteMetric("真实层已用容量字节", real_stats.used_capacity_bytes);
-        PrintByteMetric("真实层剩余容量字节", real_stats.free_capacity_bytes);
+        std::cout << "real_physical_nodes=" << real_stats.physical_node_count << '\n';
+        std::cout << "real_logical_nodes=" << real_stats.logical_node_count << '\n';
+        std::cout << "real_disks=" << real_stats.disk_count << '\n';
+        PrintByteMetric("real_total_capacity_bytes", real_stats.total_capacity_bytes);
+        PrintByteMetric("real_used_capacity_bytes", real_stats.used_capacity_bytes);
+        PrintByteMetric("real_free_capacity_bytes", real_stats.free_capacity_bytes);
 
-        std::cout << "虚拟层逻辑节点数=" << virtual_stats.logical_node_count << '\n';
-        std::cout << "虚拟层磁盘数=" << virtual_stats.disk_count << '\n';
-        PrintByteMetric("虚拟层总容量字节", virtual_stats.total_capacity_bytes);
-        PrintByteMetric("虚拟层已用容量字节", virtual_stats.used_capacity_bytes);
-        PrintByteMetric("虚拟层剩余容量字节", virtual_stats.free_capacity_bytes);
+        std::cout << "virtual_logical_nodes=" << virtual_stats.logical_node_count << '\n';
+        std::cout << "virtual_disks=" << virtual_stats.disk_count << '\n';
+        PrintByteMetric("virtual_total_capacity_bytes", virtual_stats.total_capacity_bytes);
+        PrintByteMetric("virtual_used_capacity_bytes", virtual_stats.used_capacity_bytes);
+        PrintByteMetric("virtual_free_capacity_bytes", virtual_stats.free_capacity_bytes);
 
-        std::cout << "在线逻辑节点数=" << online_logical_node_count << '\n';
-        std::cout << "光盘节点数=" << masstree_stats.optical_node_count() << '\n';
-        std::cout << "光盘设备数=" << masstree_stats.optical_device_count() << '\n';
-        PrintDecimalMetric("冷层总容量字节", masstree_stats.total_capacity_bytes());
-        PrintDecimalMetric("冷层已用容量字节", masstree_stats.used_capacity_bytes());
-        PrintDecimalMetric("冷层剩余容量字节", masstree_stats.free_capacity_bytes());
-        std::cout << "总文件数=" << masstree_stats.total_file_count() << '\n';
-        PrintDecimalMetric("总文件字节数", masstree_stats.total_file_bytes());
-        std::cout << "平均文件大小字节=" << masstree_stats.avg_file_size_bytes()
+        std::cout << "online_logical_nodes=" << online_logical_node_count << '\n';
+        std::cout << "optical_nodes=" << masstree_stats.optical_node_count() << '\n';
+        std::cout << "optical_devices=" << masstree_stats.optical_device_count() << '\n';
+        PrintDecimalMetric("cold_total_capacity_bytes", masstree_stats.total_capacity_bytes());
+        PrintDecimalMetric("cold_used_capacity_bytes", masstree_stats.used_capacity_bytes());
+        PrintDecimalMetric("cold_free_capacity_bytes", masstree_stats.free_capacity_bytes());
+        std::cout << "total_file_count=" << masstree_stats.total_file_count() << '\n';
+        PrintDecimalMetric("total_file_bytes", masstree_stats.total_file_bytes());
+        std::cout << "avg_file_size_bytes=" << masstree_stats.avg_file_size_bytes()
                   << " (" << FormatBytes(masstree_stats.avg_file_size_bytes()) << ")\n";
-        PrintDecimalMetric("总元数据字节数", masstree_stats.total_metadata_bytes());
-        std::cout << "最小文件大小字节=" << masstree_stats.min_file_size_bytes()
+        PrintDecimalMetric("total_metadata_bytes", masstree_stats.total_metadata_bytes());
+        std::cout << "min_file_size_bytes=" << masstree_stats.min_file_size_bytes()
                   << " (" << FormatBytes(masstree_stats.min_file_size_bytes()) << ")\n";
-        std::cout << "最大文件大小字节=" << masstree_stats.max_file_size_bytes()
+        std::cout << "max_file_size_bytes=" << masstree_stats.max_file_size_bytes()
                   << " (" << FormatBytes(masstree_stats.max_file_size_bytes()) << ")\n";
         return true;
     }
@@ -1292,53 +1292,182 @@ private:
         if (!actions_.empty()) {
             return;
         }
-        actions_.push_back({"1", "环境健康检查", "检查 MDS、Scheduler 与 tier 根目录", "1", {"health"}});
-        actions_.push_back({"2", "TC-P1 全局统计", "执行节点、容量、文件和元数据统计", "2 [key=value ...]", {"stats", "p1"}});
-        actions_.push_back({"3", "TC-P2 真实节点读写", "向真实节点路径写入并回读测试文件", "3 [dir=<real_dir>]", {"real", "p2"}});
-        actions_.push_back({"4", "TC-P3 虚拟节点读写", "向虚拟节点路径写入并回读测试文件", "4 [dir=<virtual_dir>]", {"virtual", "p3"}});
+        actions_.push_back({"1", "閻滎垰顣ㄩ崑銉ユ倣濡偓閺?, "濡偓閺?MDS閵嗕讣cheduler 娑?tier 閺嶅湱娲拌ぐ?, "1", {"health"}});
+        actions_.push_back({"2", "TC-P1 閸忋劌鐪紒鐔活吀", "閹笛嗩攽閼哄倻鍋ｉ妴浣割啇闁插繈鈧焦鏋冩禒璺烘嫲閸忓啯鏆熼幑顔剧埠鐠?, "2 [key=value ...]", {"stats", "p1"}});
+        actions_.push_back({"3", "TC-P2 閻喎鐤勯懞鍌滃仯鐠囪鍟?, "閸氭垹婀＄€圭偠濡悙纭呯熅瀵板嫬鍟撻崗銉ヨ嫙閸ョ偠顕板ù瀣槸閺傚洣娆?, "3 [dir=<real_dir>]", {"real", "p2"}});
+        actions_.push_back({"4", "TC-P3 閾忔碍瀚欓懞鍌滃仯鐠囪鍟?, "閸氭垼娅勯幏鐔诲Ν閻愮鐭惧鍕晸閸忋儱鑻熼崶鐐额嚢濞村鐦弬鍥︽", "4 [dir=<virtual_dir>]", {"virtual", "p3"}});
         actions_.push_back({"5",
-                            "TC-P4 Masstree 导入",
-                            "执行 Masstree namespace 批量导入",
+                            "TC-P4 Masstree 鐎电厧鍙?,
+                            "閹笛嗩攽 Masstree namespace 閹靛綊鍣虹€电厧鍙?,
                             "5 namespace=<id> generation=<id> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
                             {"import", "p4"}});
         actions_.push_back({"10",
-                            "TC-P4A Masstree 模板生成",
-                            "根据 txt 路径文件生成 Masstree 模板",
+                            "TC-P4A Masstree 濡剝婢橀悽鐔稿灇",
+                            "閺嶈宓?txt 鐠侯垰绶為弬鍥︽閻㈢喐鍨?Masstree 濡剝婢?,
                             "10 template_id=<id> path_list_file=<path> [repeat_dir_prefix=<prefix>] [key=value ...]",
                             {"template", "template_generate", "p4a"}});
         actions_.push_back({"6",
-                            "TC-P5 Masstree 查询",
-                            "执行随机元数据查询并输出统计",
+                            "TC-P5 Masstree 閺屻儴顕?,
+                            "閹笛嗩攽闂呭繑婧€閸忓啯鏆熼幑顔界叀鐠囥垹鑻熸潏鎾冲毉缂佺喕顓?,
                             "6 [n=<count>] [query_mode=random_path_lookup|random_inode]",
                             {"query", "p5"}});
-        actions_.push_back({"7", "执行完整测试集", "按顺序执行健康检查、P1、P2、P3、P4、P5", "7", {"all"}});
-        actions_.push_back({"8", "查看上次结果", "重新展示最近一次测试结果", "8", {"last"}});
-        actions_.push_back({"9", "帮助", "显示菜单和参数示例", "9", {"help", "h"}});
-        actions_.push_back({"0", "退出", "退出测试控制台", "0", {"quit", "exit", "q"}});
+        actions_.push_back({"7", "閹笛嗩攽鐎瑰本鏆ｅù瀣槸闂?, "閹稿銆庢惔蹇斿⒔鐞涘苯浠存惔閿嬵梾閺屻儯鈧赋1閵嗕赋2閵嗕赋3閵嗕赋4閵嗕赋5", "7", {"all"}});
+        actions_.push_back({"8", "閺屻儳婀呮稉濠冾偧缂佹挻鐏?, "闁插秵鏌婄仦鏇犮仛閺堚偓鏉╂垳绔村▎鈩冪ゴ鐠囨洜绮ㄩ弸?, "8", {"last"}});
+        actions_.push_back({"9", "鐢喖濮?, "閺勫墽銇氶懣婊冨礋閸滃苯寮弫鎵仛娓?, "9", {"help", "h"}});
+        actions_.push_back({"0", "闁偓閸?, "闁偓閸戠儤绁寸拠鏇熷付閸掕泛褰?, "0", {"quit", "exit", "q"}});
         return;
-        actions_.push_back({"1", "环境健康检查", "检查 MDS、Scheduler 与 tier 根目录", "1", {"health"}});
-        actions_.push_back({"2", "TC-P1 全局统计", "执行节点、容量、文件和元数据统计", "2 [key=value ...]", {"stats", "p1"}});
-        actions_.push_back({"3", "TC-P2 真实节点读写", "向真实节点路径写入并回读测试文件", "3 [dir=<real_dir>]", {"real", "p2"}});
-        actions_.push_back({"4", "TC-P3 虚拟节点读写", "向虚拟节点路径写入并回读测试文件", "4 [dir=<virtual_dir>]", {"virtual", "p3"}});
+        actions_.push_back({"1", "閻滎垰顣ㄩ崑銉ユ倣濡偓閺?, "濡偓閺?MDS閵嗕讣cheduler 娑?tier 閺嶅湱娲拌ぐ?, "1", {"health"}});
+        actions_.push_back({"2", "TC-P1 閸忋劌鐪紒鐔活吀", "閹笛嗩攽閼哄倻鍋ｉ妴浣割啇闁插繈鈧焦鏋冩禒璺烘嫲閸忓啯鏆熼幑顔剧埠鐠?, "2 [key=value ...]", {"stats", "p1"}});
+        actions_.push_back({"3", "TC-P2 閻喎鐤勯懞鍌滃仯鐠囪鍟?, "閸氭垹婀＄€圭偠濡悙纭呯熅瀵板嫬鍟撻崗銉ヨ嫙閸ョ偠顕板ù瀣槸閺傚洣娆?, "3 [dir=<real_dir>]", {"real", "p2"}});
+        actions_.push_back({"4", "TC-P3 閾忔碍瀚欓懞鍌滃仯鐠囪鍟?, "閸氭垼娅勯幏鐔诲Ν閻愮鐭惧鍕晸閸忋儱鑻熼崶鐐额嚢濞村鐦弬鍥︽", "4 [dir=<virtual_dir>]", {"virtual", "p3"}});
         actions_.push_back({"5",
-                            "TC-P4 Masstree 导入",
-                            "执行 Masstree namespace 批量导入",
+                            "TC-P4 Masstree 鐎电厧鍙?,
+                            "閹笛嗩攽 Masstree namespace 閹靛綊鍣虹€电厧鍙?,
 	                            "5 namespace=<id> generation=<id> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
                             {"import", "p4"}});
         actions_.push_back({"10",
-                            "TC-P4A Masstree 妯℃澘鐢熸垚",
-                            "鏍规嵁 txt 璺緞鏂囦欢鐢熸垚 Masstree 妯℃澘",
+                            "TC-P4A Masstree 婵☆垪鍓濆姗€鎮介悢绋跨亣",
+                            "闁哄秷顫夊畵?txt 閻犱警鍨扮欢鐐哄棘閸ワ附顐介柣銏㈠枑閸?Masstree 婵☆垪鍓濆?,
                             "10 template_id=<id> path_list_file=<path> [repeat_dir_prefix=<prefix>] [key=value ...]",
                             {"template", "template_generate", "p4a"}});
         actions_.push_back({"6",
-                            "TC-P5 Masstree 查询",
-                            "执行随机元数据查询并输出统计",
+                            "TC-P5 Masstree 閺屻儴顕?,
+                            "閹笛嗩攽闂呭繑婧€閸忓啯鏆熼幑顔界叀鐠囥垹鑻熸潏鎾冲毉缂佺喕顓?,
                             "6 [n=<count>] [query_mode=random_path_lookup|random_inode]",
                             {"query", "p5"}});
-        actions_.push_back({"7", "执行完整测试集", "按顺序执行健康检查、P1、P2、P3、P4、P5", "7", {"all"}});
-        actions_.push_back({"8", "查看上次结果", "重新展示最近一次测试结果", "8", {"last"}});
-        actions_.push_back({"9", "帮助", "显示菜单和参数示例", "9", {"help", "h"}});
-        actions_.push_back({"0", "退出", "退出测试控制台", "0", {"quit", "exit", "q"}});
+        actions_.push_back({"7", "閹笛嗩攽鐎瑰本鏆ｅù瀣槸闂?, "閹稿銆庢惔蹇斿⒔鐞涘苯浠存惔閿嬵梾閺屻儯鈧赋1閵嗕赋2閵嗕赋3閵嗕赋4閵嗕赋5", "7", {"all"}});
+        actions_.push_back({"8", "閺屻儳婀呮稉濠冾偧缂佹挻鐏?, "闁插秵鏌婄仦鏇犮仛閺堚偓鏉╂垳绔村▎鈩冪ゴ鐠囨洜绮ㄩ弸?, "8", {"last"}});
+        actions_.push_back({"9", "鐢喖濮?, "閺勫墽銇氶懣婊冨礋閸滃苯寮弫鎵仛娓?, "9", {"help", "h"}});
+        actions_.push_back({"0", "闁偓閸?, "闁偓閸戠儤绁寸拠鏇熷付閸掕泛褰?, "0", {"quit", "exit", "q"}});
+    }
+
+    void InitializeMenuActionsV2() {
+        if (!actions_.empty()) {
+            return;
+        }
+        actions_.push_back({"0", "Health Check", "Check MDS, Scheduler, and tier roots", "0", {"health"}});
+        actions_.push_back({"1", "TC-P1 Global Stats", "Collect node, capacity, file, and metadata stats", "1 [key=value ...]", {"stats", "p1"}});
+        actions_.push_back({"2", "TC-P2 Real Tier Read/Write", "Write and read back a test file on the real tier", "2 [dir=<real_dir>]", {"real", "p2"}});
+        actions_.push_back({"3", "TC-P3 Virtual Tier Read/Write", "Write and read back a test file on the virtual tier", "3 [dir=<virtual_dir>]", {"virtual", "p3"}});
+        actions_.push_back({"4",
+                            "TC-P4 Masstree Import",
+                            "Import a Masstree namespace from a template",
+                            "4 namespace=<id> generation=<id> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
+                            {"import", "p4"}});
+        actions_.push_back({"10",
+                            "TC-P4A Masstree Template Generate",
+                            "Generate a Masstree template from a txt path list",
+                            "10 template_id=<id> path_list_file=<path> [repeat_dir_prefix=<prefix>] [key=value ...]",
+                            {"template", "template_generate", "p4a"}});
+        actions_.push_back({"5",
+                            "TC-P5 Masstree Query",
+                            "Run random metadata queries and print latency stats",
+                            "5 [n=<count>] [query_mode=random_path_lookup|random_inode]",
+                            {"query", "p5"}});
+        actions_.push_back({"q", "Quit", "Exit the demo console", "q", {"quit", "exit"}});
+    }
+
+    zb::demo::DemoRunResult ExecuteInteractiveCommandV2(const zb::demo::ParsedCommand& command, bool* should_exit) {
+        if (should_exit) {
+            *should_exit = false;
+        }
+        current_command_has_template_id_ =
+            command.args.count("template_id") != 0 || command.args.count("masstree_template_id") != 0;
+        const zb::demo::MenuActionSpec* action = zb::demo::FindAction(actions_, command.action);
+        if (!action) {
+            return BuildInfoResult("Unknown Command",
+                                   false,
+                                   "Unsupported action: " + command.action,
+                                   "Use 0, 1, 2, 3, 4, 5, 10, or q");
+        }
+        if (action->id == "q") {
+            if (should_exit) {
+                *should_exit = true;
+            }
+            return {};
+        }
+
+        std::string apply_error;
+        if (!ApplyCommandArgs(command, &apply_error)) {
+            return BuildInfoResult(action->title, false, apply_error, action->usage);
+        }
+
+        if (action->id == "0") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "Health check passed",
+                                         "Health check failed",
+                                         [&]() { return RunHealthCheck(); });
+        }
+        if (action->id == "1") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "TC-P1 stats passed",
+                                         "TC-P1 stats failed",
+                                         [&]() { return RunStatsScenario(); });
+        }
+        if (action->id == "2") {
+            const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_real_dir;
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "Real tier read/write passed",
+                                         "Real tier read/write failed",
+                                         [&]() { return RunTierFileDemo(dir, "real", &last_real_logical_path_); });
+        }
+        if (action->id == "3") {
+            const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_virtual_dir;
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "Virtual tier read/write passed",
+                                         "Virtual tier read/write failed",
+                                         [&]() { return RunTierFileDemo(dir, "virtual", &last_virtual_logical_path_); });
+        }
+        if (action->id == "4") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "Masstree import finished",
+                                         "Masstree import failed",
+                                         [&]() { return RunMasstreeImportDemo(); });
+        }
+        if (action->id == "10") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "Masstree template generation finished",
+                                         "Masstree template generation failed",
+                                         [&]() { return RunMasstreeTemplateGenerateDemo(); });
+        }
+        if (action->id == "5") {
+            return ExecuteCapturedAction(*action,
+                                         command.raw,
+                                         "Masstree query finished",
+                                         "Masstree query failed",
+                                         [&]() { return RunMasstreeQueryDemo(); });
+        }
+        return BuildInfoResult(action->title, false, "Unhandled action dispatch", action->usage);
+    }
+
+    int RunInteractiveV2() {
+        std::cout << "Enter an action id plus optional key=value arguments.\n";
+        for (;;) {
+            zb::demo::RenderMenu("ZB Storage Demo Console", actions_);
+            const std::string input = PromptLine("input");
+            const zb::demo::ParsedCommand command = zb::demo::ParseCommandLine(input);
+            if (!command.ok) {
+                zb::demo::RenderResult(
+                    BuildInfoResult("Input Error", false, command.error, "Use 0, 1, 2, 3, 4, 5, 10, or q"));
+                continue;
+            }
+            bool should_exit = false;
+            zb::demo::DemoRunResult result = ExecuteInteractiveCommandV2(command, &should_exit);
+            if (should_exit) {
+                return 0;
+            }
+            if (!result.title.empty()) {
+                zb::demo::RenderResult(result);
+                MaybeAppendLog(result);
+                last_result_ = result;
+            }
+        }
     }
 
     zb::demo::DemoRunResult BuildInfoResult(const std::string& title,
@@ -1424,15 +1553,15 @@ private:
 
     std::string BuildHelpText() const {
         std::ostringstream out;
-        out << "功能列表:\n";
+        out << "閸旂喕鍏橀崚妤勩€?\n";
         for (const auto& action : actions_) {
             out << "  " << action.id << "  " << action.title;
             if (!action.description.empty()) {
                 out << " - " << action.description;
             }
-            out << "\n     用法: " << action.usage << '\n';
+            out << "\n     閻劍纭? " << action.usage << '\n';
         }
-        out << "\n示例:\n";
+        out << "\n缁€杞扮伐:\n";
         out << "  2 tc_p1_expected_real_node_count=1 tc_p1_expected_virtual_node_count=99\n";
 	        out << "  10 template_id=template-pathlist-100m path_list_file=examples/masstree_path_list_sample.txt repeat_dir_prefix=copy\n";
 	        out << "  5 namespace=demo-ns generation=gen-report-001 template_mode=page_fast\n";
@@ -1638,7 +1767,7 @@ private:
             command.args.count("template_id") != 0 || command.args.count("masstree_template_id") != 0;
         const zb::demo::MenuActionSpec* action = zb::demo::FindAction(actions_, command.action);
         if (!action) {
-            return BuildInfoResult("未知命令", false, "不支持的序号或命令: " + command.action, "9");
+            return BuildInfoResult("閺堫亞鐓￠崨鎴掓姢", false, "娑撳秵鏁幐浣烘畱鎼村繐褰块幋鏍ф嚒娴? " + command.action, "9");
         }
         if (action->id == "0") {
             if (should_exit) {
@@ -1647,15 +1776,15 @@ private:
             return {};
         }
         if (action->id == "9") {
-            return BuildInfoResult("帮助", true, "可用功能与输入格式如下", action->usage, BuildHelpText());
+            return BuildInfoResult("鐢喖濮?, true, "閸欘垳鏁ら崝鐔诲厴娑撳氦绶崗銉︾壐瀵繐顩ф稉?, action->usage, BuildHelpText());
         }
         if (action->id == "8") {
             if (!last_result_.has_value()) {
-                return BuildInfoResult("上次结果", false, "当前没有可展示的历史结果", action->usage);
+                return BuildInfoResult("娑撳﹥顐肩紒鎾寸亯", false, "瑜版挸澧犲▽鈩冩箒閸欘垰鐫嶇粈铏规畱閸樺棗褰剁紒鎾寸亯", action->usage);
             }
             zb::demo::DemoRunResult replay = *last_result_;
-            replay.title = "上次结果 - " + replay.title;
-            replay.summary = "重新展示最近一次执行结果";
+            replay.title = "娑撳﹥顐肩紒鎾寸亯 - " + replay.title;
+            replay.summary = "闁插秵鏌婄仦鏇犮仛閺堚偓鏉╂垳绔村▎鈩冨⒔鐞涘瞼绮ㄩ弸?;
             return replay;
         }
 
@@ -1667,75 +1796,75 @@ private:
         if (action->id == "1") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "环境健康检查通过",
-                                         "环境健康检查失败",
+                                         "閻滎垰顣ㄩ崑銉ユ倣濡偓閺屻儵鈧俺绻?,
+                                         "閻滎垰顣ㄩ崑銉ユ倣濡偓閺屻儱銇戠拹?,
                                          [&]() { return RunHealthCheck(); });
         }
         if (action->id == "2") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "TC-P1 统计校验通过",
-                                         "TC-P1 统计校验失败",
+                                         "TC-P1 缂佺喕顓搁弽锟犵崣闁俺绻?,
+                                         "TC-P1 缂佺喕顓搁弽锟犵崣婢惰精瑙?,
                                          [&]() { return RunStatsScenario(); });
         }
         if (action->id == "3") {
             const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_real_dir;
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "真实节点读写测试通过",
-                                         "真实节点读写测试失败",
+                                         "閻喎鐤勯懞鍌滃仯鐠囪鍟撳ù瀣槸闁俺绻?,
+                                         "閻喎鐤勯懞鍌滃仯鐠囪鍟撳ù瀣槸婢惰精瑙?,
                                          [&]() { return RunTierFileDemo(dir, "real", &last_real_logical_path_); });
         }
         if (action->id == "4") {
             const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_virtual_dir;
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "虚拟节点读写测试通过",
-                                         "虚拟节点读写测试失败",
+                                         "閾忔碍瀚欓懞鍌滃仯鐠囪鍟撳ù瀣槸闁俺绻?,
+                                         "閾忔碍瀚欓懞鍌滃仯鐠囪鍟撳ù瀣槸婢惰精瑙?,
                                          [&]() { return RunTierFileDemo(dir, "virtual", &last_virtual_logical_path_); });
         }
         if (action->id == "5") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree 导入完成",
-                                         "Masstree 导入失败",
+                                         "Masstree 鐎电厧鍙嗙€瑰本鍨?,
+                                         "Masstree 鐎电厧鍙嗘径杈Е",
                                          [&]() { return RunMasstreeImportDemo(); });
         }
         if (action->id == "10") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree 妯℃澘鐢熸垚瀹屾垚",
-                                         "Masstree 妯℃澘鐢熸垚澶辫触",
+                                         "Masstree 婵☆垪鍓濆姗€鎮介悢绋跨亣閻庣懓鏈崹?,
+                                         "Masstree 婵☆垪鍓濆姗€鎮介悢绋跨亣濠㈡儼绮剧憴?,
                                          [&]() { return RunMasstreeTemplateGenerateDemo(); });
         }
         if (action->id == "6") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree 查询完成",
-                                         "Masstree 查询失败",
+                                         "Masstree 閺屻儴顕楃€瑰本鍨?,
+                                         "Masstree 閺屻儴顕楁径杈Е",
                                          [&]() { return RunMasstreeQueryDemo(); });
         }
         if (action->id == "7") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "完整测试集执行通过",
-                                         "完整测试集中存在失败项",
+                                         "鐎瑰本鏆ｅù瀣槸闂嗗棙澧界悰宀勨偓姘崇箖",
+                                         "鐎瑰本鏆ｅù瀣槸闂嗗棔鑵戠€涙ê婀径杈Е妞?,
                                          [&]() {
                                              return RunHealthCheck() && RunStatsScenario() && RunPosixSuite() &&
                                                     RunMasstreeSuite();
                                          });
         }
-        return BuildInfoResult(action->title, false, "未实现的动作分发", action->usage);
+        return BuildInfoResult(action->title, false, "閺堫亜鐤勯悳鎵畱閸斻劋缍旈崚鍡楀絺", action->usage);
     }
 
     int RunInteractive() {
-        std::cout << "进入交互模式后，可输入序号和参数执行测试项。\n";
+        std::cout << "鏉╂稑鍙嗘禍銈勭鞍濡€崇础閸氬函绱濋崣顖濈翻閸忋儱绨崣宄版嫲閸欏倹鏆熼幍褑顢戝ù瀣槸妞ゅ箍鈧繐n";
         for (;;) {
             zb::demo::RenderMenu("ZB Storage Demo Console", actions_);
             const std::string input = PromptLine("input");
             const zb::demo::ParsedCommand command = zb::demo::ParseCommandLine(input);
             if (!command.ok) {
-                zb::demo::RenderResult(BuildInfoResult("输入错误", false, command.error, "9"));
+                zb::demo::RenderResult(BuildInfoResult("鏉堟挸鍙嗛柨娆掝嚖", false, command.error, "9"));
                 continue;
             }
             bool should_exit = false;
@@ -1803,11 +1932,11 @@ private:
 
 
     void PrintTierIoDiagnostics(const TierIoOptions& options, const TierIoDiagnostics& diagnostics) {
-        std::cout << "挂载点=" << FLAGS_mount_point << std::endl;
+        std::cout << "閹稿倽娴囬悙?" << FLAGS_mount_point << std::endl;
         const TierStats& tier_stats = SelectTierStats(options.expected_tier, diagnostics);
-        PrintByteMetric(DisplayTierName(options.expected_tier) + "层总容量字节", tier_stats.total_capacity_bytes);
-        PrintByteMetric(DisplayTierName(options.expected_tier) + "层已用容量字节", tier_stats.used_capacity_bytes);
-        PrintByteMetric(DisplayTierName(options.expected_tier) + "层剩余容量字节", tier_stats.free_capacity_bytes);
+        PrintByteMetric(DisplayTierName(options.expected_tier) + "鐏炲倹鈧顔愰柌蹇撶摟閼?, tier_stats.total_capacity_bytes);
+        PrintByteMetric(DisplayTierName(options.expected_tier) + "鐏炲倸鍑￠悽銊ヮ啇闁插繐鐡ч懞?, tier_stats.used_capacity_bytes);
+        PrintByteMetric(DisplayTierName(options.expected_tier) + "鐏炲倸澧挎担娆忣啇闁插繐鐡ч懞?, tier_stats.free_capacity_bytes);
     }
 
     std::string ExplainNoSpaceForTierWrite(const TierIoOptions& options,
@@ -1816,15 +1945,15 @@ private:
         std::ostringstream oss;
         if (tier_stats.free_capacity_bytes < options.file_size_bytes) {
             oss << DisplayTierName(options.expected_tier)
-                << "层的可写剩余容量不足，当前剩余="
+                << "鐏炲倻娈戦崣顖氬晸閸撯晙缍戠€瑰綊鍣烘稉宥堝喕閿涘苯缍嬮崜宥呭⒖娴?"
                 << tier_stats.free_capacity_bytes << " (" << FormatBytes(tier_stats.free_capacity_bytes)
-                << ")，待写入=" << options.file_size_bytes << " (" << FormatBytes(options.file_size_bytes)
-                << ")。这类场景通常会被 MDS/FUSE 映射成 ENOSPC。";
+                << ")閿涘苯绶熼崘娆忓弳=" << options.file_size_bytes << " (" << FormatBytes(options.file_size_bytes)
+                << ")閵嗗倽绻栫猾璇叉簚閺咁垶鈧艾鐖舵导姘愁潶 MDS/FUSE 閺勭姴鐨犻幋?ENOSPC閵?;
             return oss.str();
         }
         oss << DisplayTierName(options.expected_tier)
-            << "层的汇总容量看起来仍有剩余，本次 ENOSPC 更可能来自 MDS 的放置策略拒绝或底层节点写入失败。"
-               "FUSE 会把 NO_SPACE_REAL_POLICY/NO_SPACE_VIRTUAL_POLICY 映射成 errno=28。";
+            << "鐏炲倻娈戝Ч鍥ㄢ偓璇差啇闁插繒婀呯挧閿嬫降娴犲秵婀侀崜鈺€缍戦敍灞炬拱濞?ENOSPC 閺囨潙褰查懗鑺ユ降閼?MDS 閻ㄥ嫭鏂佺純顔剧摜閻ｃ儲瀚嗙紒婵囧灗鎼存洖鐪伴懞鍌滃仯閸愭瑥鍙嗘径杈Е閵?
+               "FUSE 娴兼碍濡?NO_SPACE_REAL_POLICY/NO_SPACE_VIRTUAL_POLICY 閺勭姴鐨犻幋?errno=28閵?;
         return oss.str();
     }
 
@@ -1834,16 +1963,16 @@ private:
             return false;
         }
 
-        PrintSection("POSIX " + DisplayTierName(options.expected_tier) + "层演示");
-        std::cout << "目标目录=" << BuildTierLogicalPath(options.dir_name) + "/demo" << std::endl;
-        std::cout << "重复次数=" << options.repeat << std::endl;
-        std::cout << "期望文件大小字节=" << options.file_size_bytes
+        PrintSection("POSIX " + DisplayTierName(options.expected_tier) + "鐏炲倹绱ㄧ粈?);
+        std::cout << "閻╊喗鐖ｉ惄顔肩秿=" << BuildTierLogicalPath(options.dir_name) + "/demo" << std::endl;
+        std::cout << "闁插秴顦插▎鈩冩殶=" << options.repeat << std::endl;
+        std::cout << "閺堢喐婀滈弬鍥︽婢堆冪毈鐎涙濡?" << options.file_size_bytes
                   << " (" << FormatBytes(options.file_size_bytes) << ")" << std::endl;
-        std::cout << "块大小字节=" << options.chunk_size_bytes
+        std::cout << "閸ф銇囩亸蹇撶摟閼?" << options.chunk_size_bytes
                   << " (" << FormatBytes(options.chunk_size_bytes) << ")" << std::endl;
-        PrintBoolMetric("校验哈希", options.verify_hash);
-        PrintBoolMetric("保留文件", options.keep_file);
-        PrintBoolMetric("关闭前刷盘", options.sync_on_close);
+        PrintBoolMetric("閺嶏繝鐛欓崫鍫濈瑖", options.verify_hash);
+        PrintBoolMetric("娣囨繄鏆€閺傚洣娆?, options.keep_file);
+        PrintBoolMetric("閸忔娊妫撮崜宥呭煕閻?, options.sync_on_close);
         PrintTierIoDiagnostics(options, diagnostics);
 
         uint64_t total_written = 0;
@@ -1867,60 +1996,60 @@ private:
         const double write_throughput_mib_s = ThroughputMiBS(total_written, total_write_us);
         const double read_throughput_mib_s = ThroughputMiBS(total_read, total_read_us);
 
-        std::cout << "逻辑路径=" << last_result.logical_path << std::endl;
-        std::cout << "挂载路径=" << last_result.mounted_path << std::endl;
-        std::cout << "写入字节数=" << last_result.bytes_written << std::endl;
-        std::cout << "读取字节数=" << last_result.bytes_read << std::endl;
-        std::cout << "写入哈希=" << FormatHex64(last_result.write_hash) << std::endl;
-        std::cout << "读取哈希=" << FormatHex64(last_result.read_hash) << std::endl;
-        std::cout << "写入耗时毫秒=" << FormatDouble(static_cast<double>(last_result.write_elapsed_us) / 1000.0) << std::endl;
-        std::cout << "读取耗时毫秒=" << FormatDouble(static_cast<double>(last_result.read_elapsed_us) / 1000.0) << std::endl;
-        std::cout << "写入吞吐MiB每秒="
+        std::cout << "闁槒绶捄顖氱窞=" << last_result.logical_path << std::endl;
+        std::cout << "閹稿倽娴囩捄顖氱窞=" << last_result.mounted_path << std::endl;
+        std::cout << "閸愭瑥鍙嗙€涙濡弫?" << last_result.bytes_written << std::endl;
+        std::cout << "鐠囪褰囩€涙濡弫?" << last_result.bytes_read << std::endl;
+        std::cout << "閸愭瑥鍙嗛崫鍫濈瑖=" << FormatHex64(last_result.write_hash) << std::endl;
+        std::cout << "鐠囪褰囬崫鍫濈瑖=" << FormatHex64(last_result.read_hash) << std::endl;
+        std::cout << "閸愭瑥鍙嗛懓妤佹濮ｎ偆顫?" << FormatDouble(static_cast<double>(last_result.write_elapsed_us) / 1000.0) << std::endl;
+        std::cout << "鐠囪褰囬懓妤佹濮ｎ偆顫?" << FormatDouble(static_cast<double>(last_result.read_elapsed_us) / 1000.0) << std::endl;
+        std::cout << "閸愭瑥鍙嗛崥鐐叉倷MiB濮ｅ繒顫?"
                   << FormatDouble(ThroughputMiBS(last_result.bytes_written, last_result.write_elapsed_us)) << std::endl;
-        std::cout << "读取吞吐MiB每秒="
+        std::cout << "鐠囪褰囬崥鐐叉倷MiB濮ｅ繒顫?"
                   << FormatDouble(ThroughputMiBS(last_result.bytes_read, last_result.read_elapsed_us)) << std::endl;
-        std::cout << "总写入字节数=" << total_written << std::endl;
-        std::cout << "总读取字节数=" << total_read << std::endl;
-        std::cout << "平均写入耗时毫秒="
+        std::cout << "閹鍟撻崗銉ョ摟閼哄倹鏆?" << total_written << std::endl;
+        std::cout << "閹槒顕伴崣鏍х摟閼哄倹鏆?" << total_read << std::endl;
+        std::cout << "楠炲啿娼庨崘娆忓弳閼版妞傚В顐ゎ潡="
                   << FormatDouble(static_cast<double>(total_write_us) / 1000.0 / options.repeat) << std::endl;
-        std::cout << "平均读取耗时毫秒="
+        std::cout << "楠炲啿娼庣拠璇插絿閼版妞傚В顐ゎ潡="
                   << FormatDouble(static_cast<double>(total_read_us) / 1000.0 / options.repeat) << std::endl;
-        std::cout << "平均写入吞吐MiB每秒=" << FormatDouble(write_throughput_mib_s) << std::endl;
-        std::cout << "平均读取吞吐MiB每秒=" << FormatDouble(read_throughput_mib_s) << std::endl;
-        std::cout << "inode编号=" << last_result.inspection.inode_id << std::endl;
-        std::cout << "文件大小=" << last_result.inspection.size_bytes << " ("
+        std::cout << "楠炲啿娼庨崘娆忓弳閸氱偛鎮橫iB濮ｅ繒顫?" << FormatDouble(write_throughput_mib_s) << std::endl;
+        std::cout << "楠炲啿娼庣拠璇插絿閸氱偛鎮橫iB濮ｅ繒顫?" << FormatDouble(read_throughput_mib_s) << std::endl;
+        std::cout << "inode缂傛牕褰?" << last_result.inspection.inode_id << std::endl;
+        std::cout << "閺傚洣娆㈡径褍鐨?" << last_result.inspection.size_bytes << " ("
                   << FormatBytes(last_result.inspection.size_bytes) << ")" << std::endl;
-        std::cout << "节点编号=" << last_result.inspection.node_id << std::endl;
-        std::cout << "磁盘编号=" << last_result.inspection.disk_id << std::endl;
-        std::cout << "解析节点类型=" << DisplayTierName(last_result.inspection.actual_tier) << std::endl;
+        std::cout << "閼哄倻鍋ｇ紓鏍у娇=" << last_result.inspection.node_id << std::endl;
+        std::cout << "绾句胶娲忕紓鏍у娇=" << last_result.inspection.disk_id << std::endl;
+        std::cout << "鐟欙絾鐎介懞鍌滃仯缁鐎?" << DisplayTierName(last_result.inspection.actual_tier) << std::endl;
 
         std::vector<CheckResult> checks;
         AddCheck(&checks,
-                 "文件大小写入",
+                 "閺傚洣娆㈡径褍鐨崘娆忓弳",
                  last_result.bytes_written == options.file_size_bytes,
-                 "实际=" + std::to_string(last_result.bytes_written) +
-                     " 期望=" + std::to_string(options.file_size_bytes));
+                 "鐎圭偤妾?" + std::to_string(last_result.bytes_written) +
+                     " 閺堢喐婀?" + std::to_string(options.file_size_bytes));
         AddCheck(&checks,
-                 "文件大小读取",
+                 "閺傚洣娆㈡径褍鐨拠璇插絿",
                  last_result.bytes_read == options.file_size_bytes,
-                 "实际=" + std::to_string(last_result.bytes_read) +
-                     " 期望=" + std::to_string(options.file_size_bytes));
+                 "鐎圭偤妾?" + std::to_string(last_result.bytes_read) +
+                     " 閺堢喐婀?" + std::to_string(options.file_size_bytes));
         AddCheck(&checks,
-                 "文件哈希一致",
+                 "閺傚洣娆㈤崫鍫濈瑖娑撯偓閼?,
                  !options.verify_hash || last_result.read_hash == last_result.write_hash,
-                 options.verify_hash ? ("写入=" + FormatHex64(last_result.write_hash) +
-                                        " 读取=" + FormatHex64(last_result.read_hash))
-                                     : "未启用哈希校验");
+                 options.verify_hash ? ("閸愭瑥鍙?" + FormatHex64(last_result.write_hash) +
+                                        " 鐠囪褰?" + FormatHex64(last_result.read_hash))
+                                     : "閺堫亜鎯庨悽銊ユ惐鐢本鐗庢?);
         AddCheck(&checks,
-                 "属性大小一致",
+                 "鐏炵偞鈧冦亣鐏忓繋绔撮懛?,
                  last_result.inspection.size_bytes == options.file_size_bytes,
-                 "实际=" + std::to_string(last_result.inspection.size_bytes) +
-                     " 期望=" + std::to_string(options.file_size_bytes));
+                 "鐎圭偤妾?" + std::to_string(last_result.inspection.size_bytes) +
+                     " 閺堢喐婀?" + std::to_string(options.file_size_bytes));
         AddCheck(&checks,
-                 "落盘层级正确",
+                 "閽€鐣屾磸鐏炲倻楠囧锝団€?,
                  last_result.inspection.actual_tier == options.expected_tier,
-                 "实际=" + DisplayTierName(last_result.inspection.actual_tier) +
-                     " 期望=" + DisplayTierName(options.expected_tier));
+                 "鐎圭偤妾?" + DisplayTierName(last_result.inspection.actual_tier) +
+                     " 閺堢喐婀?" + DisplayTierName(options.expected_tier));
 
         bool ok = true;
         for (const auto& check : checks) {
@@ -1937,7 +2066,7 @@ private:
                                   uint32_t attempt,
                                   TierIoIterationResult* result) {
         if (!result) {
-            std::cerr << "缺少层级读写结果输出对象" << std::endl;
+            std::cerr << "缂傚搫鐨仦鍌滈獓鐠囪鍟撶紒鎾寸亯鏉堟挸鍤€电钖? << std::endl;
             return false;
         }
         const std::string token = TimestampToken() + (options.repeat > 1 ? ("_" + std::to_string(attempt + 1)) : "");
@@ -1951,7 +2080,7 @@ private:
         std::error_code ec;
         fs::create_directories(mounted_dir, ec);
         if (ec) {
-            std::cerr << "创建目录失败 " << mounted_dir << ": " << ec.message() << std::endl;
+            std::cerr << "閸掓稑缂撻惄顔肩秿婢惰精瑙?" << mounted_dir << ": " << ec.message() << std::endl;
             return false;
         }
 
@@ -2005,7 +2134,7 @@ private:
         if (!options.keep_file) {
             fs::remove(fs::path(mounted_path), ec);
             if (ec) {
-                std::cerr << "删除文件失败 " << mounted_path << ": " << ec.message() << std::endl;
+                std::cerr << "閸掔娀娅庨弬鍥︽婢惰精瑙?" << mounted_path << ": " << ec.message() << std::endl;
                 return false;
             }
         }
@@ -2014,10 +2143,10 @@ private:
 
     bool InspectKnownFile(const std::string& logical_path, const std::string& label) {
         if (logical_path.empty()) {
-            std::cerr << "没有记录可供查看的" << label << "路径" << std::endl;
+            std::cerr << "濞屸剝婀佺拋鏉跨秿閸欘垯绶甸弻銉ф箙閻? << label << "鐠侯垰绶? << std::endl;
             return false;
         }
-        PrintSection("查看" + label + "文件");
+        PrintSection("閺屻儳婀? + label + "閺傚洣娆?);
         return InspectFile(logical_path, "", nullptr);
     }
 
@@ -2027,12 +2156,12 @@ private:
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup(logical_path, &attr, &status)) {
-            std::cerr << "查询文件失败 " << logical_path << ": " << status.message() << std::endl;
+            std::cerr << "閺屻儴顕楅弬鍥︽婢惰精瑙?" << logical_path << ": " << status.message() << std::endl;
             return false;
         }
         zb::rpc::FileLocationView view;
         if (!mds_.GetFileLocation(attr.inode_id(), &view, &status)) {
-            std::cerr << "查询文件位置失败 inode=" << attr.inode_id() << ": " << status.message() << std::endl;
+            std::cerr << "閺屻儴顕楅弬鍥︽娴ｅ秶鐤嗘径杈Е inode=" << attr.inode_id() << ": " << status.message() << std::endl;
             return false;
         }
         std::string node_id;
@@ -2047,11 +2176,11 @@ private:
             actual_tier = "virtual";
         }
 
-        std::cout << "inode编号=" << attr.inode_id() << std::endl;
-        std::cout << "属性大小字节=" << attr.size() << " (" << FormatBytes(attr.size()) << ")" << std::endl;
-        std::cout << "节点编号=" << node_id << std::endl;
-        std::cout << "磁盘编号=" << disk_id << std::endl;
-        std::cout << "解析节点类型=" << DisplayTierName(actual_tier) << std::endl;
+        std::cout << "inode缂傛牕褰?" << attr.inode_id() << std::endl;
+        std::cout << "鐏炵偞鈧冦亣鐏忓繐鐡ч懞?" << attr.size() << " (" << FormatBytes(attr.size()) << ")" << std::endl;
+        std::cout << "閼哄倻鍋ｇ紓鏍у娇=" << node_id << std::endl;
+        std::cout << "绾句胶娲忕紓鏍у娇=" << disk_id << std::endl;
+        std::cout << "鐟欙絾鐎介懞鍌滃仯缁鐎?" << DisplayTierName(actual_tier) << std::endl;
         if (out) {
             out->inode_id = attr.inode_id();
             out->size_bytes = attr.size();
@@ -2060,8 +2189,8 @@ private:
             out->actual_tier = actual_tier;
         }
         if (!expected_tier.empty() && actual_tier != expected_tier) {
-            std::cerr << "期望层级为" << DisplayTierName(expected_tier)
-                      << "，实际为" << DisplayTierName(actual_tier) << std::endl;
+            std::cerr << "閺堢喐婀滅仦鍌滈獓娑? << DisplayTierName(expected_tier)
+                      << "閿涘苯鐤勯梽鍛礋" << DisplayTierName(actual_tier) << std::endl;
             return false;
         }
         return true;
@@ -2731,16 +2860,16 @@ private:
         std::cout << "min_query_latency=" << FormatLatencyHuman(sample_count == 0 ? 0 : min_latency_us) << '\n';
         std::cout << "max_query_latency=" << FormatLatencyHuman(max_latency_us) << '\n';
         for (const auto& sample : samples) {
-            std::cout << "样本序号=" << sample.index << '\n';
-            std::cout << "查询成功=" << (sample.ok ? "true" : "false") << '\n';
-            std::cout << "查询耗时=" << FormatLatencyHuman(sample.latency_us) << '\n';
-            std::cout << "状态码=" << static_cast<int>(sample.status.code()) << '\n';
-            std::cout << "状态信息=" << (sample.ok ? "OK" : sample.error_message) << '\n';
+            std::cout << "閺嶉攱婀版惔蹇撳娇=" << sample.index << '\n';
+            std::cout << "閺屻儴顕楅幋鎰=" << (sample.ok ? "true" : "false") << '\n';
+            std::cout << "閺屻儴顕楅懓妤佹=" << FormatLatencyHuman(sample.latency_us) << '\n';
+            std::cout << "閻樿埖鈧胶鐖?" << static_cast<int>(sample.status.code()) << '\n';
+            std::cout << "閻樿埖鈧椒淇婇幁?" << (sample.ok ? "OK" : sample.error_message) << '\n';
             if (!sample.ok) {
                 continue;
             }
             const auto& attr = sample.attr;
-            std::cout << "文件元数据={\n";
+            std::cout << "閺傚洣娆㈤崗鍐╂殶閹?{\n";
             std::cout << "  namespace_id=" << sample.namespace_id << '\n';
             std::cout << "  full_path=" << sample.full_path << '\n';
             std::cout << "  path_prefix=" << sample.path_prefix << '\n';
@@ -2798,9 +2927,9 @@ private:
             if (failure_errno) {
                 *failure_errno = open_errno;
             }
-            std::cerr << "打开写入文件失败: " << path
+            std::cerr << "閹垫挸绱戦崘娆忓弳閺傚洣娆㈡径杈Е: " << path
                       << " errno=" << open_errno
-                      << " 错误=" << std::strerror(open_errno) << '\n';
+                      << " 闁挎瑨顕?" << std::strerror(open_errno) << '\n';
             return false;
         }
         uint64_t hash = 14695981039346656037ULL;
@@ -2817,9 +2946,9 @@ private:
                 if (failure_errno) {
                     *failure_errno = write_errno;
                 }
-                std::cerr << "写入文件失败: " << path;
+                std::cerr << "閸愭瑥鍙嗛弬鍥︽婢惰精瑙? " << path;
                 if (write_errno != 0) {
-                    std::cerr << " errno=" << write_errno << " 错误=" << std::strerror(write_errno);
+                    std::cerr << " errno=" << write_errno << " 闁挎瑨顕?" << std::strerror(write_errno);
                 }
                 std::cerr << '\n';
                 return false;
@@ -2834,9 +2963,9 @@ private:
                 if (failure_errno) {
                     *failure_errno = flush_errno;
                 }
-                std::cerr << "刷新文件失败: " << path;
+                std::cerr << "閸掗攱鏌婇弬鍥︽婢惰精瑙? " << path;
                 if (flush_errno != 0) {
-                    std::cerr << " errno=" << flush_errno << " 错误=" << std::strerror(flush_errno);
+                    std::cerr << " errno=" << flush_errno << " 闁挎瑨顕?" << std::strerror(flush_errno);
                 }
                 std::cerr << '\n';
                 return false;
@@ -2848,9 +2977,9 @@ private:
             if (failure_errno) {
                 *failure_errno = close_errno;
             }
-            std::cerr << "关闭写入文件失败: " << path;
+            std::cerr << "閸忔娊妫撮崘娆忓弳閺傚洣娆㈡径杈Е: " << path;
             if (close_errno != 0) {
-                std::cerr << " errno=" << close_errno << " 错误=" << std::strerror(close_errno);
+                std::cerr << " errno=" << close_errno << " 闁挎瑨顕?" << std::strerror(close_errno);
             }
             std::cerr << '\n';
             return false;
@@ -2878,9 +3007,9 @@ private:
         std::ifstream in(path, std::ios::binary);
         if (!in.is_open()) {
             const int open_errno = errno;
-            std::cerr << "打开读取文件失败: " << path
+            std::cerr << "閹垫挸绱戠拠璇插絿閺傚洣娆㈡径杈Е: " << path
                       << " errno=" << open_errno
-                      << " 错误=" << std::strerror(open_errno) << '\n';
+                      << " 闁挎瑨顕?" << std::strerror(open_errno) << '\n';
             return false;
         }
         uint64_t hash = 14695981039346656037ULL;
@@ -2899,7 +3028,7 @@ private:
             read_total += static_cast<uint64_t>(count);
         }
         if (in.bad()) {
-            std::cerr << "读取文件失败: " << path << '\n';
+            std::cerr << "鐠囪褰囬弬鍥︽婢惰精瑙? " << path << '\n';
             return false;
         }
         const auto finished_at = std::chrono::steady_clock::now();

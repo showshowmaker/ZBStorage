@@ -9,7 +9,7 @@ MDS_ADDR="${MDS_ADDR:-127.0.0.1:9000}"
 SCHEDULER_ADDR="${SCHEDULER_ADDR:-127.0.0.1:9100}"
 MOUNT_POINT="${MOUNT_POINT:-${DEMO_ROOT}/mnt}"
 NAMESPACE_PREFIX="${NAMESPACE_PREFIX:-demo-ns}"
-TEMPLATE_ID="${MASSTREE_TEMPLATE_ID:-template-100m-v1}"
+TEMPLATE_ID="${MASSTREE_TEMPLATE_ID:-}"
 TEMPLATE_MODE="${MASSTREE_TEMPLATE_MODE:-page_fast}"
 VERIFY_INODE_SAMPLES="${MASSTREE_VERIFY_INODE_SAMPLES:-32}"
 VERIFY_DENTRY_SAMPLES="${MASSTREE_VERIFY_DENTRY_SAMPLES:-32}"
@@ -33,16 +33,25 @@ fi
 
 for ((i=1; i<=NAMESPACE_COUNT; ++i)); do
   NAMESPACE_ID="$(printf "%s-%06d" "${NAMESPACE_PREFIX}" "${i}")"
-  echo "==== importing namespace ${i}/${NAMESPACE_COUNT}: ${NAMESPACE_ID} (template=${TEMPLATE_ID}) ===="
+  if [[ -n "${TEMPLATE_ID}" ]]; then
+    echo "==== importing namespace ${i}/${NAMESPACE_COUNT}: ${NAMESPACE_ID} (template=${TEMPLATE_ID}) ===="
+  else
+    echo "==== importing namespace ${i}/${NAMESPACE_COUNT}: ${NAMESPACE_ID} (template=random) ===="
+  fi
 
-  "${BUILD_DIR}/system_demo_tool" \
+  CMD=(
+    "${BUILD_DIR}/system_demo_tool"
     --mds="${MDS_ADDR}" \
-    --scheduler="${SCHEDULER_ADDR}" \
-    --mount_point="${MOUNT_POINT}" \
-    --scenario=masstree_import \
-    --masstree_namespace_id="${NAMESPACE_ID}" \
-    --masstree_template_id="${TEMPLATE_ID}" \
-    --masstree_template_mode="${TEMPLATE_MODE}" \
-    --masstree_verify_inode_samples="${VERIFY_INODE_SAMPLES}" \
+    --scheduler="${SCHEDULER_ADDR}"
+    --mount_point="${MOUNT_POINT}"
+    --scenario=masstree_import
+    --masstree_namespace_id="${NAMESPACE_ID}"
+    --masstree_template_mode="${TEMPLATE_MODE}"
+    --masstree_verify_inode_samples="${VERIFY_INODE_SAMPLES}"
     --masstree_verify_dentry_samples="${VERIFY_DENTRY_SAMPLES}"
+  )
+  if [[ -n "${TEMPLATE_ID}" ]]; then
+    CMD+=(--masstree_template_id="${TEMPLATE_ID}")
+  fi
+  "${CMD[@]}"
 done

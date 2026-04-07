@@ -9,7 +9,7 @@ BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 LOG_DIR="${RUN_DIR}/logs"
 
 NAMESPACE_COUNT="${1:-1000}"
-TEMPLATE_ID="${MASSTREE_TEMPLATE_ID:-template-100m-v1}"
+TEMPLATE_ID="${MASSTREE_TEMPLATE_ID:-}"
 TEMPLATE_MODE="${MASSTREE_TEMPLATE_MODE:-page_fast}"
 NAMESPACE_PREFIX="${NAMESPACE_PREFIX:-demo-ns}"
 PATH_LIST_FILE="${MASSTREE_PATH_LIST_FILE:-}"
@@ -53,7 +53,11 @@ trap cleanup EXIT
 log "[INFO] run_dir=${RUN_DIR}"
 log "[INFO] build_dir=${BUILD_DIR}"
 log "[INFO] namespace_count=${NAMESPACE_COUNT}"
-log "[INFO] template_id=${TEMPLATE_ID}"
+if [[ -n "${TEMPLATE_ID}" ]]; then
+  log "[INFO] template_id=${TEMPLATE_ID}"
+else
+  log "[INFO] template_id=random"
+fi
 log "[INFO] template_mode=${TEMPLATE_MODE}"
 if [[ -n "${PATH_LIST_FILE}" ]]; then
   log "[INFO] path_list_file=${PATH_LIST_FILE}"
@@ -64,6 +68,11 @@ log "[INFO] starting demo stack"
 RUN_DIR="${RUN_DIR}" BUILD_DIR="${BUILD_DIR}" bash "${ROOT_DIR}/scripts/start_demo_stack.sh" start
 
 if [[ -n "${PATH_LIST_FILE}" ]]; then
+  if [[ -z "${TEMPLATE_ID}" ]]; then
+    echo "MASSTREE_TEMPLATE_ID is required when MASSTREE_PATH_LIST_FILE is set" >&2
+    STATUS=1
+    exit "${STATUS}"
+  fi
   log "[INFO] generating template from txt path list"
   if RUN_DIR="${RUN_DIR}" \
      BUILD_DIR="${BUILD_DIR}" \
