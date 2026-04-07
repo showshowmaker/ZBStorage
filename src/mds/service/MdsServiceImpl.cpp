@@ -33,6 +33,7 @@ constexpr uint32_t kDefaultPosixBlockSize = 4096;
 constexpr uint64_t kDefaultDirectorySizeBytes = 4096;
 constexpr const char* kMasstreeQueryModeRandomInode = "random_inode";
 constexpr const char* kMasstreeQueryModeRandomPathLookup = "random_path_lookup";
+constexpr size_t kMinRepeatWidth = 6;
 std::mutex g_masstree_query_path_source_mu;
 
 std::string TrimCopy(std::string value) {
@@ -2146,7 +2147,8 @@ void MdsServiceImpl::GetRandomMasstreeLookupPaths(google::protobuf::RpcControlle
             sample->set_full_path(JoinLogicalMasstreePath(selected->route.path_prefix,
                                                           RepeatDirName(repeat_dir_prefix,
                                                                         repeat_index,
-                                                                        DecimalDigits(repeat_count - 1U)),
+                                                                        std::max<size_t>(kMinRepeatWidth,
+                                                                                         DecimalDigits(repeat_count - 1U))),
                                                           relative_file_path));
             produced = true;
             break;
