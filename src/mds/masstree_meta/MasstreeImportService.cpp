@@ -274,6 +274,7 @@ bool PrepareTemplateImportManifest(const InternalImportRequest& request,
     *inode_id_offset = request.inode_start - template_manifest.inode_min;
 
     *manifest = template_manifest;
+    manifest->template_id = request.template_id;
     manifest->namespace_id = request.namespace_id;
     manifest->generation_id = request.generation_id;
     manifest->path_prefix = request.path_prefix;

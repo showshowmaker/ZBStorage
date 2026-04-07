@@ -7,11 +7,13 @@
 #include <chrono>
 #include <filesystem>
 #include <fcntl.h>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <random>
 #include <sstream>
+#include <vector>
 
 #include "../masstree_meta/MasstreeManifest.h"
 #include "../storage/UnifiedInodeLocation.h"
@@ -31,6 +33,530 @@ constexpr uint32_t kDefaultPosixBlockSize = 4096;
 constexpr uint64_t kDefaultDirectorySizeBytes = 4096;
 constexpr const char* kMasstreeQueryModeRandomInode = "random_inode";
 constexpr const char* kMasstreeQueryModeRandomPathLookup = "random_path_lookup";
+std::mutex g_masstree_query_path_source_mu;
+
+std::string TrimCopy(std::string value) {
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }));
+    value.erase(std::find_if(value.rbegin(), value.rend(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }).base(), value.end());
+    return value;
+}
+
+std::string ToLowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+bool IsPathListSourceMode(const std::string& source_mode) {
+    return ToLowerAscii(TrimCopy(source_mode)) == "path_list";
+}
+
+std::string TemplateManifestPathForId(const std::string& masstree_root, const std::string& template_id) {
+    return (std::filesystem::path(masstree_root) / "templates" / template_id / "template.staging" / "manifest.txt")
+        .string();
+}
+
+size_t DecimalDigits(uint64_t value) {
+    size_t digits = 1;
+    while (value >= 10U) {
+        value /= 10U;
+        ++digits;
+    }
+    return digits;
+}
+
+std::string FixedWidthDecimal(uint64_t value, size_t width) {
+    std::ostringstream out;
+    out.width(static_cast<std::streamsize>(width));
+    out.fill('0');
+    out << value;
+    return out.str();
+}
+
+std::string RepeatDirName(const std::string& prefix, uint64_t repeat_index, size_t width) {
+    return prefix + "_" + FixedWidthDecimal(repeat_index, width);
+}
+
+std::string JoinLogicalMasstreePath(const std::string& path_prefix,
+                                    const std::string& repeat_dir_name,
+                                    const std::string& relative_file_path) {
+    std::string full_path = path_prefix;
+    if (full_path.empty() || full_path.back() != '/') {
+        full_path.push_back('/');
+    }
+    full_path += repeat_dir_name;
+    if (!relative_file_path.empty()) {
+        full_path.push_back('/');
+        full_path += relative_file_path;
+    }
+    return full_path;
+}
+
+std::string PathBaseName(const std::string& path) {
+    const size_t slash = path.rfind('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1U);
+}
+
+bool NormalizePathListRelativePath(const std::string& raw_path,
+                                   std::string* normalized_path,
+                                   bool* explicit_dir,
+                                   std::string* error) {
+    if (!normalized_path || !explicit_dir) {
+        if (error) {
+            *error = "path_list normalization outputs are null";
+        }
+        return false;
+    }
+    std::string trimmed = TrimCopy(raw_path);
+    if (trimmed.empty()) {
+        if (error) {
+            *error = "empty path_list line";
+        }
+        return false;
+    }
+    std::replace(trimmed.begin(), trimmed.end(), '\\', '/');
+    *explicit_dir = !trimmed.empty() && trimmed.back() == '/';
+    if (trimmed == "." || trimmed == "./") {
+        normalized_path->clear();
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+    while (trimmed.rfind("./", 0) == 0) {
+        trimmed.erase(0, 2);
+    }
+    while (!trimmed.empty() && trimmed.front() == '/') {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && trimmed.back() == '/') {
+        trimmed.pop_back();
+    }
+
+    std::stringstream stream(trimmed);
+    std::string token;
+    std::vector<std::string> parts;
+    while (std::getline(stream, token, '/')) {
+        token = TrimCopy(token);
+        if (token.empty() || token == ".") {
+            continue;
+        }
+        if (token == "..") {
+            if (error) {
+                *error = "path_list contains unsupported '..' segment";
+            }
+            return false;
+        }
+        parts.push_back(token);
+    }
+
+    std::ostringstream rebuilt;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i != 0) {
+            rebuilt << '/';
+        }
+        rebuilt << parts[i];
+    }
+    *normalized_path = rebuilt.str();
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool PathListEntryIsDirectory(const std::string& normalized_path, bool explicit_dir) {
+    if (normalized_path.empty() || explicit_dir) {
+        return true;
+    }
+    return PathBaseName(normalized_path).find('.') == std::string::npos;
+}
+
+bool TemplateManifestMatchesNamespaceManifest(const zb::mds::MasstreeNamespaceManifest& candidate,
+                                              const zb::mds::MasstreeNamespaceManifest& target) {
+    return candidate.source_mode == target.source_mode &&
+           candidate.path_list_fingerprint == target.path_list_fingerprint &&
+           candidate.repeat_dir_prefix == target.repeat_dir_prefix &&
+           candidate.template_base_file_count == target.template_base_file_count &&
+           candidate.template_repeat_count == target.template_repeat_count &&
+           candidate.file_count == target.file_count &&
+           candidate.inode_count == target.inode_count &&
+           candidate.dentry_count == target.dentry_count;
+}
+
+bool ResolveTemplateManifestForNamespace(const std::string& masstree_root,
+                                         const zb::mds::MasstreeNamespaceManifest& namespace_manifest,
+                                         std::string* template_id,
+                                         zb::mds::MasstreeNamespaceManifest* template_manifest,
+                                         std::string* error) {
+    if (!template_id || !template_manifest) {
+        if (error) {
+            *error = "template manifest outputs are null";
+        }
+        return false;
+    }
+
+    if (!namespace_manifest.template_id.empty()) {
+        const std::string manifest_path = TemplateManifestPathForId(masstree_root, namespace_manifest.template_id);
+        if (zb::mds::MasstreeNamespaceManifest::LoadFromFile(manifest_path, template_manifest, error)) {
+            *template_id = namespace_manifest.template_id;
+            return true;
+        }
+    }
+
+    namespace fs = std::filesystem;
+    const fs::path templates_root = fs::path(masstree_root) / "templates";
+    std::error_code ec;
+    if (!fs::exists(templates_root, ec)) {
+        if (error) {
+            *error = "masstree templates root not found: " + templates_root.string();
+        }
+        return false;
+    }
+
+    for (const auto& entry : fs::directory_iterator(templates_root, ec)) {
+        if (ec) {
+            if (error) {
+                *error = "failed to iterate masstree templates root: " + templates_root.string() +
+                         " error=" + ec.message();
+            }
+            return false;
+        }
+        if (!entry.is_directory()) {
+            continue;
+        }
+        zb::mds::MasstreeNamespaceManifest candidate;
+        std::string local_error;
+        if (!zb::mds::MasstreeNamespaceManifest::LoadFromFile(
+                (entry.path() / "template.staging" / "manifest.txt").string(), &candidate, &local_error)) {
+            continue;
+        }
+        if (!TemplateManifestMatchesNamespaceManifest(candidate, namespace_manifest)) {
+            continue;
+        }
+        *template_manifest = std::move(candidate);
+        *template_id = entry.path().filename().string();
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    if (error) {
+        *error = "failed to resolve template manifest for namespace: " + namespace_manifest.namespace_id;
+    }
+    return false;
+}
+
+bool BuildQueryPathSourceFromPathList(const std::string& path_list_file,
+                                      const std::string& output_path,
+                                      uint64_t* path_count,
+                                      std::string* error) {
+    if (path_count) {
+        *path_count = 0;
+    }
+    std::ifstream input(path_list_file);
+    if (!input) {
+        if (error) {
+            *error = "failed to open path_list_file: " + path_list_file;
+        }
+        return false;
+    }
+    std::ofstream output(output_path, std::ios::trunc);
+    if (!output) {
+        if (error) {
+            *error = "failed to create query path source: " + output_path;
+        }
+        return false;
+    }
+
+    uint64_t count = 0;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::string normalized_path;
+        bool explicit_dir = false;
+        std::string local_error;
+        if (!NormalizePathListRelativePath(line, &normalized_path, &explicit_dir, &local_error)) {
+            if (local_error == "empty path_list line") {
+                continue;
+            }
+            if (error) {
+                *error = local_error;
+            }
+            return false;
+        }
+        if (normalized_path.empty() || PathListEntryIsDirectory(normalized_path, explicit_dir)) {
+            continue;
+        }
+        output << normalized_path << '\n';
+        ++count;
+    }
+
+    output.flush();
+    if (!output.good()) {
+        if (error) {
+            *error = "failed to flush query path source: " + output_path;
+        }
+        return false;
+    }
+    if (count == 0) {
+        if (error) {
+            *error = "path_list_file does not contain any file path: " + path_list_file;
+        }
+        return false;
+    }
+    if (path_count) {
+        *path_count = count;
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool PickRandomNonEmptyLineFromFile(const std::string& path, std::string* line_out, std::string* error) {
+    if (!line_out) {
+        if (error) {
+            *error = "line output is null";
+        }
+        return false;
+    }
+    std::error_code stat_error;
+    const uint64_t file_size = std::filesystem::file_size(path, stat_error);
+    if (stat_error || file_size == 0) {
+        if (error) {
+            *error = "failed to stat file: " + path;
+        }
+        return false;
+    }
+
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    std::uniform_int_distribution<uint64_t> offset_dist(0, file_size - 1U);
+    constexpr uint32_t kMaxAttempts = 64;
+    for (uint32_t attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            if (error) {
+                *error = "failed to open file: " + path;
+            }
+            return false;
+        }
+        const uint64_t offset = offset_dist(rng);
+        input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+        if (!input.good()) {
+            input.clear();
+            input.seekg(0, std::ios::beg);
+        } else if (offset != 0) {
+            std::string discard;
+            std::getline(input, discard);
+        }
+        std::string line;
+        while (std::getline(input, line)) {
+            line = TrimCopy(line);
+            if (!line.empty()) {
+                *line_out = std::move(line);
+                if (error) {
+                    error->clear();
+                }
+                return true;
+            }
+        }
+    }
+
+    std::ifstream fallback(path);
+    if (!fallback) {
+        if (error) {
+            *error = "failed to reopen file: " + path;
+        }
+        return false;
+    }
+    std::string line;
+    while (std::getline(fallback, line)) {
+        line = TrimCopy(line);
+        if (!line.empty()) {
+            *line_out = std::move(line);
+            if (error) {
+                error->clear();
+            }
+            return true;
+        }
+    }
+    if (error) {
+        *error = "query path source is empty: " + path;
+    }
+    return false;
+}
+
+bool PickRandomExistingMasstreeTemplateId(const std::string& masstree_root,
+                                          std::string* template_id,
+                                          std::string* error) {
+    if (!template_id) {
+        if (error) {
+            *error = "template_id output is null";
+        }
+        return false;
+    }
+    namespace fs = std::filesystem;
+    const fs::path templates_root = fs::path(masstree_root) / "templates";
+    std::error_code ec;
+    if (!fs::exists(templates_root, ec)) {
+        if (error) {
+            *error = "masstree templates root not found: " + templates_root.string();
+        }
+        return false;
+    }
+    if (ec) {
+        if (error) {
+            *error = "failed to inspect masstree templates root: " + templates_root.string() +
+                     " error=" + ec.message();
+        }
+        return false;
+    }
+
+    std::vector<std::string> template_ids;
+    for (const auto& entry : fs::directory_iterator(templates_root, ec)) {
+        if (ec) {
+            if (error) {
+                *error = "failed to iterate masstree templates root: " + templates_root.string() +
+                         " error=" + ec.message();
+            }
+            return false;
+        }
+        if (!entry.is_directory()) {
+            continue;
+        }
+        const fs::path manifest_path = entry.path() / "template.staging" / "manifest.txt";
+        if (!fs::exists(manifest_path, ec)) {
+            if (ec) {
+                if (error) {
+                    *error = "failed to inspect template manifest: " + manifest_path.string() +
+                             " error=" + ec.message();
+                }
+                return false;
+            }
+            continue;
+        }
+        MasstreeNamespaceManifest manifest;
+        std::string load_error;
+        if (!MasstreeNamespaceManifest::LoadFromFile(manifest_path.string(), &manifest, &load_error)) {
+            continue;
+        }
+        template_ids.push_back(entry.path().filename().string());
+    }
+
+    if (template_ids.empty()) {
+        if (error) {
+            *error = "no available masstree templates found under: " + templates_root.string();
+        }
+        return false;
+    }
+
+    static thread_local std::mt19937_64 generator(std::random_device{}());
+    std::uniform_int_distribution<size_t> distribution(0, template_ids.size() - 1U);
+    *template_id = template_ids[distribution(generator)];
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+bool EnsureTemplateQueryPathSource(zb::mds::MasstreeNamespaceManifest* template_manifest,
+                                   const std::string& fallback_path_list_file,
+                                   std::string* error) {
+    if (!template_manifest) {
+        if (error) {
+            *error = "template manifest is null";
+        }
+        return false;
+    }
+    if (!IsPathListSourceMode(template_manifest->source_mode)) {
+        if (error) {
+            *error = "template does not support txt-backed lookup path generation";
+        }
+        return false;
+    }
+
+    std::filesystem::path query_path_source_path =
+        template_manifest->query_path_source_path.empty()
+            ? (std::filesystem::path(template_manifest->manifest_path).parent_path() / "query_path_source.txt")
+            : std::filesystem::path(template_manifest->query_path_source_path);
+
+    if (template_manifest->query_path_source_count != 0 &&
+        std::filesystem::exists(query_path_source_path)) {
+        template_manifest->query_path_source_path = query_path_source_path.string();
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    const std::lock_guard<std::mutex> lock(g_masstree_query_path_source_mu);
+
+    zb::mds::MasstreeNamespaceManifest latest_manifest;
+    std::string reload_error;
+    if (zb::mds::MasstreeNamespaceManifest::LoadFromFile(template_manifest->manifest_path,
+                                                         &latest_manifest,
+                                                         &reload_error)) {
+        if (!latest_manifest.query_path_source_path.empty() &&
+            latest_manifest.query_path_source_count != 0 &&
+            std::filesystem::exists(latest_manifest.query_path_source_path)) {
+            *template_manifest = std::move(latest_manifest);
+            if (error) {
+                error->clear();
+            }
+            return true;
+        }
+        *template_manifest = std::move(latest_manifest);
+        query_path_source_path =
+            template_manifest->query_path_source_path.empty()
+                ? (std::filesystem::path(template_manifest->manifest_path).parent_path() / "query_path_source.txt")
+                : std::filesystem::path(template_manifest->query_path_source_path);
+    }
+
+    const std::string path_list_file =
+        !template_manifest->path_list_file.empty() ? template_manifest->path_list_file : fallback_path_list_file;
+    if (path_list_file.empty()) {
+        if (error) {
+            *error = "template query path source is missing path_list_file";
+        }
+        return false;
+    }
+
+    std::filesystem::create_directories(query_path_source_path.parent_path());
+    const std::filesystem::path tmp_path = query_path_source_path.string() + ".tmp";
+    uint64_t path_count = 0;
+    if (!BuildQueryPathSourceFromPathList(path_list_file, tmp_path.string(), &path_count, error)) {
+        std::error_code remove_ec;
+        std::filesystem::remove(tmp_path, remove_ec);
+        return false;
+    }
+
+    std::error_code rename_ec;
+    std::filesystem::rename(tmp_path, query_path_source_path, rename_ec);
+    if (rename_ec) {
+        std::error_code remove_ec;
+        std::filesystem::remove(tmp_path, remove_ec);
+        if (error) {
+            *error = "failed to publish query path source: " + rename_ec.message();
+        }
+        return false;
+    }
+
+    template_manifest->path_list_file = path_list_file;
+    template_manifest->query_path_source_path = query_path_source_path.string();
+    template_manifest->query_path_source_count = path_count;
+    if (!template_manifest->SaveToFile(template_manifest->manifest_path, error)) {
+        return false;
+    }
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
 
 bool IsLocationMetadataMissing(const std::string& error) {
     return error.empty();
@@ -682,11 +1208,6 @@ void MdsServiceImpl::Create(google::protobuf::RpcController* cntl_base,
     rocksdb::WriteBatch batch;
     batch.Put(DentryKey(parent_inode, name), MetaCodec::EncodeUInt64(inode_id));
     batch.Put(InodeKey(inode_id), inode_payload);
-    if (!SaveDiskFileLocation(inode_id, disk_location, &batch)) {
-        LogRequestFailure("Create.SaveDiskFileLocation", request->path(), "failed to persist inline disk location");
-        FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, "failed to persist inline disk location");
-        return;
-    }
     if (!store_->WriteBatch(&batch, &error)) {
         LogRequestFailure("Create.WriteBatch", request->path(), error);
         FillStatus(response->mutable_status(), zb::rpc::MDS_INTERNAL_ERROR, error);
@@ -1359,18 +1880,20 @@ void MdsServiceImpl::ImportMasstreeNamespace(google::protobuf::RpcController* cn
                    "path_prefix/namespace_id/generation_id is required");
         return;
     }
-    if (request->template_id().empty()) {
-        FillStatus(response->mutable_status(),
-                   zb::rpc::MDS_INVALID_ARGUMENT,
-                   "template_id is required");
-        return;
+    std::string selected_template_id = request->template_id();
+    if (selected_template_id.empty()) {
+        std::string error;
+        if (!PickRandomExistingMasstreeTemplateId(masstree_root_, &selected_template_id, &error)) {
+            FillStatus(response->mutable_status(), zb::rpc::MDS_NOT_FOUND, error);
+            return;
+        }
     }
     MasstreeImportService::TemplateImportRequest import_request;
     import_request.masstree_root = masstree_root_;
     import_request.namespace_id = request->namespace_id();
     import_request.generation_id = request->generation_id();
     import_request.path_prefix = request->path_prefix();
-    import_request.template_id = request->template_id();
+    import_request.template_id = selected_template_id;
     import_request.template_mode = request->template_mode();
     import_request.inode_start = request->inode_start();
     import_request.verify_inode_samples = request->verify_inode_samples();
@@ -1495,6 +2018,147 @@ void MdsServiceImpl::GetRandomMasstreeFileAttr(google::protobuf::RpcController* 
     response->set_file_name(file_name);
     response->set_full_path(full_path);
     *response->mutable_attr() = attr;
+    FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
+}
+
+void MdsServiceImpl::GetRandomMasstreeLookupPaths(google::protobuf::RpcController* cntl_base,
+                                                  const zb::rpc::GetRandomMasstreeLookupPathsRequest* request,
+                                                  zb::rpc::GetRandomMasstreeLookupPathsReply* response,
+                                                  google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    (void)cntl_base;
+    if (!store_ || !request || !response) {
+        FillStatus(response ? response->mutable_status() : nullptr,
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   "Service not initialized");
+        return;
+    }
+
+    struct LookupPathCandidate {
+        MasstreeNamespaceRoute route;
+        MasstreeNamespaceManifest route_manifest;
+        MasstreeNamespaceManifest template_manifest;
+        std::string template_id;
+        uint64_t weight{0};
+    };
+
+    std::vector<MasstreeNamespaceRoute> routes;
+    std::string error;
+    if (!masstree_namespace_catalog_.ListRoutes(&routes, &error)) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_INTERNAL_ERROR,
+                   error.empty() ? "failed to list masstree routes" : error);
+        return;
+    }
+
+    std::vector<LookupPathCandidate> candidates;
+    candidates.reserve(routes.size());
+    uint64_t total_weight = 0;
+    for (const auto& route : routes) {
+        MasstreeNamespaceManifest route_manifest;
+        std::string local_error;
+        if (route.manifest_path.empty() ||
+            !MasstreeNamespaceManifest::LoadFromFile(route.manifest_path, &route_manifest, &local_error)) {
+            continue;
+        }
+        if (!IsPathListSourceMode(route_manifest.source_mode) || route_manifest.file_count == 0 ||
+            route_manifest.template_repeat_count == 0 || route_manifest.repeat_dir_prefix.empty()) {
+            continue;
+        }
+
+        LookupPathCandidate candidate;
+        candidate.route = route;
+        candidate.route_manifest = route_manifest;
+        if (!ResolveTemplateManifestForNamespace(masstree_root_,
+                                                 route_manifest,
+                                                 &candidate.template_id,
+                                                 &candidate.template_manifest,
+                                                 &local_error)) {
+            continue;
+        }
+        candidate.weight = std::max<uint64_t>(1ULL, route_manifest.file_count);
+        total_weight += candidate.weight;
+        candidates.push_back(std::move(candidate));
+    }
+
+    if (candidates.empty()) {
+        FillStatus(response->mutable_status(),
+                   zb::rpc::MDS_NOT_FOUND,
+                   "no path_list masstree namespace/template is available for random path lookup");
+        return;
+    }
+
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    const uint32_t sample_count = std::max<uint32_t>(1U, request->sample_count());
+    for (uint32_t i = 0; i < sample_count; ++i) {
+        bool produced = false;
+        std::string last_error;
+        for (uint32_t attempt = 0; attempt < 32U; ++attempt) {
+            const LookupPathCandidate* selected = nullptr;
+            if (total_weight > 0) {
+                std::uniform_int_distribution<uint64_t> dist(1ULL, total_weight);
+                uint64_t draw = dist(rng);
+                for (const auto& candidate : candidates) {
+                    if (draw <= candidate.weight) {
+                        selected = &candidate;
+                        break;
+                    }
+                    draw -= candidate.weight;
+                }
+            }
+            if (!selected) {
+                std::uniform_int_distribution<size_t> dist(0, candidates.size() - 1U);
+                selected = &candidates[dist(rng)];
+            }
+
+            MasstreeNamespaceManifest template_manifest = selected->template_manifest;
+            if (!EnsureTemplateQueryPathSource(&template_manifest, request->path_list_file(), &last_error)) {
+                continue;
+            }
+
+            std::string relative_file_path;
+            if (!PickRandomNonEmptyLineFromFile(template_manifest.query_path_source_path,
+                                                &relative_file_path,
+                                                &last_error)) {
+                continue;
+            }
+
+            const uint64_t repeat_count =
+                selected->route_manifest.template_repeat_count != 0
+                    ? selected->route_manifest.template_repeat_count
+                    : template_manifest.template_repeat_count;
+            const std::string repeat_dir_prefix =
+                !selected->route_manifest.repeat_dir_prefix.empty()
+                    ? selected->route_manifest.repeat_dir_prefix
+                    : template_manifest.repeat_dir_prefix;
+            if (repeat_count == 0 || repeat_dir_prefix.empty()) {
+                last_error = "invalid repeat_dir_prefix/template_repeat_count in namespace manifest";
+                continue;
+            }
+
+            std::uniform_int_distribution<uint64_t> repeat_dist(0, repeat_count - 1U);
+            const uint64_t repeat_index = repeat_dist(rng);
+            zb::rpc::MasstreeLookupPathSample* sample = response->add_samples();
+            sample->set_namespace_id(selected->route.namespace_id);
+            sample->set_path_prefix(selected->route.path_prefix);
+            sample->set_generation_id(selected->route.generation_id);
+            sample->set_template_id(selected->template_id);
+            sample->set_full_path(JoinLogicalMasstreePath(selected->route.path_prefix,
+                                                          RepeatDirName(repeat_dir_prefix,
+                                                                        repeat_index,
+                                                                        DecimalDigits(repeat_count - 1U)),
+                                                          relative_file_path));
+            produced = true;
+            break;
+        }
+        if (!produced) {
+            FillStatus(response->mutable_status(),
+                       zb::rpc::MDS_INTERNAL_ERROR,
+                       last_error.empty() ? "failed to build random masstree lookup path" : last_error);
+            return;
+        }
+    }
+
     FillStatus(response->mutable_status(), zb::rpc::MDS_OK, "OK");
 }
 

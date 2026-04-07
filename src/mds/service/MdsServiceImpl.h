@@ -154,6 +154,10 @@ public:
                                    const zb::rpc::GetRandomMasstreeFileAttrRequest* request,
                                    zb::rpc::GetRandomMasstreeFileAttrReply* response,
                                    google::protobuf::Closure* done) override;
+    void GetRandomMasstreeLookupPaths(google::protobuf::RpcController* cntl_base,
+                                      const zb::rpc::GetRandomMasstreeLookupPathsRequest* request,
+                                      zb::rpc::GetRandomMasstreeLookupPathsReply* response,
+                                      google::protobuf::Closure* done) override;
     void GetMasstreeClusterStats(google::protobuf::RpcController* cntl_base,
                                  const zb::rpc::GetMasstreeClusterStatsRequest* request,
                                  zb::rpc::GetMasstreeClusterStatsReply* response,

@@ -530,6 +530,24 @@ message GetRandomMasstreeFileAttrReply {
   string full_path = 8;
 }
 
+message GetRandomMasstreeLookupPathsRequest {
+  uint32 sample_count = 1;
+  string path_list_file = 2;
+}
+
+message MasstreeLookupPathSample {
+  string namespace_id = 1;
+  string path_prefix = 2;
+  string generation_id = 3;
+  string template_id = 4;
+  string full_path = 5;
+}
+
+message GetRandomMasstreeLookupPathsReply {
+  MdsStatus status = 1;
+  repeated MasstreeLookupPathSample samples = 2;
+}
+
 message GetMasstreeClusterStatsRequest {
 }
 
@@ -604,6 +622,7 @@ service MdsService {
   rpc ImportMasstreeNamespace(ImportMasstreeNamespaceRequest) returns (ImportMasstreeNamespaceReply);
   rpc GetMasstreeImportJob(GetMasstreeImportJobRequest) returns (GetMasstreeImportJobReply);
   rpc GetRandomMasstreeFileAttr(GetRandomMasstreeFileAttrRequest) returns (GetRandomMasstreeFileAttrReply);
+  rpc GetRandomMasstreeLookupPaths(GetRandomMasstreeLookupPathsRequest) returns (GetRandomMasstreeLookupPathsReply);
   rpc GetMasstreeClusterStats(GetMasstreeClusterStatsRequest) returns (GetMasstreeClusterStatsReply);
   rpc GetMasstreeNamespaceStats(GetMasstreeNamespaceStatsRequest) returns (GetMasstreeNamespaceStatsReply);
 }

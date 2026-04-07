@@ -93,6 +93,10 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
             parsed.layout_version = static_cast<uint32_t>(parsed_value);
         } else if (key == "source_mode") {
             parsed.source_mode = value;
+        } else if (key == "template_id") {
+            parsed.template_id = value;
+        } else if (key == "path_list_file") {
+            parsed.path_list_file = value;
         } else if (key == "path_list_fingerprint") {
             parsed.path_list_fingerprint = value;
         } else if (key == "repeat_dir_prefix") {
@@ -123,6 +127,8 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
             parsed.allocation_summary_path = value;
         } else if (key == "optical_layout_path") {
             parsed.optical_layout_path = value;
+        } else if (key == "query_path_source_path") {
+            parsed.query_path_source_path = value;
         } else if (key == "root_inode_id") {
             if (!ParseU64Field(value, &parsed.root_inode_id)) {
                 if (error) {
@@ -281,6 +287,13 @@ bool MasstreeNamespaceManifest::LoadFromFile(const std::string& manifest_path,
             if (!ParseU64Field(value, &parsed.avg_file_size_bytes)) {
                 if (error) {
                     *error = "invalid avg_file_size_bytes in masstree namespace manifest: " + manifest_path;
+                }
+                return false;
+            }
+        } else if (key == "query_path_source_count") {
+            if (!ParseU64Field(value, &parsed.query_path_source_count)) {
+                if (error) {
+                    *error = "invalid query_path_source_count in masstree namespace manifest: " + manifest_path;
                 }
                 return false;
             }
@@ -446,6 +459,8 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     out << "layout_version=" << layout_version << "\n";
     out << "namespace_id=" << namespace_id << "\n";
     out << "source_mode=" << source_mode << "\n";
+    out << "template_id=" << template_id << "\n";
+    out << "path_list_file=" << path_list_file << "\n";
     out << "path_list_fingerprint=" << path_list_fingerprint << "\n";
     out << "repeat_dir_prefix=" << repeat_dir_prefix << "\n";
     out << "path_prefix=" << path_prefix << "\n";
@@ -461,6 +476,7 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     out << "cluster_stats_path=" << cluster_stats_path << "\n";
     out << "allocation_summary_path=" << allocation_summary_path << "\n";
     out << "optical_layout_path=" << optical_layout_path << "\n";
+    out << "query_path_source_path=" << query_path_source_path << "\n";
     out << "root_inode_id=" << root_inode_id << "\n";
     out << "inode_min=" << inode_min << "\n";
     out << "inode_max=" << inode_max << "\n";
@@ -484,6 +500,7 @@ bool MasstreeNamespaceManifest::SaveToFile(const std::string& manifest_path, std
     out << "min_file_size_bytes=" << min_file_size_bytes << "\n";
     out << "max_file_size_bytes=" << max_file_size_bytes << "\n";
     out << "avg_file_size_bytes=" << avg_file_size_bytes << "\n";
+    out << "query_path_source_count=" << query_path_source_count << "\n";
     out << "total_file_bytes=" << total_file_bytes << "\n";
     out << "start_global_image_id=" << start_global_image_id << "\n";
     out << "end_global_image_id=" << end_global_image_id << "\n";

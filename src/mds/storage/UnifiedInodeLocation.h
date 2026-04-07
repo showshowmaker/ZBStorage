@@ -155,13 +155,14 @@ inline void ApplyOpticalLocationToAttr(const zb::rpc::OpticalFileLocation& locat
 
 inline bool PopulateDiskFileLocationFromInodeAttr(const zb::rpc::InodeAttr& attr,
                                                   zb::rpc::DiskFileLocation* location) {
-    if (!location ||
-        attr.storage_tier() != zb::rpc::INODE_STORAGE_DISK ||
-        attr.disk_node_id() == 0) {
+    if (!location || attr.storage_tier() != zb::rpc::INODE_STORAGE_DISK) {
+        return false;
+    }
+    const bool is_virtual = attr.disk_node_is_virtual();
+    if (!is_virtual && attr.disk_node_id() == 0) {
         return false;
     }
     location->Clear();
-    const bool is_virtual = attr.disk_node_is_virtual();
     location->set_node_id(is_virtual ? FormatVirtualNodeId(attr.disk_node_id())
                                      : FormatRealNodeId(attr.disk_node_id()));
     location->set_disk_id(FormatDiskIdForTier(attr.disk_id(), is_virtual));
@@ -251,12 +252,13 @@ inline void ApplyOpticalLocationToUnifiedRecord(const zb::rpc::OpticalFileLocati
 
 inline bool PopulateDiskFileLocationFromUnifiedRecord(const UnifiedInodeRecord& record,
                                                       zb::rpc::DiskFileLocation* location) {
-    if (!location ||
-        record.storage_tier != static_cast<uint8_t>(UnifiedStorageTier::kDisk) ||
-        record.disk_node_id == 0) {
+    if (!location || record.storage_tier != static_cast<uint8_t>(UnifiedStorageTier::kDisk)) {
         return false;
     }
     const bool is_virtual = (record.flags & kUnifiedFlagVirtualDiskNode) != 0;
+    if (!is_virtual && record.disk_node_id == 0) {
+        return false;
+    }
     location->Clear();
     location->set_node_id(is_virtual ? FormatVirtualNodeId(record.disk_node_id)
                                      : FormatRealNodeId(record.disk_node_id));

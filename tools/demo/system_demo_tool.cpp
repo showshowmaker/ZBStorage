@@ -996,6 +996,21 @@ public:
         return !cntl.Failed() && reply.status().code() == zb::rpc::MDS_OK;
     }
 
+    bool GetRandomMasstreeLookupPaths(const zb::rpc::GetRandomMasstreeLookupPathsRequest& request,
+                                      zb::rpc::GetRandomMasstreeLookupPathsReply* reply_out) {
+        zb::rpc::GetRandomMasstreeLookupPathsReply reply;
+        brpc::Controller cntl;
+        stub_.GetRandomMasstreeLookupPaths(&cntl, &request, &reply, nullptr);
+        if (cntl.Failed()) {
+            reply.mutable_status()->set_code(zb::rpc::MDS_INTERNAL_ERROR);
+            reply.mutable_status()->set_message(cntl.ErrorText());
+        }
+        if (reply_out) {
+            *reply_out = reply;
+        }
+        return !cntl.Failed() && reply.status().code() == zb::rpc::MDS_OK;
+    }
+
     bool GetMasstreeClusterStats(zb::rpc::GetMasstreeClusterStatsReply* reply_out) {
         zb::rpc::GetMasstreeClusterStatsRequest request;
         zb::rpc::GetMasstreeClusterStatsReply reply;
@@ -1284,7 +1299,31 @@ private:
         actions_.push_back({"5",
                             "TC-P4 Masstree 导入",
                             "执行 Masstree namespace 批量导入",
-	                            "5 namespace=<id> generation=<id> template_id=<id> [template_mode=<mode>] [key=value ...]",
+                            "5 namespace=<id> generation=<id> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
+                            {"import", "p4"}});
+        actions_.push_back({"10",
+                            "TC-P4A Masstree 模板生成",
+                            "根据 txt 路径文件生成 Masstree 模板",
+                            "10 template_id=<id> path_list_file=<path> [repeat_dir_prefix=<prefix>] [key=value ...]",
+                            {"template", "template_generate", "p4a"}});
+        actions_.push_back({"6",
+                            "TC-P5 Masstree 查询",
+                            "执行随机元数据查询并输出统计",
+                            "6 [n=<count>] [query_mode=random_path_lookup|random_inode]",
+                            {"query", "p5"}});
+        actions_.push_back({"7", "执行完整测试集", "按顺序执行健康检查、P1、P2、P3、P4、P5", "7", {"all"}});
+        actions_.push_back({"8", "查看上次结果", "重新展示最近一次测试结果", "8", {"last"}});
+        actions_.push_back({"9", "帮助", "显示菜单和参数示例", "9", {"help", "h"}});
+        actions_.push_back({"0", "退出", "退出测试控制台", "0", {"quit", "exit", "q"}});
+        return;
+        actions_.push_back({"1", "环境健康检查", "检查 MDS、Scheduler 与 tier 根目录", "1", {"health"}});
+        actions_.push_back({"2", "TC-P1 全局统计", "执行节点、容量、文件和元数据统计", "2 [key=value ...]", {"stats", "p1"}});
+        actions_.push_back({"3", "TC-P2 真实节点读写", "向真实节点路径写入并回读测试文件", "3 [dir=<real_dir>]", {"real", "p2"}});
+        actions_.push_back({"4", "TC-P3 虚拟节点读写", "向虚拟节点路径写入并回读测试文件", "4 [dir=<virtual_dir>]", {"virtual", "p3"}});
+        actions_.push_back({"5",
+                            "TC-P4 Masstree 导入",
+                            "执行 Masstree namespace 批量导入",
+	                            "5 namespace=<id> generation=<id> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
                             {"import", "p4"}});
         actions_.push_back({"10",
                             "TC-P4A Masstree 妯℃澘鐢熸垚",
@@ -1396,7 +1435,8 @@ private:
         out << "\n示例:\n";
         out << "  2 tc_p1_expected_real_node_count=1 tc_p1_expected_virtual_node_count=99\n";
 	        out << "  10 template_id=template-pathlist-100m path_list_file=examples/masstree_path_list_sample.txt repeat_dir_prefix=copy\n";
-	        out << "  5 namespace=demo-ns generation=gen-report-001 template_id=template-pathlist-100m template_mode=page_fast\n";
+	        out << "  5 namespace=demo-ns generation=gen-report-001 template_mode=page_fast\n";
+	        out << "  5 namespace=demo-ns generation=gen-report-002 template_id=template-pathlist-100m template_mode=page_fast\n";
         out << "  6 n=1\n";
         out << "  6 n=1000 query_mode=random_path_lookup log_file=logs/p5_run.log\n";
         out << "  6 n=1000 query_mode=random_inode log_file=logs/p5_inode_run.log\n";
@@ -1594,6 +1634,8 @@ private:
         if (should_exit) {
             *should_exit = false;
         }
+        current_command_has_template_id_ =
+            command.args.count("template_id") != 0 || command.args.count("masstree_template_id") != 0;
         const zb::demo::MenuActionSpec* action = zb::demo::FindAction(actions_, command.action);
         if (!action) {
             return BuildInfoResult("未知命令", false, "不支持的序号或命令: " + command.action, "9");
@@ -2160,16 +2202,16 @@ private:
             return false;
         }
 
-        if (FLAGS_masstree_template_id.empty()) {
-            std::cerr << "template_id is required for template import\n";
-            return false;
-        }
+        const std::string selected_template_id =
+            current_command_has_template_id_ ? FLAGS_masstree_template_id
+                                             : (FLAGS_scenario != "interactive" ? FLAGS_masstree_template_id
+                                                                                 : std::string());
 
         zb::rpc::ImportMasstreeNamespaceRequest request;
 	        request.set_namespace_id(namespace_id);
 	        request.set_generation_id(generation_id);
 	        request.set_path_prefix(path_prefix);
-	        request.set_template_id(FLAGS_masstree_template_id);
+	        request.set_template_id(selected_template_id);
 	        request.set_template_mode(FLAGS_masstree_template_mode);
         request.set_verify_inode_samples(FLAGS_masstree_verify_inode_samples);
         request.set_verify_dentry_samples(FLAGS_masstree_verify_dentry_samples);
@@ -2186,8 +2228,8 @@ private:
         std::cout << "namespace_id=" << namespace_id << '\n';
         std::cout << "generation_id=" << generation_id << '\n';
         std::cout << "path_prefix=" << path_prefix << '\n';
-	        if (!FLAGS_masstree_template_id.empty()) {
-	            std::cout << "template_id=" << FLAGS_masstree_template_id << '\n';
+	        if (!selected_template_id.empty()) {
+	            std::cout << "template_id=" << selected_template_id << '\n';
 	        }
 	        if (!FLAGS_masstree_template_mode.empty()) {
 	            std::cout << "template_mode=" << FLAGS_masstree_template_mode << '\n';
@@ -2198,6 +2240,7 @@ private:
         zb::rpc::MasstreeImportJobState last_state = zb::rpc::MASSTREE_IMPORT_JOB_PENDING;
         bool has_last_state = false;
         uint64_t last_printed_elapsed_bucket = std::numeric_limits<uint64_t>::max();
+        bool printed_selected_template_id = !selected_template_id.empty();
 
         while (true) {
             zb::rpc::GetMasstreeImportJobReply job_reply;
@@ -2215,6 +2258,10 @@ private:
                 std::chrono::steady_clock::now() - poll_started_at);
             const uint64_t elapsed_seconds = static_cast<uint64_t>(elapsed.count());
             const uint64_t elapsed_bucket = elapsed_seconds / 10ULL;
+            if (!printed_selected_template_id && !job.template_id().empty()) {
+                std::cout << "template_id=" << job.template_id() << '\n';
+                printed_selected_template_id = true;
+            }
             if (!has_last_state || job.state() != last_state || elapsed_bucket != last_printed_elapsed_bucket) {
                 std::cout << "job_status=" << MasstreeJobStateName(job.state())
                           << " elapsed=" << FormatDurationSeconds(elapsed_seconds) << '\n';
@@ -2592,23 +2639,36 @@ private:
         uint64_t total_latency_us = 0;
         uint64_t min_latency_us = std::numeric_limits<uint64_t>::max();
         uint64_t max_latency_us = 0;
+        zb::rpc::GetRandomMasstreeLookupPathsReply path_reply;
+        if (query_mode == "random_path_lookup") {
+            zb::rpc::GetRandomMasstreeLookupPathsRequest path_request;
+            path_request.set_sample_count(sample_count);
+            if (!FLAGS_masstree_path_list_file.empty()) {
+                path_request.set_path_list_file(FLAGS_masstree_path_list_file);
+            }
+            mds_.GetRandomMasstreeLookupPaths(path_request, &path_reply);
+        }
 
         for (uint32_t i = 0; i < sample_count; ++i) {
             QuerySample sample;
             sample.index = i + 1;
             if (query_mode == "random_path_lookup") {
-                LocalMasstreeNamespaceManifest manifest;
-                std::string relative_file_path;
-                if (!BuildRandomLookupPath(&sample.full_path, &relative_file_path, &manifest, &sample.error_message)) {
+                if (path_reply.status().code() != zb::rpc::MDS_OK) {
                     sample.ok = false;
-                    sample.status.set_code(zb::rpc::MDS_INVALID_ARGUMENT);
-                    sample.status.set_message(sample.error_message);
+                    sample.status = path_reply.status();
+                    sample.error_message = path_reply.status().message();
+                } else if (i >= static_cast<uint32_t>(path_reply.samples_size())) {
+                    sample.ok = false;
+                    sample.status.set_code(zb::rpc::MDS_INTERNAL_ERROR);
+                    sample.status.set_message("random path sampler returned fewer paths than requested");
+                    sample.error_message = sample.status.message();
                 } else {
-                    sample.file_name = PathBaseName(relative_file_path);
-                    sample.namespace_id = manifest.namespace_id.empty() ? last_masstree_namespace_id_ : manifest.namespace_id;
-                    sample.path_prefix = manifest.path_prefix.empty() ? last_masstree_path_prefix_ : manifest.path_prefix;
-                    sample.generation_id =
-                        manifest.generation_id.empty() ? last_masstree_generation_id_ : manifest.generation_id;
+                    const auto& path_sample = path_reply.samples(static_cast<int>(i));
+                    sample.full_path = path_sample.full_path();
+                    sample.file_name = PathBaseName(sample.full_path);
+                    sample.namespace_id = path_sample.namespace_id();
+                    sample.path_prefix = path_sample.path_prefix();
+                    sample.generation_id = path_sample.generation_id();
                     const auto started_at = std::chrono::steady_clock::now();
                     sample.ok = mds_.Lookup(sample.full_path, &sample.attr, &sample.status);
                     sample.latency_us = static_cast<uint64_t>(
@@ -2879,6 +2939,7 @@ private:
     std::string last_masstree_generation_id_;
     std::string last_masstree_path_prefix_;
     std::string last_masstree_manifest_path_;
+    bool current_command_has_template_id_{false};
     std::optional<zb::demo::DemoRunResult> last_result_;
 };
 

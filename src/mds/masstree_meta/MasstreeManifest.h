@@ -11,6 +11,8 @@ struct MasstreeNamespaceManifest {
     std::string path_prefix;
     std::string generation_id;
     std::string source_mode;
+    std::string template_id;
+    std::string path_list_file;
     std::string path_list_fingerprint;
     std::string repeat_dir_prefix;
     std::string manifest_path;
@@ -25,6 +27,7 @@ struct MasstreeNamespaceManifest {
     std::string cluster_stats_path;
     std::string allocation_summary_path;
     std::string optical_layout_path;
+    std::string query_path_source_path;
     uint64_t page_size_bytes{0};
     uint64_t root_inode_id{0};
     uint64_t inode_min{0};
@@ -48,6 +51,7 @@ struct MasstreeNamespaceManifest {
     uint64_t min_file_size_bytes{0};
     uint64_t max_file_size_bytes{0};
     uint64_t avg_file_size_bytes{0};
+    uint64_t query_path_source_count{0};
     std::string total_file_bytes;
     uint64_t start_global_image_id{0};
     uint64_t end_global_image_id{0};

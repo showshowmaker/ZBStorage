@@ -1248,6 +1248,8 @@ bool MasstreeBulkMetaGenerator::Generate(const Request& request,
     manifest.path_prefix = normalized_path_prefix;
     manifest.generation_id = request.generation_id;
     manifest.source_mode = source_mode;
+    manifest.template_id = request.namespace_id;
+    manifest.path_list_file = request.path_list_file;
     manifest.path_list_fingerprint = path_list_fingerprint;
     manifest.repeat_dir_prefix = repeat_dir_prefix;
     manifest.manifest_path = manifest_path.string();
