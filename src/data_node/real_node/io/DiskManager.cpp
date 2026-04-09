@@ -4,6 +4,8 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -19,6 +21,16 @@ std::string Trim(std::string value) {
         return !std::isspace(ch);
     }).base(), value.end());
     return value;
+}
+
+std::string FormatSyntheticRealDiskId(uint32_t index, uint32_t disk_count) {
+    int width = 2;
+    if (disk_count >= 100) {
+        width = 3;
+    }
+    std::ostringstream out;
+    out << "disk-" << std::setw(width) << std::setfill('0') << (index + 1);
+    return out.str();
 }
 
 } // namespace
@@ -130,7 +142,7 @@ zb::msg::Status DiskManager::InitFromBaseDir(const std::string& base_dir,
     }
 
     for (uint32_t i = 0; i < disk_count; ++i) {
-        const std::string disk_id = "disk" + std::to_string(i);
+        const std::string disk_id = FormatSyntheticRealDiskId(i, disk_count);
         const fs::path disk_path = base / disk_id;
         fs::create_directories(disk_path, ec);
         if (ec) {
