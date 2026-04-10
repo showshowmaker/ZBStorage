@@ -470,6 +470,7 @@ struct FileInspectionResult {
     std::vector<std::string> backend_objects;
     std::string backend_mount_point;
     std::string backend_object_path;
+    std::vector<std::string> backend_object_paths;
     bool backend_object_exists{false};
     uint64_t backend_object_size_bytes{0};
     uint64_t backend_object_hash{0};
@@ -693,7 +694,18 @@ std::string ResolveRunDirFromMountPoint(const std::string& mount_point) {
     return mount.filename() == "mnt" ? mount.parent_path().string() : mount.string();
 }
 
+bool AppendFileHash(const fs::path& path, uint64_t* hash, uint64_t* size_bytes);
+
 bool ComputeFileHash(const fs::path& path, uint64_t* hash, uint64_t* size_bytes) {
+    if (!hash || !size_bytes) {
+        return false;
+    }
+    *hash = 14695981039346656037ULL;
+    *size_bytes = 0;
+    return AppendFileHash(path, hash, size_bytes);
+}
+
+bool AppendFileHash(const fs::path& path, uint64_t* hash, uint64_t* size_bytes) {
     if (!hash || !size_bytes) {
         return false;
     }
@@ -703,8 +715,8 @@ bool ComputeFileHash(const fs::path& path, uint64_t* hash, uint64_t* size_bytes)
     }
     constexpr size_t kBufferSize = 1U << 20U;
     std::vector<char> buffer(kBufferSize);
-    uint64_t local_hash = 14695981039346656037ULL;
-    uint64_t total = 0;
+    uint64_t local_hash = *hash;
+    uint64_t total = *size_bytes;
     while (input.good()) {
         input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const std::streamsize count = input.gcount();
@@ -1972,6 +1984,8 @@ private:
         std::cout << "backend_objects=" << JoinStrings(last_result.inspection.backend_objects, ", ") << std::endl;
         std::cout << "backend_mount_point=" << last_result.inspection.backend_mount_point << std::endl;
         std::cout << "backend_object_path=" << last_result.inspection.backend_object_path << std::endl;
+        std::cout << "backend_object_paths=" << JoinStrings(last_result.inspection.backend_object_paths, ", ")
+                  << std::endl;
         PrintBoolMetric("backend_object_exists", last_result.inspection.backend_object_exists);
         PrintByteMetric("backend_object_size_bytes", last_result.inspection.backend_object_size_bytes);
         std::cout << "backend_object_hash=" << FormatHex64(last_result.inspection.backend_object_hash)
@@ -2151,7 +2165,7 @@ private:
             actual_tier = "virtual";
         }
 
-        const std::string backend_object_id = BuildStableObjectId(attr.inode_id(), 0);
+        constexpr uint64_t kDefaultObjectUnitSize = 4ULL * 1024ULL * 1024ULL;
         std::string backend_mount_point;
         if (!disk_id.empty()) {
             const fs::path run_dir = ResolveRunDirFromMountPoint(FLAGS_mount_point);
@@ -2162,48 +2176,51 @@ private:
             }
         }
         std::string backend_object_path;
+        std::vector<std::string> backend_object_paths;
         bool backend_object_exists = false;
         uint64_t backend_object_size_bytes = 0;
         uint64_t backend_object_hash = 0;
         std::vector<std::string> backend_dir_excerpt;
         std::vector<std::string> backend_objects;
         if (!backend_mount_point.empty()) {
-            const std::string prefix = BuildObjectPrefix(backend_object_id);
-            const fs::path object_dir = fs::path(backend_mount_point) / prefix.substr(0, 2) / prefix.substr(2, 2);
-            const fs::path object_path = object_dir / backend_object_id;
-            backend_object_path = object_path.string();
-            backend_objects.push_back(backend_object_id);
-            std::error_code ec;
-            backend_object_exists = fs::exists(object_path, ec);
-            if (!ec && backend_object_exists) {
-                (void)ComputeFileHash(object_path, &backend_object_hash, &backend_object_size_bytes);
-                backend_dir_excerpt = BuildDirectoryExcerpt(object_dir);
+            const uint64_t object_count =
+                attr.size() == 0 ? 0 : ((attr.size() - 1U) / kDefaultObjectUnitSize) + 1U;
+            backend_object_hash = 14695981039346656037ULL;
+            backend_object_exists = object_count > 0;
+            for (uint64_t index = 0; index < object_count; ++index) {
+                const std::string object_id = BuildStableObjectId(attr.inode_id(), static_cast<uint32_t>(index));
+                const std::string prefix = BuildObjectPrefix(object_id);
+                const fs::path object_dir = fs::path(backend_mount_point) / prefix.substr(0, 2) / prefix.substr(2, 2);
+                const fs::path object_path = object_dir / object_id;
+                if (index == 0) {
+                    backend_object_path = object_path.string();
+                    backend_dir_excerpt = BuildDirectoryExcerpt(object_dir);
+                }
+                backend_objects.push_back(object_id);
+                backend_object_paths.push_back(object_path.string());
+                std::error_code ec;
+                const bool exists = fs::exists(object_path, ec);
+                if (ec || !exists) {
+                    backend_object_exists = false;
+                    continue;
+                }
+                if (!AppendFileHash(object_path, &backend_object_hash, &backend_object_size_bytes)) {
+                    backend_object_exists = false;
+                }
             }
         }
 
-        std::cout << "inode_id=" << attr.inode_id() << std::endl;
-        std::cout << "size_bytes=" << attr.size() << " (" << FormatBytes(attr.size()) << ")" << std::endl;
-        std::cout << "node_id=" << node_id << std::endl;
-        std::cout << "disk_id=" << disk_id << std::endl;
-        std::cout << "actual_tier=" << DisplayTierName(actual_tier) << std::endl;
-        std::cout << "backend_object_id=" << backend_object_id << std::endl;
-        std::cout << "backend_objects=" << JoinStrings(backend_objects, ", ") << std::endl;
-        std::cout << "backend_mount_point=" << backend_mount_point << std::endl;
-        std::cout << "backend_object_path=" << backend_object_path << std::endl;
-        PrintBoolMetric("backend_object_exists", backend_object_exists);
-        PrintByteMetric("backend_object_size_bytes", backend_object_size_bytes);
-        std::cout << "backend_object_hash=" << FormatHex64(backend_object_hash) << std::endl;
-        std::cout << "backend_dir_excerpt=" << JoinStrings(backend_dir_excerpt, ", ") << std::endl;
         if (out) {
             out->inode_id = attr.inode_id();
             out->size_bytes = attr.size();
             out->node_id = node_id;
             out->disk_id = disk_id;
             out->actual_tier = actual_tier;
-            out->backend_object_id = backend_object_id;
+            out->backend_object_id = backend_objects.empty() ? std::string() : backend_objects.front();
             out->backend_objects = backend_objects;
             out->backend_mount_point = backend_mount_point;
             out->backend_object_path = backend_object_path;
+            out->backend_object_paths = backend_object_paths;
             out->backend_object_exists = backend_object_exists;
             out->backend_object_size_bytes = backend_object_size_bytes;
             out->backend_object_hash = backend_object_hash;
