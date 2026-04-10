@@ -1,4 +1,4 @@
-#include <brpc/channel.h>
+﻿#include <brpc/channel.h>
 #include <brpc/controller.h>
 #include <gflags/gflags.h>
 
@@ -466,6 +466,14 @@ struct FileInspectionResult {
     std::string node_id;
     std::string disk_id;
     std::string actual_tier{"unknown"};
+    std::string backend_object_id;
+    std::vector<std::string> backend_objects;
+    std::string backend_mount_point;
+    std::string backend_object_path;
+    bool backend_object_exists{false};
+    uint64_t backend_object_size_bytes{0};
+    uint64_t backend_object_hash{0};
+    std::vector<std::string> backend_dir_excerpt;
 };
 
 struct TierIoIterationResult {
@@ -502,6 +510,17 @@ std::string PromptLine(const std::string& label) {
     std::string input;
     std::getline(std::cin, input);
     return input;
+}
+
+std::string JoinStrings(const std::vector<std::string>& values, const std::string& separator) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            oss << separator;
+        }
+        oss << values[i];
+    }
+    return oss.str();
 }
 
 void CollectTierStats(const std::vector<zb::rpc::NodeView>& nodes, TierStats* real_stats, TierStats* virtual_stats) {
@@ -646,6 +665,77 @@ std::string FormatHex64(uint64_t value) {
     std::ostringstream oss;
     oss << "0x" << std::hex << std::setw(16) << std::setfill('0') << std::nouppercase << value;
     return oss.str();
+}
+
+std::string BuildStableObjectId(uint64_t inode_id, uint32_t object_index) {
+    return "obj-" + std::to_string(inode_id) + "-" + std::to_string(object_index);
+}
+
+std::string BuildObjectPrefix(const std::string& object_id) {
+    std::string prefix;
+    prefix.reserve(4);
+    for (char ch : object_id) {
+        if (prefix.size() >= 4) {
+            break;
+        }
+        if ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+            prefix.push_back((ch >= 'A' && ch <= 'F') ? static_cast<char>(ch - 'A' + 'a') : ch);
+        }
+    }
+    while (prefix.size() < 4) {
+        prefix.push_back('0');
+    }
+    return prefix;
+}
+
+std::string ResolveRunDirFromMountPoint(const std::string& mount_point) {
+    fs::path mount(mount_point);
+    return mount.filename() == "mnt" ? mount.parent_path().string() : mount.string();
+}
+
+bool ComputeFileHash(const fs::path& path, uint64_t* hash, uint64_t* size_bytes) {
+    if (!hash || !size_bytes) {
+        return false;
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return false;
+    }
+    constexpr size_t kBufferSize = 1U << 20U;
+    std::vector<char> buffer(kBufferSize);
+    uint64_t local_hash = 14695981039346656037ULL;
+    uint64_t total = 0;
+    while (input.good()) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize count = input.gcount();
+        if (count <= 0) {
+            break;
+        }
+        local_hash = Fnv1a64Append(local_hash, buffer.data(), static_cast<size_t>(count));
+        total += static_cast<uint64_t>(count);
+    }
+    *hash = local_hash;
+    *size_bytes = total;
+    return true;
+}
+
+std::vector<std::string> BuildDirectoryExcerpt(const fs::path& dir, size_t limit = 8) {
+    std::vector<std::string> entries;
+    std::error_code ec;
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
+        return entries;
+    }
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (ec) {
+            break;
+        }
+        entries.push_back(entry.path().filename().string());
+    }
+    std::sort(entries.begin(), entries.end());
+    if (entries.size() > limit) {
+        entries.resize(limit);
+    }
+    return entries;
 }
 
 std::string FormatDouble(double value, int precision = 2) {
@@ -1149,11 +1239,11 @@ public:
             return RunInteractiveV2();
         }
         if (scenario == "health") {
-            return RunScenarioCommand("health", "环境健康检查", "环境健康检查通过", "环境健康检查失败",
+            return RunScenarioCommand("health", "\u73af\u5883\u5065\u5eb7\u68c0\u67e5", "\u73af\u5883\u5065\u5eb7\u68c0\u67e5\u901a\u8fc7", "\u73af\u5883\u5065\u5eb7\u68c0\u67e5\u5931\u8d25",
                                       [&]() { return RunHealthCheck(); });
         }
         if (scenario == "stats") {
-            return RunScenarioCommand("stats", "TC-P1 全局统计", "TC-P1 全局统计通过", "TC-P1 全局统计失败",
+            return RunScenarioCommand("stats", "TC-P1 \u5168\u5c40\u7edf\u8ba1", "TC-P1 \u5168\u5c40\u7edf\u8ba1\u901a\u8fc7", "TC-P1 \u5168\u5c40\u7edf\u8ba1\u5931\u8d25",
                                       [&]() { return RunStatsScenario(); });
         }
         if (scenario == "posix") {
@@ -1169,23 +1259,23 @@ public:
         }
         if (scenario == "masstree_import") {
             return RunScenarioCommand("masstree_import",
-                                      "TC-P4 Masstree 导入",
-                                      "Masstree 导入完成",
-                                      "Masstree 导入失败",
+                                      "TC-P4 Masstree \u5bfc\u5165",
+                                      "Masstree \u5bfc\u5165\u5b8c\u6210",
+                                      "Masstree \u5bfc\u5165\u5931\u8d25",
                                       [&]() { return RunMasstreeImportDemo(); });
         }
         if (scenario == "masstree_template") {
             return RunScenarioCommand("masstree_template",
-                                      "TC-P4A Masstree 模板生成",
-                                      "Masstree 模板生成完成",
-                                      "Masstree 模板生成失败",
+                                      "TC-P4A Masstree \u6a21\u677f\u751f\u6210",
+                                      "Masstree \u6a21\u677f\u751f\u6210\u5b8c\u6210",
+                                      "Masstree \u6a21\u677f\u751f\u6210\u5931\u8d25",
                                       [&]() { return RunMasstreeTemplateGenerateDemo(); });
         }
         if (scenario == "masstree_query") {
             return RunScenarioCommand("masstree_query",
-                                      "TC-P5 Masstree 查询",
-                                      "Masstree 查询完成",
-                                      "Masstree 查询失败",
+                                      "TC-P5 Masstree \u67e5\u8be2",
+                                      "Masstree \u67e5\u8be2\u5b8c\u6210",
+                                      "Masstree \u67e5\u8be2\u5931\u8d25",
                                       [&]() { return RunMasstreeQueryDemo(); });
         }
         if (scenario == "all") {
@@ -1217,7 +1307,7 @@ private:
     }
 
     bool RunHealthCheck() {
-        PrintSection("环境健康检查");
+        PrintSection("\u73af\u5883\u5065\u5eb7\u68c0\u67e5");
         zb::rpc::InodeAttr attr;
         zb::rpc::MdsStatus status;
         if (!mds_.Lookup("/", &attr, &status)) {
@@ -1249,7 +1339,7 @@ private:
     }
 
     bool RunStatsScenario() {
-        PrintSection("TC-P1 全局统计");
+        PrintSection("TC-P1 \u5168\u5c40\u7edf\u8ba1");
         if (!RefreshClusterView()) {
             return false;
         }
@@ -1309,26 +1399,26 @@ private:
         if (!actions_.empty()) {
             return;
         }
-        actions_.push_back({"0", "环境健康检查", "检查 MDS、Scheduler 和各层根目录", "0", {"health"}});
-        actions_.push_back({"1", "TC-P1 全局统计", "统计节点、容量、文件与元数据信息", "1 [key=value ...]", {"stats", "p1"}});
-        actions_.push_back({"2", "TC-P2 真实节点读写", "向真实层写入并回读测试文件", "2 [dir=<real_dir>]", {"real", "p2"}});
-        actions_.push_back({"3", "TC-P3 虚拟节点读写", "向虚拟层写入并回读测试文件", "3 [dir=<virtual_dir>]", {"virtual", "p3"}});
+        actions_.push_back({"0", "\u73af\u5883\u5065\u5eb7\u68c0\u67e5", "\u68c0\u67e5 MDS\u3001Scheduler \u548c\u5404\u5c42\u6839\u76ee\u5f55", "0", {"health"}});
+        actions_.push_back({"1", "TC-P1 \u5168\u5c40\u7edf\u8ba1", "\u7edf\u8ba1\u8282\u70b9\u3001\u5bb9\u91cf\u3001\u6587\u4ef6\u4e0e\u5143\u6570\u636e", "1 [key=value ...]", {"stats", "p1"}});
+        actions_.push_back({"2", "TC-P2 \u771f\u5b9e\u8282\u70b9\u8bfb\u5199", "\u5411\u771f\u5b9e\u5c42\u5199\u5165\u5e76\u56de\u8bfb\u6d4b\u8bd5\u6587\u4ef6", "2 [dir=<real_dir>]", {"real", "p2"}});
+        actions_.push_back({"3", "TC-P3 \u865a\u62df\u8282\u70b9\u8bfb\u5199", "\u5411\u865a\u62df\u5c42\u5199\u5165\u5e76\u56de\u8bfb\u6d4b\u8bd5\u6587\u4ef6", "3 [dir=<virtual_dir>]", {"virtual", "p3"}});
         actions_.push_back({"4",
-                            "TC-P4 Masstree 导入",
-                            "基于模板导入一个 Masstree 命名空间",
+                            "TC-P4 Masstree \u5bfc\u5165",
+                            "\u57fa\u4e8e\u6a21\u677f\u5bfc\u5165\u4e00\u4e2a Masstree \u547d\u540d\u7a7a\u95f4",
                             "4 namespace=<id> generation=<id> [template_id=<id>] [template_mode=<mode>] [key=value ...]",
                             {"import", "p4"}});
         actions_.push_back({"10",
-                            "TC-P4A Masstree 模板生成",
-                            "根据 txt 路径文件生成 Masstree 模板",
+                            "TC-P4A Masstree \u6a21\u677f\u751f\u6210",
+                            "\u6839\u636e txt \u8def\u5f84\u6587\u4ef6\u751f\u6210 Masstree \u6a21\u677f",
                             "10 template_id=<id> path_list_file=<path> [repeat_dir_prefix=<prefix>] [key=value ...]",
                             {"template", "template_generate", "p4a"}});
         actions_.push_back({"5",
-                            "TC-P5 Masstree 查询",
-                            "执行随机元数据查询并输出时延统计",
+                            "TC-P5 Masstree \u67e5\u8be2",
+                            "\u6267\u884c\u968f\u673a\u5143\u6570\u636e\u67e5\u8be2\u5e76\u8f93\u51fa\u65f6\u5ef6\u7edf\u8ba1",
                             "5 [n=<count>] [query_mode=random_path_lookup|random_inode]",
                             {"query", "p5"}});
-        actions_.push_back({"q", "退出", "退出演示控制台", "q", {"退出", "exit"}});
+        actions_.push_back({"q", "\u9000\u51fa", "\u9000\u51fa\u6f14\u793a\u63a7\u5236\u53f0", "q", {"\u9000\u51fa", "exit"}});
     }
 
     zb::demo::DemoRunResult ExecuteInteractiveCommandV2(const zb::demo::ParsedCommand& command, bool* should_exit) {
@@ -1339,10 +1429,10 @@ private:
             command.args.count("template_id") != 0 || command.args.count("masstree_template_id") != 0;
         const zb::demo::MenuActionSpec* action = zb::demo::FindAction(actions_, command.action);
         if (!action) {
-            return BuildInfoResult("未知命令",
+            return BuildInfoResult("\u672a\u77e5\u547d\u4ee4",
                                    false,
-                                   "不支持的操作: " + command.action,
-                                   "请输入 0、1、2、3、4、5、10 或 q");
+                                   "\u4e0d\u652f\u6301\u7684\u64cd\u4f5c: " + command.action,
+                                   "\u8bf7\u8f93\u5165 0\u30011\u30012\u30013\u30014\u30015\u300110 \u6216 q");
         }
         if (action->id == "q") {
             if (should_exit) {
@@ -1359,66 +1449,66 @@ private:
         if (action->id == "0") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "环境健康检查通过",
-                                         "环境健康检查失败",
+                                         "\u73af\u5883\u5065\u5eb7\u68c0\u67e5\u901a\u8fc7",
+                                         "\u73af\u5883\u5065\u5eb7\u68c0\u67e5\u5931\u8d25",
                                          [&]() { return RunHealthCheck(); });
         }
         if (action->id == "1") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "TC-P1 全局统计通过",
-                                         "TC-P1 全局统计失败",
+                                         "TC-P1 \u5168\u5c40\u7edf\u8ba1\u901a\u8fc7",
+                                         "TC-P1 \u5168\u5c40\u7edf\u8ba1\u5931\u8d25",
                                          [&]() { return RunStatsScenario(); });
         }
         if (action->id == "2") {
             const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_real_dir;
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "真实层读写通过",
-                                         "真实层读写失败",
+                                         "\u771f\u5b9e\u5c42\u8bfb\u5199\u901a\u8fc7",
+                                         "\u771f\u5b9e\u5c42\u8bfb\u5199\u5931\u8d25",
                                          [&]() { return RunTierFileDemo(dir, "real", &last_real_logical_path_); });
         }
         if (action->id == "3") {
             const std::string dir = command.args.count("dir") != 0 ? command.args.at("dir") : FLAGS_virtual_dir;
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "虚拟层读写通过",
-                                         "虚拟层读写失败",
+                                         "\u865a\u62df\u5c42\u8bfb\u5199\u901a\u8fc7",
+                                         "\u865a\u62df\u5c42\u8bfb\u5199\u5931\u8d25",
                                          [&]() { return RunTierFileDemo(dir, "virtual", &last_virtual_logical_path_); });
         }
         if (action->id == "4") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree 导入完成",
-                                         "Masstree 导入失败",
+                                         "Masstree \u5bfc\u5165\u5b8c\u6210",
+                                         "Masstree \u5bfc\u5165\u5931\u8d25",
                                          [&]() { return RunMasstreeImportDemo(); });
         }
         if (action->id == "10") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree 模板生成完成",
-                                         "Masstree 模板生成失败",
+                                         "Masstree \u6a21\u677f\u751f\u6210\u5b8c\u6210",
+                                         "Masstree \u6a21\u677f\u751f\u6210\u5931\u8d25",
                                          [&]() { return RunMasstreeTemplateGenerateDemo(); });
         }
         if (action->id == "5") {
             return ExecuteCapturedAction(*action,
                                          command.raw,
-                                         "Masstree 查询完成",
-                                         "Masstree 查询失败",
+                                         "Masstree \u67e5\u8be2\u5b8c\u6210",
+                                         "Masstree \u67e5\u8be2\u5931\u8d25",
                                          [&]() { return RunMasstreeQueryDemo(); });
         }
-        return BuildInfoResult(action->title, false, "未处理的操作分发", action->usage);
+        return BuildInfoResult(action->title, false, "\u672a\u5904\u7406\u7684\u64cd\u4f5c\u5206\u53d1", action->usage);
     }
 
     int RunInteractiveV2() {
-        std::cout << "Enter an action id plus optional key=value arguments.\n";
+        std::cout << "\u8bf7\u8f93\u5165\u64cd\u4f5c\u7f16\u53f7\uff0c\u53ef\u9644\u5e26 key=value \u53c2\u6570\u3002\n";
         for (;;) {
-            zb::demo::RenderMenu("ZB Storage 演示控制台", actions_);
-            const std::string input = PromptLine("输入");
+            zb::demo::RenderMenu("ZB Storage \u6f14\u793a\u63a7\u5236\u53f0", actions_);
+            const std::string input = PromptLine("\u8f93\u5165");
             const zb::demo::ParsedCommand command = zb::demo::ParseCommandLine(input);
             if (!command.ok) {
                 zb::demo::RenderResult(
-                    BuildInfoResult("输入错误", false, command.error, "请输入 0、1、2、3、4、5、10 或 q"));
+                    BuildInfoResult("\u8f93\u5165\u9519\u8bef", false, command.error, "\u8bf7\u8f93\u5165 0\u30011\u30012\u30013\u30014\u30015\u300110 \u6216 q"));
                 continue;
             }
             bool should_exit = false;
@@ -1517,7 +1607,7 @@ private:
 
     std::string BuildHelpText() const {
         std::ostringstream out;
-        out << "菜单功能:\\n";
+        out << "鑿滃崟鍔熻兘:\\n";
         for (const auto& action : actions_) {
             out << "  " << action.id << "  " << action.title;
             if (!action.description.empty()) {
@@ -1878,6 +1968,17 @@ private:
         std::cout << "inspected_node_id=" << last_result.inspection.node_id << std::endl;
         std::cout << "inspected_disk_id=" << last_result.inspection.disk_id << std::endl;
         std::cout << "inspected_tier=" << DisplayTierName(last_result.inspection.actual_tier) << std::endl;
+        std::cout << "backend_object_id=" << last_result.inspection.backend_object_id << std::endl;
+        std::cout << "backend_objects=" << JoinStrings(last_result.inspection.backend_objects, ", ") << std::endl;
+        std::cout << "backend_mount_point=" << last_result.inspection.backend_mount_point << std::endl;
+        std::cout << "backend_object_path=" << last_result.inspection.backend_object_path << std::endl;
+        PrintBoolMetric("backend_object_exists", last_result.inspection.backend_object_exists);
+        PrintByteMetric("backend_object_size_bytes", last_result.inspection.backend_object_size_bytes);
+        std::cout << "backend_object_hash=" << FormatHex64(last_result.inspection.backend_object_hash)
+                  << std::endl;
+        std::cout << "backend_dir_excerpt="
+                  << JoinStrings(last_result.inspection.backend_dir_excerpt, ", ")
+                  << std::endl;
 
         std::vector<CheckResult> checks;
         AddCheck(&checks,
@@ -1906,6 +2007,21 @@ private:
                  last_result.inspection.actual_tier == options.expected_tier,
                  "actual=" + DisplayTierName(last_result.inspection.actual_tier) +
                      " expected=" + DisplayTierName(options.expected_tier));
+        AddCheck(&checks,
+                 "backend.object_exists",
+                 last_result.inspection.backend_object_exists,
+                 last_result.inspection.backend_object_path);
+        AddCheck(&checks,
+                 "backend.object_size",
+                 last_result.inspection.backend_object_size_bytes == options.file_size_bytes,
+                 "actual=" + std::to_string(last_result.inspection.backend_object_size_bytes) +
+                     " expected=" + std::to_string(options.file_size_bytes));
+        AddCheck(&checks,
+                 "backend.object_hash",
+                 !options.verify_hash || last_result.inspection.backend_object_hash == last_result.write_hash,
+                 options.verify_hash ? ("backend=" + FormatHex64(last_result.inspection.backend_object_hash) +
+                                        " write=" + FormatHex64(last_result.write_hash))
+                                     : "backend hash verification disabled");
 
         bool ok = true;
         for (const auto& check : checks) {
@@ -2035,17 +2151,63 @@ private:
             actual_tier = "virtual";
         }
 
+        const std::string backend_object_id = BuildStableObjectId(attr.inode_id(), 0);
+        std::string backend_mount_point;
+        if (!disk_id.empty()) {
+            const fs::path run_dir = ResolveRunDirFromMountPoint(FLAGS_mount_point);
+            if (actual_tier == "real") {
+                backend_mount_point = (run_dir / "data" / "real" / "disks" / disk_id).string();
+            } else if (actual_tier == "virtual") {
+                backend_mount_point = (run_dir / "data" / "virtual" / "mount" / disk_id).string();
+            }
+        }
+        std::string backend_object_path;
+        bool backend_object_exists = false;
+        uint64_t backend_object_size_bytes = 0;
+        uint64_t backend_object_hash = 0;
+        std::vector<std::string> backend_dir_excerpt;
+        std::vector<std::string> backend_objects;
+        if (!backend_mount_point.empty()) {
+            const std::string prefix = BuildObjectPrefix(backend_object_id);
+            const fs::path object_dir = fs::path(backend_mount_point) / prefix.substr(0, 2) / prefix.substr(2, 2);
+            const fs::path object_path = object_dir / backend_object_id;
+            backend_object_path = object_path.string();
+            backend_objects.push_back(backend_object_id);
+            std::error_code ec;
+            backend_object_exists = fs::exists(object_path, ec);
+            if (!ec && backend_object_exists) {
+                (void)ComputeFileHash(object_path, &backend_object_hash, &backend_object_size_bytes);
+                backend_dir_excerpt = BuildDirectoryExcerpt(object_dir);
+            }
+        }
+
         std::cout << "inode_id=" << attr.inode_id() << std::endl;
         std::cout << "size_bytes=" << attr.size() << " (" << FormatBytes(attr.size()) << ")" << std::endl;
         std::cout << "node_id=" << node_id << std::endl;
         std::cout << "disk_id=" << disk_id << std::endl;
         std::cout << "actual_tier=" << DisplayTierName(actual_tier) << std::endl;
+        std::cout << "backend_object_id=" << backend_object_id << std::endl;
+        std::cout << "backend_objects=" << JoinStrings(backend_objects, ", ") << std::endl;
+        std::cout << "backend_mount_point=" << backend_mount_point << std::endl;
+        std::cout << "backend_object_path=" << backend_object_path << std::endl;
+        PrintBoolMetric("backend_object_exists", backend_object_exists);
+        PrintByteMetric("backend_object_size_bytes", backend_object_size_bytes);
+        std::cout << "backend_object_hash=" << FormatHex64(backend_object_hash) << std::endl;
+        std::cout << "backend_dir_excerpt=" << JoinStrings(backend_dir_excerpt, ", ") << std::endl;
         if (out) {
             out->inode_id = attr.inode_id();
             out->size_bytes = attr.size();
             out->node_id = node_id;
             out->disk_id = disk_id;
             out->actual_tier = actual_tier;
+            out->backend_object_id = backend_object_id;
+            out->backend_objects = backend_objects;
+            out->backend_mount_point = backend_mount_point;
+            out->backend_object_path = backend_object_path;
+            out->backend_object_exists = backend_object_exists;
+            out->backend_object_size_bytes = backend_object_size_bytes;
+            out->backend_object_hash = backend_object_hash;
+            out->backend_dir_excerpt = std::move(backend_dir_excerpt);
         }
         if (!expected_tier.empty() && actual_tier != expected_tier) {
             std::cerr << "tier mismatch: expected " << DisplayTierName(expected_tier) << ", actual "
@@ -2598,7 +2760,7 @@ private:
     }
 
     bool RunMasstreeQueryDemo() {
-        PrintSection("Masstree 查询演示");
+        PrintSection("Masstree \u67e5\u8be2\u6f14\u793a");
         const std::string query_mode = [&]() {
             const std::string normalized = ToLowerCopy(TrimCopy(FLAGS_masstree_query_mode));
             return normalized.empty() ? std::string("random_path_lookup") : normalized;
@@ -2703,26 +2865,26 @@ private:
             samples.push_back(std::move(sample));
         }
 
-        std::cout << "查询样本数=" << sample_count << '\n';
-        std::cout << "查询模式=" << query_mode << '\n';
-        std::cout << "查询成功数=" << success_count << '\n';
-        std::cout << "查询失败数=" << failure_count << '\n';
-        std::cout << "查询成功率="
+        std::cout << "query_samples=" << sample_count << '\n';
+        std::cout << "query_mode=" << query_mode << '\n';
+        std::cout << "query_success_count=" << success_count << '\n';
+        std::cout << "query_failure_count=" << failure_count << '\n';
+        std::cout << "query_success_rate="
                   << FormatDouble(sample_count == 0 ? 0.0
                                                     : static_cast<double>(success_count) / static_cast<double>(sample_count),
                                   4)
                   << '\n';
-        std::cout << "总查询时延=" << FormatLatencyHuman(total_latency_us) << '\n';
-        std::cout << "平均查询时延="
+        std::cout << "total_query_latency=" << FormatLatencyHuman(total_latency_us) << '\n';
+        std::cout << "avg_query_latency="
                   << FormatLatencyHuman(sample_count == 0 ? 0 : (total_latency_us / sample_count)) << '\n';
-        std::cout << "最小时延=" << FormatLatencyHuman(sample_count == 0 ? 0 : min_latency_us) << '\n';
-        std::cout << "最大时延=" << FormatLatencyHuman(max_latency_us) << '\n';
+        std::cout << "min_query_latency=" << FormatLatencyHuman(sample_count == 0 ? 0 : min_latency_us) << '\n';
+        std::cout << "max_query_latency=" << FormatLatencyHuman(max_latency_us) << '\n';
         for (const auto& sample : samples) {
-            std::cout << "样本序号=" << sample.index << '\n';
-            std::cout << "查询成功=" << (sample.ok ? "true" : "false") << '\n';
-            std::cout << "查询时延=" << FormatLatencyHuman(sample.latency_us) << '\n';
-            std::cout << "状态码=" << static_cast<int>(sample.status.code()) << '\n';
-            std::cout << "状态信息=" << (sample.ok ? "OK" : sample.error_message) << '\n';
+            std::cout << "sample_index=" << sample.index << '\n';
+            std::cout << "query_ok=" << (sample.ok ? "true" : "false") << '\n';
+            std::cout << "query_latency=" << FormatLatencyHuman(sample.latency_us) << '\n';
+            std::cout << "status_code=" << static_cast<int>(sample.status.code()) << '\n';
+            std::cout << "status_text=" << (sample.ok ? "OK" : sample.error_message) << '\n';
             if (!sample.ok) {
                 continue;
             }
